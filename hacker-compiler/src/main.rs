@@ -1,8 +1,6 @@
-// hacker-compiler/src/main.rs - Updated Rust compiler for Hacker Lang using Cranelift.
-// Syntax: // for deps, [ ... ] for config (ignored), > for cmds, ! for comments, @var=value for vars, *num > cmd for loops.
-// Enhanced with syntax checking and verbose output.
-// Compiles to native binary with putenv for vars and system for cmds.
-// Place binary in ~/.hackeros/hacker-lang/bin/hacker-compiler.
+// main.rs - Hacker Lang compiler using Cranelift.
+// Located at ~/.hacker-lang/bin/hacker-compiler.
+// Handles updated syntax with conditionals and includes.
 
 use std::env;
 use std::fs::{self, File};
@@ -18,11 +16,23 @@ use cranelift_module::{DataContext, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use subprocess::Exec;
 
-fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>)> {
+const HACKER_DIR: &str = "~/.hacker-lang";
+
+fn expand_home(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return path.replacen("~", home.to_str().unwrap(), 1);
+        }
+    }
+    path.to_string()
+}
+
+fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>)> {
     let file = File::open(path)?;
     let mut deps = Vec::new();
     let mut vars = Vec::new();
     let mut cmds = Vec::new();
+    let mut includes = Vec::new();
     let mut errors = Vec::new();
     let mut in_config = false;
     let mut config_lines = Vec::new();
@@ -38,14 +48,14 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
         
         if line == "[" {
             if in_config {
-                errors.push(format!("Line {}: Nested config section detected", line_num));
+                errors.push(format!("Line {}: Nested config section", line_num));
             }
             in_config = true;
             config_lines = Vec::new();
             continue;
         } else if line == "]" {
             if !in_config {
-                errors.push(format!("Line {}: Closing ] without opening [", line_num));
+                errors.push(format!("Line {}: Closing ] without [", line_num));
             }
             in_config = false;
             continue;
@@ -76,14 +86,14 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
                 let var = line[1..eq_idx].trim().to_string();
                 let value = line[eq_idx + 1..].trim().to_string();
                 if var.is_empty() || value.is_empty() {
-                    errors.push(format!("Line {}: Invalid variable assignment", line_num));
+                    errors.push(format!("Line {}: Invalid variable", line_num));
                 } else {
                     vars.push((var, value));
                 }
             } else {
                 errors.push(format!("Line {}: Missing = in variable", line_num));
             }
-        } else if line.starts_with("*") {
+        } else if line.starts_with("=") {
             let parts: Vec<String> = line[1..].split('>').map(|s| s.trim().to_string()).collect();
             if parts.len() == 2 {
                 if let Ok(num) = parts[0].parse::<usize>() {
@@ -106,6 +116,40 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
             } else {
                 errors.push(format!("Line {}: Invalid loop syntax", line_num));
             }
+        } else if line.starts_with("?") {
+            let parts: Vec<String> = line[1..].split('>').map(|s| s.trim().to_string()).collect();
+            if parts.len() == 2 {
+                let condition = parts[0].clone();
+                let cmd_parts: Vec<String> = parts[1].split('!').map(|s| s.trim().to_string()).collect();
+                let cmd = cmd_parts[0].clone();
+                if condition.is_empty() || cmd.is_empty() {
+                    errors.push(format!("Line {}: Invalid conditional", line_num));
+                } else {
+                    cmds.push(format!("if {}; then {}; fi", condition, cmd));
+                }
+            } else {
+                errors.push(format!("Line {}: Invalid conditional syntax", line_num));
+            }
+        } else if line.starts_with("#") {
+            let lib = line[1..].trim().to_string();
+            if lib.is_empty() {
+                errors.push(format!("Line {}: Empty include", line_num));
+            } else {
+                let lib_path = Path::new(&expand_home(&format!("{}/libs/{}.hacker", HACKER_DIR, lib)));
+                if lib_path.exists() {
+                    includes.push(lib);
+                    let (sub_deps, sub_vars, sub_cmds, sub_includes, sub_errors) = parse_hacker_file(lib_path, verbose)?;
+                    deps.extend(sub_deps);
+                    vars.extend(sub_vars);
+                    cmds.extend(sub_cmds);
+                    includes.extend(sub_includes);
+                    for err in sub_errors {
+                        errors.push(format!("In {}: {}", lib, err));
+                    }
+                } else {
+                    errors.push(format!("Line {}: Library {} not found", line_num, lib));
+                }
+            }
         } else if line.starts_with("!") {
             // Ignore comment
         } else {
@@ -114,19 +158,20 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
     }
     
     if in_config {
-        errors.push("File ended with unclosed config section".to_string());
+        errors.push("Unclosed config section".to_string());
     }
 
     if verbose {
         println!("Parsed deps: {:?}", deps);
         println!("Parsed vars: {:?}", vars);
         println!("Parsed cmds: {:?}", cmds);
+        println!("Parsed includes: {:?}", includes);
         if !errors.is_empty() {
             println!("Errors: {:?}", errors);
         }
     }
     
-    Ok((deps, vars, cmds, errors))
+    Ok((deps, vars, cmds, includes, errors))
 }
 
 fn generate_check_cmd(dep: &str) -> String {
@@ -146,7 +191,7 @@ fn main() -> io::Result<()> {
     let input_path = Path::new(&args[1]);
     let output_path = Path::new(&args[2]);
 
-    let (mut deps, vars, mut cmds, errors) = parse_hacker_file(input_path, verbose)?;
+    let (mut deps, vars, mut cmds, _includes, errors) = parse_hacker_file(input_path, verbose)?;
     if !errors.is_empty() {
         for err in errors {
             eprintln!("{}", err);
