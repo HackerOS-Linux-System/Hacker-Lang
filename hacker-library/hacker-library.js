@@ -1,11 +1,11 @@
-// hacker-library.js - Expanded library manager in JavaScript.
-// Now supports 'list' (hardcoded libs) and 'install' (simulates download using fetch to a placeholder URL).
-// Expand in future to real repos.
-// #!/usr/bin/env node
+// hacker-library.js - Enhanced library manager in JavaScript.
+// Supports list (shows available libs), install (simulates download), update (simulates update check).
+// Uses node-fetch for HTTP requests.
+// Place in ~/.hackeros/hacker-lang/bin/hacker-library.js with shebang #!/usr/bin/env node.
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');  // Use https for downloads
+const fetch = require('node-fetch');
 
 const args = process.argv.slice(2);
 const action = args[0];
@@ -16,11 +16,14 @@ if (!fs.existsSync(libDir)) {
     fs.mkdirSync(libDir, { recursive: true });
 }
 
-const availableLibs = ['util', 'net', 'crypto'];  // Hardcoded for now
+const availableLibs = ['util', 'net', 'crypto'];
 
 if (action === 'list') {
     console.log('Available libraries:');
     availableLibs.forEach(lib => console.log(`- ${lib}`));
+    const installed = fs.existsSync(libDir) ? fs.readdirSync(libDir).filter(f => f.endsWith('.hacker')) : [];
+    console.log('\nInstalled libraries:');
+    installed.forEach(lib => console.log(`- ${lib.replace('.hacker', '')}`));
 } else if (action === 'install') {
     const libname = args[1];
     if (!libname) {
@@ -28,24 +31,33 @@ if (action === 'list') {
         process.exit(1);
     }
     if (!availableLibs.includes(libname)) {
-        console.error(`Library ${libname} not found.`);
+        console.error(`Library ${libname} not found. Available: ${availableLibs.join(', ')}`);
         process.exit(1);
     }
-    // Simulate download: fetch a placeholder file
-    const url = `https://example.com/${libname}.hacker`;  // Placeholder URL, replace with real in future
+    const url = `https://example.com/hacker-lang/${libname}.hacker`;  // Placeholder
     const filePath = path.join(libDir, `${libname}.hacker`);
-    const file = fs.createWriteStream(filePath);
-    https.get(url, response => {
-        response.pipe(file);
-        file.on('finish', () => {
-            file.close();
-            console.log(`Installed ${libname} to ${filePath}`);
+    console.log(`Installing ${libname} to ${filePath}...`);
+    fetch(url)
+        .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const file = fs.createWriteStream(filePath);
+            res.body.pipe(file);
+            file.on('finish', () => {
+                file.close();
+                console.log(`Installed ${libname}`);
+            });
+        })
+        .catch(err => {
+            console.error(`Error installing ${libname}: ${err.message}`);
+            process.exit(1);
         });
-    }).on('error', err => {
-        fs.unlink(filePath);
-        console.error(`Error installing ${libname}: ${err.message}`);
+} else if (action === 'update') {
+    console.log('Checking for library updates...');
+    availableLibs.forEach(lib => {
+        const filePath = path.join(libDir, `${lib}.hacker`);
+        console.log(`Update check for ${lib}: ${fs.existsSync(filePath) ? 'Up to date (placeholder)' : 'Not installed'}`);
     });
 } else {
-    console.error('Unknown action. Use list or install.');
+    console.error('Usage: hacker-library [list|install|update] [libname]');
     process.exit(1);
 }
