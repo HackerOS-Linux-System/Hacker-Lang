@@ -1,1 +1,15 @@
+# hacker-compiler/Cargo.toml
 
+[package]
+name = "hacker-compiler"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+cranelift = "0.109.0"
+cranelift-module = "0.109.0"
+cranelift-object = "0.109.0"
+cranelift-frontend = "0.109.0"
+cranelift-codegen = "0.109.0"
+target-lexicon = "0.12.14"
+subprocess = "0.2.9"
