@@ -6,7 +6,7 @@ HACKER_DIR = os.path.expanduser("~/.hacker-lang")
 def parse_hacker_file(file_path, verbose=False, console=None):
     if console is None:
         console = Console()
-    
+
     deps = set()
     libs = set()
     vars = {}
@@ -16,7 +16,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
     in_config = False
     config_lines = []
     line_num = 0
-    
+
     try:
         with open(file_path, 'r') as f:
             for line in f:
@@ -24,7 +24,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 if line == '[':
                     if in_config:
                         errors.append(f"Line {line_num}: Nested config section")
@@ -36,11 +36,11 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                         errors.append(f"Line {line_num}: Closing ] without [")
                     in_config = False
                     continue
-                
+
                 if in_config:
                     config_lines.append(line)
                     continue
-                
+
                 if line.startswith('//'):
                     dep = line[2:].strip()
                     if dep:
@@ -123,10 +123,10 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     pass
                 else:
                     errors.append(f"Line {line_num}: Invalid syntax")
-    
+
         if in_config:
             errors.append("Unclosed config section")
-        
+
         if verbose:
             console.print(f"[blue]System Deps: {deps}[/blue]")
             console.print(f"[blue]Custom Libs: {libs}[/blue]")
@@ -135,9 +135,10 @@ def parse_hacker_file(file_path, verbose=False, console=None):
             console.print(f"[blue]Includes: {includes}[/blue]")
             if errors:
                 console.print(f"[yellow]Errors: {errors}[/yellow]")
-    
+
         return deps, libs, vars, cmds, includes, errors
-    
+
     except FileNotFoundError:
         console.print(f"[bold red]File {file_path} not found[/bold red]")
         return set(), set(), {}, [], [], [f"File {file_path} not found"]
+
