@@ -1,1 +1,16 @@
-
+! Example Hacker Lang script
+// sudo ! For privileged commands
+// apt ! Package manager
+@USER=admin ! Set USER
+@LOG_DIR=/var/log/hacker
+=3 > echo "Run by $USER" ! Loop 3 times
+? [ -d /tmp ] > echo "Temp exists" ! Conditional
+# util ! Include util library
+> sudo apt update ! Update packages
+> mkdir -p $LOG_DIR
+> echo "Updated at $(date)" >> $LOG_DIR/update.log
+[
+Configuration
+Author: Hacker Lang User
+Purpose: System update
+]
