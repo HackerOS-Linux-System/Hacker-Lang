@@ -1,0 +1,24 @@
+{
+  "name": "hacker-library",
+  "version": "0.2.0",
+  "description": "Hacker Lang - A simple scripting language for Debian-based Linux systems",
+  "main": "hacker-library.js",
+  "bin": {
+    "hacker-library": "./hacker-library.js"
+  },
+  "scripts": {
+    "start": "node hacker-library.js",
+    "test": "echo \"No tests implemented yet\" && exit 0"
+  },
+  "keywords": [
+    "hacker-lang",
+    "scripting",
+    "linux",
+    "debian"
+  ],
+  "author": "xAI",
+  "license": "MIT",
+  "dependencies": {
+    "node-fetch": "^2.6.7"
+  }
+}
