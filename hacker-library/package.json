@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node hacker-library.js",
-    "test": "echo \"No tests implemented yet\" && exit 0"
+    "test": "echo \"No tests implemented yet\" && exit 0",
+    "build": "pkg . --targets node18-linux-x64 --output dist/hacker-library"
   },
   "keywords": [
     "hacker-lang",
@@ -20,5 +21,8 @@
   "license": "MIT",
   "dependencies": {
     "node-fetch": "^2.6.7"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.0"
   }
 }
