@@ -1,6 +1,6 @@
 {
   "name": "hacker-library",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Hacker Lang - A simple scripting language for Debian-based Linux systems",
   "main": "hacker-library.js",
   "bin": {
