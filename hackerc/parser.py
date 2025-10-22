@@ -1,22 +1,14 @@
-# parser.py - Parser for Hacker Lang syntax.
-# Handles // (deps), [ ... ] (config, ignored), > (cmds), ! (comments), @var=value (vars),
-# =num > cmd (loops), ? condition > cmd (conditionals), # libname (includes).
-
 import os
 from rich.console import Console
 
 HACKER_DIR = os.path.expanduser("~/.hacker-lang")
-
-def generate_check_cmd(dep):
-    if dep == 'sudo':
-        return ''
-    return f"command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})"
 
 def parse_hacker_file(file_path, verbose=False, console=None):
     if console is None:
         console = Console()
     
     deps = set()
+    libs = set()
     vars = {}
     cmds = []
     includes = []
@@ -54,7 +46,25 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     if dep:
                         deps.add(dep)
                     else:
-                        errors.append(f"Line {line_num}: Empty dependency")
+                        errors.append(f"Line {line_num}: Empty system dependency")
+                elif line.startswith('#'):
+                    lib = line[1:].strip()
+                    if lib:
+                        lib_path = os.path.join(HACKER_DIR, "libs", lib, "main.hacker")
+                        if os.path.exists(lib_path):
+                            includes.append(lib)
+                            sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_errors = parse_hacker_file(lib_path, verbose, console)
+                            deps.update(sub_deps)
+                            libs.update(sub_libs)
+                            vars.update(sub_vars)
+                            cmds.extend(sub_cmds)
+                            includes.extend(sub_includes)
+                            for err in sub_errors:
+                                errors.append(f"In {lib}: {err}")
+                        else:
+                            libs.add(lib)
+                    else:
+                        errors.append(f"Line {line_num}: Empty library/include")
                 elif line.startswith('>'):
                     parts = line[1:].split('!', 1)
                     cmd = parts[0].strip()
@@ -102,16 +112,13 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                             errors.append(f"Line {line_num}: Invalid conditional")
                     else:
                         errors.append(f"Line {line_num}: Invalid conditional syntax")
-                elif line.startswith('#'):
-                    lib = line[1:].strip()
-                    if lib:
-                        lib_path = os.path.join(HACKER_DIR, "libs", f"{lib}.hacker")
-                        if os.path.exists(lib_path):
-                            includes.append(lib)
-                        else:
-                            errors.append(f"Line {line_num}: Library {lib} not found")
+                elif line.startswith('&'):
+                    parts = line[1:].split('!', 1)
+                    cmd = parts[0].strip()
+                    if cmd:
+                        cmds.append(f"{cmd} &")
                     else:
-                        errors.append(f"Line {line_num}: Empty include")
+                        errors.append(f"Line {line_num}: Empty background command")
                 elif line.startswith('!'):
                     pass
                 else:
@@ -121,15 +128,16 @@ def parse_hacker_file(file_path, verbose=False, console=None):
             errors.append("Unclosed config section")
         
         if verbose:
-            console.print(f"[blue]Deps: {deps}[/blue]")
+            console.print(f"[blue]System Deps: {deps}[/blue]")
+            console.print(f"[blue]Custom Libs: {libs}[/blue]")
             console.print(f"[blue]Vars: {vars}[/blue]")
             console.print(f"[blue]Cmds: {cmds}[/blue]")
             console.print(f"[blue]Includes: {includes}[/blue]")
             if errors:
                 console.print(f"[yellow]Errors: {errors}[/yellow]")
     
-        return deps, vars, cmds, includes, errors
+        return deps, libs, vars, cmds, includes, errors
     
     except FileNotFoundError:
         console.print(f"[bold red]File {file_path} not found[/bold red]")
-        return set(), {}, [], [], [f"File {file_path} not found"]
+        return set(), set(), {}, [], [], [f"File {file_path} not found"]
