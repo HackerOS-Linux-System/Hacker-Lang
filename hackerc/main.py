@@ -2,15 +2,17 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.syntax import Syntax
+from rich.text import Text
 from .parser import parse_hacker_file
 from .repl import run_repl
 
 console = Console()
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 HACKER_DIR = os.path.expanduser("~/.hacker-lang")
 BIN_DIR = os.path.join(HACKER_DIR, "bin")
 
@@ -19,13 +21,14 @@ def ensure_hacker_dir():
     os.makedirs(os.path.join(HACKER_DIR, "libs"), exist_ok=True)
 
 def display_welcome():
-    banner = Text("Welcome to Hacker Lang CLI!", style="bold magenta")
+    banner = Text("Hacker Lang CLI", style="bold magenta")
     banner.append("\nSimple scripting for Debian-based Linux", style="italic cyan")
+    banner.append(f"\nVersion {VERSION}", style="bold blue")
     console.print(Panel(banner, expand=False))
     help_command(show_banner=False)
 
 def run_command(file_path, verbose=False):
-    deps, vars, cmds, includes, errors = parse_hacker_file(file_path, verbose)
+    deps, libs, vars, cmds, includes, errors = parse_hacker_file(file_path, verbose)
     if errors:
         console.print(Panel("\n".join(errors), title="Syntax Errors", style="bold red"))
         return False
@@ -38,12 +41,12 @@ def run_command(file_path, verbose=False):
             temp_sh.write(f'export {var}="{value}"\n')
         
         for dep in deps:
-            check_cmd = generate_check_cmd(dep)
-            if check_cmd:
+            check_cmd = f"command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})"
+            if check_cmd and dep != "sudo":
                 temp_sh.write(f"{check_cmd}\n")
         
         for include in includes:
-            lib_path = os.path.join(HACKER_DIR, "libs", f"{include}.hacker")
+            lib_path = os.path.join(HACKER_DIR, "libs", include, "main.hacker")
             if os.path.exists(lib_path):
                 temp_sh.write(f"# Included from {include}\n")
                 with open(lib_path, 'r') as lib_file:
@@ -70,7 +73,7 @@ def run_command(file_path, verbose=False):
         os.unlink(temp_sh_path)
 
 def compile_command(file_path, output, verbose=False):
-    deps, vars, cmds, includes, errors = parse_hacker_file(file_path, verbose)
+    deps, libs, vars, cmds, includes, errors = parse_hacker_file(file_path, verbose)
     if errors:
         console.print(Panel("\n".join(errors), title="Syntax Errors", style="bold red"))
         return False
@@ -97,7 +100,7 @@ def compile_command(file_path, output, verbose=False):
 
 def check_command(file_path, verbose=False):
     console.print(Panel(f"Checking syntax of {file_path}", title="Hacker Lang Check", style="bold cyan"))
-    deps, vars, cmds, includes, errors = parse_hacker_file(file_path, verbose)
+    deps, libs, vars, cmds, includes, errors = parse_hacker_file(file_path, verbose)
     if errors:
         console.print(Panel("\n".join(errors), title="Syntax Errors", style="bold red"))
         return False
@@ -110,16 +113,19 @@ def init_command(file_path, verbose=False):
         return False
     
     template = """! Hacker Lang template script
-// sudo ! Required for privileged commands
-// apt ! Package manager
-@USER=admin ! Set USER variable
-=2 > echo "Hello from $USER" ! Print twice
-? [ -d /tmp ] > echo "/tmp exists" ! Conditional
+// sudo ! System dependency for privileged commands
+# bit-jump ! Custom library to be installed
+@USER=admin ! Set environment variable
+@LOG_DIR=/var/log/hacker
+=2 > echo "Hello from $USER" ! Loop twice
+? [ -d /tmp ] > echo "/tmp exists" ! Conditional check
+& sleep 10 ! Run command in background
 # util ! Include util library
-> sudo apt update ! Update packages
+> sudo apt update ! Update system packages
 [
 Configuration
 Author: Hacker Lang User
+Purpose: System update automation
 ]
 """
     try:
@@ -152,7 +158,7 @@ def clean_command(verbose=False):
 def install_command(libname, verbose=False):
     bin_path = os.path.join(BIN_DIR, "hacker-library")
     if not os.path.exists(bin_path):
-        console.print("[bold red]hacker-library not found.[/bold red]")
+        console.print("[bold red]hacker-library not found in ~/.hacker-lang/bin/.[/bold red]")
         return False
     
     cmd = ['node', bin_path, 'install', libname]
@@ -169,7 +175,7 @@ def install_command(libname, verbose=False):
 def update_command(verbose=False):
     bin_path = os.path.join(BIN_DIR, "hacker-library")
     if not os.path.exists(bin_path):
-        console.print("[bold red]hacker-library not found.[/bold red]")
+        console.print("[bold red]hacker-library not found in ~/.hacker-lang/bin/.[/bold red]")
         return False
     
     cmd = ['node', bin_path, 'update']
@@ -201,7 +207,7 @@ def help_command(show_banner=True):
         ("check", "Check syntax", "file"),
         ("init", "Create template .hacker file", "file"),
         ("clean", "Remove temp .sh files", ""),
-        ("install", "Install a library", "libname"),
+        ("install", "Install a custom library", "libname"),
         ("update", "Check for library updates", ""),
         ("repl", "Start interactive REPL", ""),
         ("version", "Show CLI version", ""),
@@ -215,9 +221,11 @@ def help_command(show_banner=True):
     console.print("\nSyntax Example:")
     console.print(Syntax(
         """// sudo
+# bit-jump
 @USER=admin
 =2 > echo $USER
 ? [ -d /tmp ] > echo OK
+& sleep 10
 # util
 > sudo apt update
 [
