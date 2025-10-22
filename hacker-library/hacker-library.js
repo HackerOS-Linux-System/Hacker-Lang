@@ -1,7 +1,8 @@
-// hacker-library.js - Enhanced library manager in JavaScript.
-// Supports list (shows available libs), install (simulates download), update (simulates update check).
-// Uses node-fetch for HTTP requests.
-// Place in ~/.hackeros/hacker-lang/bin/hacker-library.js with shebang #!/usr/bin/env node.
+#!/usr/bin/env node
+
+// hacker-library.js - Library manager for Hacker Lang.
+// Located at ~/.hacker-lang/bin/hacker-library.
+// Handles install (downloads libraries), update (checks updates), list (shows available/installed).
 
 const fs = require('fs');
 const path = require('path');
@@ -10,7 +11,7 @@ const fetch = require('node-fetch');
 const args = process.argv.slice(2);
 const action = args[0];
 
-const libDir = path.join(process.env.HOME, '.hackeros', 'hacker-lang', 'libs');
+const libDir = path.join(process.env.HOME, '.hacker-lang', 'libs');
 
 if (!fs.existsSync(libDir)) {
     fs.mkdirSync(libDir, { recursive: true });
@@ -34,7 +35,7 @@ if (action === 'list') {
         console.error(`Library ${libname} not found. Available: ${availableLibs.join(', ')}`);
         process.exit(1);
     }
-    const url = `https://example.com/hacker-lang/${libname}.hacker`;  // Placeholder
+    const url = `https://example.com/hacker-lang/${libname}.hacker`; // Placeholder
     const filePath = path.join(libDir, `${libname}.hacker`);
     console.log(`Installing ${libname} to ${filePath}...`);
     fetch(url)
