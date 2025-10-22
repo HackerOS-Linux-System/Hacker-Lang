@@ -1,7 +1,3 @@
-// main.rs - Hacker Lang compiler using Cranelift.
-// Located at ~/.hacker-lang/bin/hacker-compiler.
-// Handles updated syntax with conditionals and includes.
-
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
@@ -9,12 +5,13 @@ use std::path::Path;
 use std::process;
 
 use cranelift::prelude::*;
+use cranelift_codegen::ir::Function;
 use cranelift_codegen::isa;
 use cranelift_codegen::settings;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataContext, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use subprocess::Exec;
+use subprocess::{Exec, PopenError};
 
 const HACKER_DIR: &str = "~/.hacker-lang";
 
@@ -27,9 +24,10 @@ fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>)> {
+fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>)> {
     let file = File::open(path)?;
     let mut deps = Vec::new();
+    let mut libs = Vec::new();
     let mut vars = Vec::new();
     let mut cmds = Vec::new();
     let mut includes = Vec::new();
@@ -69,9 +67,31 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
         if line.starts_with("//") {
             let dep = line[2..].trim().to_string();
             if dep.is_empty() {
-                errors.push(format!("Line {}: Empty dependency", line_num));
+                errors.push(format!("Line {}: Empty system dependency", line_num));
             } else {
                 deps.push(dep);
+            }
+        } else if line.starts_with("#") {
+            let lib = line[1..].trim().to_string();
+            if lib.is_empty() {
+                errors.push(format!("Line {}: Empty library/include", line_num));
+            } else {
+                let lib_path_str = expand_home(&format!("{}/libs/{}/main.hacker", HACKER_DIR, lib));
+                let lib_path = Path::new(&lib_path_str);
+                if lib_path.exists() {
+                    includes.push(lib.clone());
+                    let (sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_errors) = parse_hacker_file(lib_path, verbose)?;
+                    deps.extend(sub_deps);
+                    libs.extend(sub_libs);
+                    vars.extend(sub_vars);
+                    cmds.extend(sub_cmds);
+                    includes.extend(sub_includes);
+                    for err in sub_errors {
+                        errors.push(format!("In {}: {}", lib, err));
+                    }
+                } else {
+                    libs.push(lib);
+                }
             }
         } else if line.starts_with(">") {
             let parts: Vec<String> = line[1..].split('!').map(|s| s.trim().to_string()).collect();
@@ -130,25 +150,13 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
             } else {
                 errors.push(format!("Line {}: Invalid conditional syntax", line_num));
             }
-        } else if line.starts_with("#") {
-            let lib = line[1..].trim().to_string();
-            if lib.is_empty() {
-                errors.push(format!("Line {}: Empty include", line_num));
+        } else if line.starts_with("&") {
+            let parts: Vec<String> = line[1..].split('!').map(|s| s.trim().to_string()).collect();
+            let cmd = parts[0].clone();
+            if cmd.is_empty() {
+                errors.push(format!("Line {}: Empty background command", line_num));
             } else {
-                let lib_path = Path::new(&expand_home(&format!("{}/libs/{}.hacker", HACKER_DIR, lib)));
-                if lib_path.exists() {
-                    includes.push(lib);
-                    let (sub_deps, sub_vars, sub_cmds, sub_includes, sub_errors) = parse_hacker_file(lib_path, verbose)?;
-                    deps.extend(sub_deps);
-                    vars.extend(sub_vars);
-                    cmds.extend(sub_cmds);
-                    includes.extend(sub_includes);
-                    for err in sub_errors {
-                        errors.push(format!("In {}: {}", lib, err));
-                    }
-                } else {
-                    errors.push(format!("Line {}: Library {} not found", line_num, lib));
-                }
+                cmds.push(format!("{} &", cmd));
             }
         } else if line.starts_with("!") {
             // Ignore comment
@@ -162,16 +170,17 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
     }
 
     if verbose {
-        println!("Parsed deps: {:?}", deps);
-        println!("Parsed vars: {:?}", vars);
-        println!("Parsed cmds: {:?}", cmds);
-        println!("Parsed includes: {:?}", includes);
+        println!("System Deps: {:?}", deps);
+        println!("Custom Libs: {:?}", libs);
+        println!("Vars: {:?}", vars);
+        println!("Cmds: {:?}", cmds);
+        println!("Includes: {:?}", includes);
         if !errors.is_empty() {
             println!("Errors: {:?}", errors);
         }
     }
     
-    Ok((deps, vars, cmds, includes, errors))
+    Ok((deps, libs, vars, cmds, includes, errors))
 }
 
 fn generate_check_cmd(dep: &str) -> String {
@@ -191,7 +200,7 @@ fn main() -> io::Result<()> {
     let input_path = Path::new(&args[1]);
     let output_path = Path::new(&args[2]);
 
-    let (mut deps, vars, mut cmds, _includes, errors) = parse_hacker_file(input_path, verbose)?;
+    let (mut deps, _libs, vars, mut cmds, _includes, errors) = parse_hacker_file(input_path, verbose)?;
     if !errors.is_empty() {
         for err in errors {
             eprintln!("{}", err);
@@ -213,7 +222,7 @@ fn main() -> io::Result<()> {
     let isa_builder = isa::lookup(triple).expect("Host not supported");
     let isa = isa_builder.finish(flags).expect("ISA build failed");
 
-    let builder = ObjectBuilder::new(isa, output_path.file_stem().unwrap().to_str().unwrap().as_bytes().to_vec(), cranelift_module::default_libcall_names()).unwrap();
+    let builder = ObjectBuilder::new(isa, output_path.file_stem().unwrap().to_str().unwrap().to_vec(), cranelift_module::default_libcall_names()).expect("Failed to create ObjectBuilder");
     let mut module = ObjectModule::new(builder);
 
     let pointer_type = module.target_config().pointer_type();
@@ -287,14 +296,13 @@ fn main() -> io::Result<()> {
     builder.finalize();
 
     module.define_function(main_id, &mut ctx).unwrap();
-    module.finalize_definitions();
-    let obj = module.object.finish();
+    let obj = module.finish();
 
     let temp_obj_path = output_path.with_extension("o");
     let mut file = File::create(&temp_obj_path)?;
     file.write_all(&obj)?;
 
-    let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display())).join()?;
+    let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display())).join().map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "Linking failed"));
     }
