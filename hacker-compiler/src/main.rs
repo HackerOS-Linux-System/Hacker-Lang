@@ -1,9 +1,8 @@
 // hacker-compiler/src/main.rs - Updated Rust compiler for Hacker Lang using Cranelift.
-// Updated syntax: Dependencies with //, Config with [ ... ] (ignored).
-// Added optional features: Variables @var=value (set as env vars via putenv).
-// Loops *num > cmd (unroll in compiled code).
-// Added --verbose flag for debug output.
-// Compile with Cargo, place binary in bin dir.
+// Syntax: // for deps, [ ... ] for config (ignored), > for cmds, ! for comments, @var=value for vars, *num > cmd for loops.
+// Enhanced with syntax checking and verbose output.
+// Compiles to native binary with putenv for vars and system for cmds.
+// Place binary in ~/.hackeros/hacker-lang/bin/hacker-compiler.
 
 use std::env;
 use std::fs::{self, File};
@@ -19,14 +18,18 @@ use cranelift_module::{DataContext, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use subprocess::Exec;
 
-fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<(String, String)>, Vec<String>)> {
+fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>)> {
     let file = File::open(path)?;
     let mut deps = Vec::new();
     let mut vars = Vec::new();
     let mut cmds = Vec::new();
+    let mut errors = Vec::new();
     let mut in_config = false;
     let mut config_lines = Vec::new();
+    let mut line_num = 0;
+
     for line in io::BufReader::new(file).lines() {
+        line_num += 1;
         let line = line?;
         let line = line.trim().to_string();
         if line.is_empty() {
@@ -34,12 +37,17 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
         }
         
         if line == "[" {
+            if in_config {
+                errors.push(format!("Line {}: Nested config section detected", line_num));
+            }
             in_config = true;
             config_lines = Vec::new();
             continue;
         } else if line == "]" {
+            if !in_config {
+                errors.push(format!("Line {}: Closing ] without opening [", line_num));
+            }
             in_config = false;
-            // Ignore config
             continue;
         }
         
@@ -50,44 +58,75 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
         
         if line.starts_with("//") {
             let dep = line[2..].trim().to_string();
-            if !dep.is_empty() {
+            if dep.is_empty() {
+                errors.push(format!("Line {}: Empty dependency", line_num));
+            } else {
                 deps.push(dep);
             }
         } else if line.starts_with(">") {
             let parts: Vec<String> = line[1..].split('!').map(|s| s.trim().to_string()).collect();
             let cmd = parts[0].clone();
-            if !cmd.is_empty() {
+            if cmd.is_empty() {
+                errors.push(format!("Line {}: Empty command", line_num));
+            } else {
                 cmds.push(cmd);
             }
         } else if line.starts_with("@") {
             if let Some(eq_idx) = line.find('=') {
                 let var = line[1..eq_idx].trim().to_string();
                 let value = line[eq_idx + 1..].trim().to_string();
-                vars.push((var, value));
+                if var.is_empty() || value.is_empty() {
+                    errors.push(format!("Line {}: Invalid variable assignment", line_num));
+                } else {
+                    vars.push((var, value));
+                }
+            } else {
+                errors.push(format!("Line {}: Missing = in variable", line_num));
             }
         } else if line.starts_with("*") {
             let parts: Vec<String> = line[1..].split('>').map(|s| s.trim().to_string()).collect();
             if parts.len() == 2 {
                 if let Ok(num) = parts[0].parse::<usize>() {
+                    if num < 0 {
+                        errors.push(format!("Line {}: Negative loop count", line_num));
+                        continue;
+                    }
                     let cmd_parts: Vec<String> = parts[1].split('!').map(|s| s.trim().to_string()).collect();
                     let cmd = cmd_parts[0].clone();
-                    for _ in 0..num {
-                        cmds.push(cmd.clone());
+                    if cmd.is_empty() {
+                        errors.push(format!("Line {}: Empty loop command", line_num));
+                    } else {
+                        for _ in 0..num {
+                            cmds.push(cmd.clone());
+                        }
                     }
-                } else if verbose {
-                    eprintln!("Invalid loop count in: {}", line);
+                } else {
+                    errors.push(format!("Line {}: Invalid loop count", line_num));
                 }
+            } else {
+                errors.push(format!("Line {}: Invalid loop syntax", line_num));
             }
         } else if line.starts_with("!") {
             // Ignore comment
+        } else {
+            errors.push(format!("Line {}: Invalid syntax", line_num));
         }
     }
+    
+    if in_config {
+        errors.push("File ended with unclosed config section".to_string());
+    }
+
     if verbose {
         println!("Parsed deps: {:?}", deps);
         println!("Parsed vars: {:?}", vars);
         println!("Parsed cmds: {:?}", cmds);
+        if !errors.is_empty() {
+            println!("Errors: {:?}", errors);
+        }
     }
-    Ok((deps, vars, cmds))
+    
+    Ok((deps, vars, cmds, errors))
 }
 
 fn generate_check_cmd(dep: &str) -> String {
@@ -107,9 +146,14 @@ fn main() -> io::Result<()> {
     let input_path = Path::new(&args[1]);
     let output_path = Path::new(&args[2]);
 
-    let (mut deps, vars, mut cmds) = parse_hacker_file(input_path, verbose)?;
+    let (mut deps, vars, mut cmds, errors) = parse_hacker_file(input_path, verbose)?;
+    if !errors.is_empty() {
+        for err in errors {
+            eprintln!("{}", err);
+        }
+        process::exit(1);
+    }
 
-    // Add dep checks to cmds
     for dep in deps {
         let check = generate_check_cmd(&dep);
         if !check.is_empty() {
@@ -117,7 +161,6 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Cranelift setup
     let flag_builder = settings::builder();
     let flags = settings::Flags::new(flag_builder);
 
@@ -128,7 +171,6 @@ fn main() -> io::Result<()> {
     let builder = ObjectBuilder::new(isa, output_path.file_stem().unwrap().to_str().unwrap().as_bytes().to_vec(), cranelift_module::default_libcall_names()).unwrap();
     let mut module = ObjectModule::new(builder);
 
-    // Declare externs: system, putenv
     let pointer_type = module.target_config().pointer_type();
     let mut sig_system = module.make_signature();
     sig_system.params.push(AbiParam::new(pointer_type));
@@ -142,7 +184,6 @@ fn main() -> io::Result<()> {
     sig_putenv.call_conv = module.target_config().default_call_conv;
     let putenv_id = module.declare_function("putenv", Linkage::Import, &sig_putenv).unwrap();
 
-    // Main function
     let mut sig_main = module.make_signature();
     sig_main.returns.push(AbiParam::new(types::I32));
     sig_main.call_conv = module.target_config().default_call_conv;
@@ -159,7 +200,6 @@ fn main() -> io::Result<()> {
     let local_system = module.declare_func_in_func(system_id, &mut builder.func);
     let local_putenv = module.declare_func_in_func(putenv_id, &mut builder.func);
 
-    // Data for vars: "var=value\0"
     let mut var_data_ids = Vec::new();
     for (var, value) in &vars {
         let env_str = format!("{}={}", var, value);
@@ -173,14 +213,12 @@ fn main() -> io::Result<()> {
         var_data_ids.push(data_id);
     }
 
-    // Call putenv for each var
     for data_id in var_data_ids {
         let global = module.declare_data_in_func(data_id, &mut builder.func);
         let ptr = builder.ins().global_value(pointer_type, global);
         let _ = builder.ins().call(local_putenv, &[ptr]);
     }
 
-    // Data for cmds
     let mut cmd_data_ids = Vec::new();
     for (i, cmd) in cmds.iter().enumerate() {
         let data_name = format!("cmd_{i}");
@@ -193,14 +231,12 @@ fn main() -> io::Result<()> {
         cmd_data_ids.push(data_id);
     }
 
-    // Call system for each cmd
     for data_id in cmd_data_ids {
         let global = module.declare_data_in_func(data_id, &mut builder.func);
         let ptr = builder.ins().global_value(pointer_type, global);
         let _ = builder.ins().call(local_system, &[ptr]);
     }
 
-    // Return 0
     let zero = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[zero]);
     builder.finalize();
@@ -209,12 +245,10 @@ fn main() -> io::Result<()> {
     module.finalize_definitions();
     let obj = module.object.finish();
 
-    // Write temp obj
     let temp_obj_path = output_path.with_extension("o");
     let mut file = File::create(&temp_obj_path)?;
     file.write_all(&obj)?;
 
-    // Link with gcc (links libc for system and putenv)
     let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display())).join()?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "Linking failed"));
