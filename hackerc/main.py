@@ -8,11 +8,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.syntax import Syntax
 from rich.text import Text
-from .parser import parse_hacker_file
-from .repl import run_repl
+from parser import parse_hacker_file
+from repl import run_repl
 
 console = Console()
-VERSION = "0.5.0"
+VERSION = "0.0.1"
 HACKER_DIR = os.path.expanduser("~/.hacker-lang")
 BIN_DIR = os.path.join(HACKER_DIR, "bin")
 
@@ -21,7 +21,7 @@ def ensure_hacker_dir():
     os.makedirs(os.path.join(HACKER_DIR, "libs"), exist_ok=True)
 
 def display_welcome():
-    banner = Text("Hacker Lang CLI", style="bold magenta")
+    banner = Text("Hacker Lang", style="bold magenta")
     banner.append("\nSimple scripting for Debian-based Linux", style="italic cyan")
     banner.append(f"\nVersion {VERSION}", style="bold blue")
     console.print(Panel(banner, expand=False))
@@ -32,33 +32,33 @@ def run_command(file_path, verbose=False):
     if errors:
         console.print(Panel("\n".join(errors), title="Syntax Errors", style="bold red"))
         return False
-    
+
     with tempfile.NamedTemporaryFile(mode='w+', suffix='.sh', delete=False) as temp_sh:
         temp_sh.write('#!/bin/bash\n')
         temp_sh.write('set -e\n')
-        
+
         for var, value in vars.items():
             temp_sh.write(f'export {var}="{value}"\n')
-        
+
         for dep in deps:
             check_cmd = f"command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})"
             if check_cmd and dep != "sudo":
                 temp_sh.write(f"{check_cmd}\n")
-        
+
         for include in includes:
             lib_path = os.path.join(HACKER_DIR, "libs", include, "main.hacker")
             if os.path.exists(lib_path):
                 temp_sh.write(f"# Included from {include}\n")
                 with open(lib_path, 'r') as lib_file:
                     temp_sh.write(lib_file.read() + "\n")
-        
+
         for cmd in cmds:
             temp_sh.write(f"{cmd}\n")
-        
+
         temp_sh_path = temp_sh.name
-    
+
     os.chmod(temp_sh_path, 0o755)
-    
+
     console.print(Panel(f"Running script from {file_path}", title="Hacker Lang Run", style="bold green"))
     try:
         env = os.environ.copy()
@@ -77,15 +77,15 @@ def compile_command(file_path, output, verbose=False):
     if errors:
         console.print(Panel("\n".join(errors), title="Syntax Errors", style="bold red"))
         return False
-    
+
     if not output:
         output = os.path.splitext(file_path)[0]
-    
+
     bin_path = os.path.join(BIN_DIR, "hacker-compiler")
     if not os.path.exists(bin_path):
         console.print("[bold red]hacker-compiler not found in ~/.hacker-lang/bin/.[/bold red]")
         return False
-    
+
     console.print(Panel(f"Compiling {file_path} to {output}", title="Hacker Lang Compile", style="bold blue"))
     cmd = [bin_path, file_path, output]
     if verbose:
@@ -111,7 +111,7 @@ def init_command(file_path, verbose=False):
     if os.path.exists(file_path):
         console.print(f"[bold red]File {file_path} already exists![/bold red]")
         return False
-    
+
     template = """! Hacker Lang template script
 // sudo ! System dependency for privileged commands
 # bit-jump ! Custom library to be installed
@@ -160,7 +160,7 @@ def install_command(libname, verbose=False):
     if not os.path.exists(bin_path):
         console.print("[bold red]hacker-library not found in ~/.hacker-lang/bin/.[/bold red]")
         return False
-    
+
     cmd = ['node', bin_path, 'install', libname]
     if verbose:
         console.print(f"[blue]Running: {' '.join(cmd)}[/blue]")
@@ -177,7 +177,7 @@ def update_command(verbose=False):
     if not os.path.exists(bin_path):
         console.print("[bold red]hacker-library not found in ~/.hacker-lang/bin/.[/bold red]")
         return False
-    
+
     cmd = ['node', bin_path, 'update']
     if verbose:
         console.print(f"[blue]Running: {' '.join(cmd)}[/blue]")
@@ -195,12 +195,12 @@ def version_command():
 def help_command(show_banner=True):
     if show_banner:
         console.print(Panel("Hacker Lang CLI - Simple scripting for Debian-based Linux", title="Welcome", style="bold magenta"))
-    
+
     table = Table(title="Available Commands", style="bold cyan")
     table.add_column("Command", style="cyan")
     table.add_column("Description", style="green")
     table.add_column("Arguments", style="yellow")
-    
+
     commands = [
         ("run", "Run a .hacker file via .sh", "file"),
         ("compile", "Compile to native binary", "file [-o output]"),
@@ -213,10 +213,10 @@ def help_command(show_banner=True):
         ("version", "Show CLI version", ""),
         ("help", "Show this help", "")
     ]
-    
+
     for cmd, desc, args in commands:
         table.add_row(cmd, desc, args)
-    
+
     console.print(table)
     console.print("\nSyntax Example:")
     console.print(Syntax(
@@ -244,48 +244,48 @@ def main():
     )
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     subparsers = parser.add_subparsers(dest='command')
-    
+
     run_parser = subparsers.add_parser('run', help='Run .hacker file')
     run_parser.add_argument('file', help='Path to .hacker file')
     run_parser.set_defaults(func=run_command)
-    
+
     compile_parser = subparsers.add_parser('compile', help='Compile to binary')
     compile_parser.add_argument('file', help='Path to .hacker file')
     compile_parser.add_argument('-o', '--output', help='Output binary path')
     compile_parser.set_defaults(func=compile_command)
-    
+
     check_parser = subparsers.add_parser('check', help='Check syntax')
     check_parser.add_argument('file', help='Path to .hacker file')
     check_parser.set_defaults(func=check_command)
-    
+
     init_parser = subparsers.add_parser('init', help='Create template')
     init_parser.add_argument('file', help='Path to .hacker file')
     init_parser.set_defaults(func=init_command)
-    
+
     clean_parser = subparsers.add_parser('clean', help='Clean temp files')
     clean_parser.set_defaults(func=clean_command)
-    
+
     install_parser = subparsers.add_parser('install', help='Install library')
     install_parser.add_argument('libname', help='Library name')
     install_parser.set_defaults(func=install_command)
-    
+
     update_parser = subparsers.add_parser('update', help='Update libraries')
     update_parser.set_defaults(func=update_command)
-    
+
     repl_parser = subparsers.add_parser('repl', help='Start REPL')
     repl_parser.set_defaults(func=lambda v: run_repl(console, verbose=v))
-    
+
     version_parser = subparsers.add_parser('version', help='Show version')
     version_parser.set_defaults(func=version_command)
-    
+
     help_parser = subparsers.add_parser('help', help='Show help')
     help_parser.set_defaults(func=help_command)
-    
+
     args = parser.parse_args()
     if not args.command:
         display_welcome()
         sys.exit(0)
-    
+
     success = True
     if args.command in ['run', 'compile', 'check', 'init']:
         success = args.func(args.file, args.output if 'output' in args else None, args.verbose)
@@ -293,7 +293,7 @@ def main():
         success = args.func(args.libname, args.verbose)
     elif args.command in ['clean', 'update', 'version', 'help', 'repl']:
         success = args.func(args.verbose)
-    
+
     sys.exit(0 if success else 1)
 
 if __name__ == '__main__':
