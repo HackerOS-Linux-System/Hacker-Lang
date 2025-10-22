@@ -1,17 +1,13 @@
-# repl.py - REPL for Hacker Lang.
-# Allows interactive input of Hacker Lang syntax, executes immediately via bash.
-# Supports all syntax elements, with real-time feedback.
-
 import os
 import subprocess
 import tempfile
 from rich.console import Console
 from rich.prompt import Prompt
-from .parser import parse_hacker_file, generate_check_cmd
+from .parser import parse_hacker_file
 
 def run_repl(console, verbose=False):
     console.print(Panel("Hacker Lang REPL - Type 'exit' to quit", title="REPL", style="bold magenta"))
-    console.print("Enter Hacker Lang commands (//, @, =, ?, >, #, !, [ ... ]). Multi-line config with [ ... ].")
+    console.print("Supports: // (system deps), # (libs/include), @ (vars), = (loops), ? (conditionals), & (background), > (cmds), [ ... ], ! (comments)")
     
     lines = []
     in_config = False
@@ -42,12 +38,11 @@ def run_repl(console, verbose=False):
             lines.append(line)
             
             if not in_config and line and not line.startswith('!'):
-                # Try parsing and executing
                 with tempfile.NamedTemporaryFile(mode='w+', suffix='.hacker', delete=False) as temp_hacker:
                     temp_hacker.write('\n'.join(lines) + '\n')
                     temp_hacker_path = temp_hacker.name
                 
-                deps, vars, cmds, includes, errors = parse_hacker_file(temp_hacker_path, verbose, console)
+                deps, libs, vars, cmds, includes, errors = parse_hacker_file(temp_hacker_path, verbose, console)
                 os.unlink(temp_hacker_path)
                 
                 if errors:
@@ -62,12 +57,11 @@ def run_repl(console, verbose=False):
                         temp_sh.write(f'export {var}="{value}"\n')
                     
                     for dep in deps:
-                        check_cmd = generate_check_cmd(dep)
-                        if check_cmd:
-                            temp_sh.write(f"{check_cmd}\n")
+                        if dep != "sudo":
+                            temp_sh.write(f"command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})\n")
                     
                     for include in includes:
-                        lib_path = os.path.join(os.path.expanduser("~/.hacker-lang"), "libs", f"{include}.hacker")
+                        lib_path = os.path.join(os.path.expanduser("~/.hacker-lang"), "libs", include, "main.hacker")
                         if os.path.exists(lib_path):
                             temp_sh.write(f"# Included from {include}\n")
                             with open(lib_path, 'r') as lib_file:
