@@ -3,21 +3,19 @@ import subprocess
 import tempfile
 from rich.console import Console
 from rich.prompt import Prompt
-from parser import parse_hacker_file
+from rich.panel import Panel
+from hacker_parser import parse_hacker_file  # Changed from parser to hacker_parser
 
 def run_repl(console, verbose=False):
     console.print(Panel("Hacker Lang REPL - Type 'exit' to quit", title="REPL", style="bold magenta"))
-    console.print("Supports: // (system deps), # (libs/include), @ (vars), = (loops), ? (conditionals), & (background), > (cmds), [ ... ], ! (comments)")
+    console.print("Supports: // (deps), # (libs), @ (vars), = (loop), ? (if), & (bg), > (cmd), [ ] (config), ! (comment)")
 
     lines = []
     in_config = False
 
     while True:
         try:
-            if in_config:
-                prompt = "CONFIG> "
-            else:
-                prompt = "> "
+            prompt = "CONFIG> " if in_config else "> "
             line = Prompt.ask(prompt, console=console).strip()
 
             if line.lower() == 'exit':
@@ -27,9 +25,9 @@ def run_repl(console, verbose=False):
                 in_config = True
                 lines.append(line)
                 continue
-            elif line == ']':
+            if line == ']':
                 if not in_config:
-                    console.print("[bold red]Error: Closing ] without opening [[/bold red]")
+                    console.print("[bold red]Error: Closing ] without [[/bold red]")
                     continue
                 in_config = False
                 lines.append(line)
@@ -38,55 +36,48 @@ def run_repl(console, verbose=False):
             lines.append(line)
 
             if not in_config and line and not line.startswith('!'):
-                with tempfile.NamedTemporaryFile(mode='w+', suffix='.hacker', delete=False) as temp_hacker:
-                    temp_hacker.write('\n'.join(lines) + '\n')
-                    temp_hacker_path = temp_hacker.name
+                with tempfile.NamedTemporaryFile(mode='w+', suffix='.hacker', delete=False) as f:
+                    f.write('\n'.join(lines) + '\n')
+                    temp_path = f.name
 
-                deps, libs, vars, cmds, includes, errors = parse_hacker_file(temp_hacker_path, verbose, console)
-                os.unlink(temp_hacker_path)
+                deps, libs, vars_dict, cmds, includes, errors = parse_hacker_file(temp_path, verbose, console)
+                os.unlink(temp_path)
 
                 if errors:
                     console.print(Panel("\n".join(errors), title="REPL Errors", style="bold red"))
                     continue
 
-                with tempfile.NamedTemporaryFile(mode='w+', suffix='.sh', delete=False) as temp_sh:
-                    temp_sh.write('#!/bin/bash\n')
-                    temp_sh.write('set -e\n')
-
-                    for var, value in vars.items():
-                        temp_sh.write(f'export {var}="{value}"\n')
-
+                with tempfile.NamedTemporaryFile(mode='w+', suffix='.sh', delete=False) as f:
+                    f.write('#!/bin/bash\nset -e\n')
+                    for k, v in vars_dict.items():
+                        f.write(f'export {k}="{v}"\n')
                     for dep in deps:
                         if dep != "sudo":
-                            temp_sh.write(f"command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})\n")
-
-                    for include in includes:
-                        lib_path = os.path.join(os.path.expanduser("~/.hacker-lang"), "libs", include, "main.hacker")
+                            f.write(f"command -v {dep} || (sudo apt update && sudo apt install -y {dep})\n")
+                    for inc in includes:
+                        lib_path = os.path.join(os.path.expanduser("~/.hackeros/hacker-lang"), "libs", inc, "main.hacker")  # Updated path
                         if os.path.exists(lib_path):
-                            temp_sh.write(f"# Included from {include}\n")
-                            with open(lib_path, 'r') as lib_file:
-                                temp_sh.write(lib_file.read() + "\n")
-
+                            f.write(f"# include {inc}\n")
+                            with open(lib_path) as lf:
+                                f.write(lf.read() + "\n")
                     for cmd in cmds:
-                        temp_sh.write(f"{cmd}\n")
+                        f.write(cmd + "\n")
+                    sh_path = f.name
 
-                    temp_sh_path = temp_sh.name
-
-                os.chmod(temp_sh_path, 0o755)
-
+                os.chmod(sh_path, 0o755)
                 try:
                     env = os.environ.copy()
-                    env.update(vars)
-                    output = subprocess.check_output(['bash', temp_sh_path], env=env, text=True, stderr=subprocess.STDOUT)
-                    if output:
+                    env.update(vars_dict)
+                    output = subprocess.check_output(['bash', sh_path], env=env, text=True, stderr=subprocess.STDOUT)
+                    if output.strip():
                         console.print(Panel(output.strip(), title="Output", style="bold green"))
                 except subprocess.CalledProcessError as e:
                     console.print(Panel(e.output.strip(), title="Error", style="bold red"))
                 finally:
-                    os.unlink(temp_sh_path)
+                    os.unlink(sh_path)
 
         except KeyboardInterrupt:
-            console.print("\n[bold yellow]Use 'exit' to quit REPL[/bold yellow]")
+            console.print("\n[bold yellow]Use 'exit' to quit[/bold yellow]")
 
     console.print("[bold green]REPL exited[/bold green]")
     return True
