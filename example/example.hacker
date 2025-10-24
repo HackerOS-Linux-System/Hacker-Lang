@@ -11,6 +11,6 @@
 > echo "Updated at $(date)" >> $LOG_DIR/update.log
 [
 Configuration
-Author: Hacker Lang User
+Author: HackerOS Team
 Purpose: System update
 ]
