@@ -1,7 +1,7 @@
 import os
 from rich.console import Console
 
-HACKER_DIR = os.path.expanduser("~/.hacker-lang")
+HACKER_DIR = os.path.expanduser("~/.hackeros/hacker-lang")  # Updated path
 
 def parse_hacker_file(file_path, verbose=False, console=None):
     if console is None:
@@ -9,12 +9,11 @@ def parse_hacker_file(file_path, verbose=False, console=None):
 
     deps = set()
     libs = set()
-    vars = {}
+    vars_dict = {}
     cmds = []
     includes = []
     errors = []
     in_config = False
-    config_lines = []
     line_num = 0
 
     try:
@@ -29,7 +28,6 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     if in_config:
                         errors.append(f"Line {line_num}: Nested config section")
                     in_config = True
-                    config_lines = []
                     continue
                 elif line == ']':
                     if not in_config:
@@ -38,7 +36,6 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     continue
 
                 if in_config:
-                    config_lines.append(line)
                     continue
 
                 if line.startswith('//'):
@@ -56,7 +53,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                             sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_errors = parse_hacker_file(lib_path, verbose, console)
                             deps.update(sub_deps)
                             libs.update(sub_libs)
-                            vars.update(sub_vars)
+                            vars_dict.update(sub_vars)
                             cmds.extend(sub_cmds)
                             includes.extend(sub_includes)
                             for err in sub_errors:
@@ -66,8 +63,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     else:
                         errors.append(f"Line {line_num}: Empty library/include")
                 elif line.startswith('>'):
-                    parts = line[1:].split('!', 1)
-                    cmd = parts[0].strip()
+                    cmd = line[1:].split('!', 1)[0].strip()
                     if cmd:
                         cmds.append(cmd)
                     else:
@@ -78,7 +74,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                         var = var.strip()
                         value = value.strip()
                         if var and value:
-                            vars[var] = value
+                            vars_dict[var] = value
                         else:
                             errors.append(f"Line {line_num}: Invalid variable")
                     else:
@@ -93,8 +89,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                                 continue
                             cmd = parts[1].split('!', 1)[0].strip()
                             if cmd:
-                                for _ in range(num):
-                                    cmds.append(cmd)
+                                cmds.extend([cmd] * num)
                             else:
                                 errors.append(f"Line {line_num}: Empty loop command")
                         except ValueError:
@@ -113,8 +108,7 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     else:
                         errors.append(f"Line {line_num}: Invalid conditional syntax")
                 elif line.startswith('&'):
-                    parts = line[1:].split('!', 1)
-                    cmd = parts[0].strip()
+                    cmd = line[1:].split('!', 1)[0].strip()
                     if cmd:
                         cmds.append(f"{cmd} &")
                     else:
@@ -130,15 +124,14 @@ def parse_hacker_file(file_path, verbose=False, console=None):
         if verbose:
             console.print(f"[blue]System Deps: {deps}[/blue]")
             console.print(f"[blue]Custom Libs: {libs}[/blue]")
-            console.print(f"[blue]Vars: {vars}[/blue]")
+            console.print(f"[blue]Vars: {vars_dict}[/blue]")
             console.print(f"[blue]Cmds: {cmds}[/blue]")
             console.print(f"[blue]Includes: {includes}[/blue]")
             if errors:
                 console.print(f"[yellow]Errors: {errors}[/yellow]")
 
-        return deps, libs, vars, cmds, includes, errors
+        return deps, libs, vars_dict, cmds, includes, errors
 
     except FileNotFoundError:
         console.print(f"[bold red]File {file_path} not found[/bold red]")
         return set(), set(), {}, [], [], [f"File {file_path} not found"]
-
