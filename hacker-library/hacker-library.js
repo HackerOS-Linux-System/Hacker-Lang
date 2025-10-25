@@ -6,7 +6,7 @@ const { execSync } = require('child_process');
 const args = process.argv.slice(2);
 const action = args[0];
 const libDir = path.join(process.env.HOME, '.hacker-lang', 'libs');
-const packageListUrl = 'https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/hacker-library/index-packages/package-list.hacker';
+const packageListUrl = 'https://github.com/Bytes-Repository/bytes.io/blob/main/repository/bytes.io';
 
 if (!fs.existsSync(libDir)) {
     fs.mkdirSync(libDir, { recursive: true });
