@@ -1,1 +1,105 @@
+= Hacker Lang
+:doctype: book
+:icons: font
+:toc: left
+:toclevels: 2
+:author: HackerOS Team
+:revnumber: 0.0.2
+:revdate: 2025-10-28
 
+== Opis
+
+**Hacker Lang** to lekki i wygodny język skryptowy stworzony dla *HackerOS*, zaprojektowany jako bezpośrednia alternatywa dla tradycyjnych skryptów `.sh` — zamiast skryptów shellowych używasz binarek skompilowanych z kodu `.hacker`.
+
+Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium **bytes.io**.
+
+== Dlaczego Hacker Lang?
+
+* Zastępuje złożone skrypty `.sh` prostymi, czytelnymi plikami `.hacker`.
+* Umożliwia kompilację do binarek, co przyśpiesza uruchamianie oraz ułatwia dystrybucję.
+* Integruje się z repozytorium bibliotek *bytes.io* — instalacja i aktualizacja bibliotek odbywa się przez `hackerc`.
+* Zaprojektowany do użytku wewnętrznego w ekosystemie HackerOS, ale nadaje się też do zastosowań zewnętrznych.
+
+== Szybkie rozpoczęcie
+
+=== Wymagania
+
+* HackerOS lub inna dystrybucja Linuksa z podstawowymi narzędziami developerskimi (najlepiej ubuntu albo debian).
+* `hackerc` — narzędzie CLI dla Hacker Lang (dostępne w repo projektu).
+
+== Komendy `hackerc`
+
+Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
+
+* `hackerc run {plik.hacker}`:: Uruchamia plik `.hacker` bez kompilacji.
+* `hackerc compiler {plik.hacker} {lokalizacja}`:: Kompiluje plik `.hacker` do binarki i zapisuje wynik w podanej lokalizacji.
+* `hackerc check {plik.hacker}`:: Sprawdza poprawność składni i podstawowe błędy logiczne w pliku.
+* `hackerc init`:: Tworzy przykładowy plik `.hacker` w bieżącym katalogu.
+* `hackerc clean`:: Czyści cache oraz pliki tymczasowe `hackerc`.
+* `hackerc install {nazwa_biblioteki}`:: Instaluje bibliotekę z repozytorium *bytes.io*.
+* `hackerc update {nazwa_biblioteki}`:: Aktualizuje zainstalowane biblioteki z *bytes.io*.
+* `hackerc repl`:: Uruchamia interaktywny REPL Hacker Lang.
+* `hackerc version`:: Wyświetla wersję `hackerc`.
+* `hackerc help`:: Pokazuje listę dostępnych komend i krótkie opisy.
+
+== Składnia i przykład prostego skryptu `.hacker`
+
+Poniżej przykład prostego pliku `.hacker` z komentarzami składniowymi.
+
+---
+
+// sudo
+// apt
+
+> sudo apt update
+
+"syntax example"
+Syntax Example:
+1 // sudo
+2 # bit-jump
+3 @USER=admin
+4 =2 > echo $USER
+5 ? [ -d /tmp ] > echo OK
+6 & sleep 10
+7 # util
+8 > sudo apt update
+9 [
+10 Config
+11 ]
+----
+
+Wyjaśnienie elementów składni (krótkie):
+
+* `//`:: komentarz jednoliniowy.
+* `#`:: sekcja lub etykieta logiczna.
+* `@VAR=wartosc`:: deklaracja zmiennej (dostęp przez `$VAR`).
+* `=N >`:: operator wykonania o priorytecie/znaczeniu (np. `=2 > echo`).
+* `? [ warunek ] >`:: warunkowe wykonanie — jeśli `warunek` prawdziwy.
+* `&`:: uruchomienie polecenia w tle (asynchronicznie).
+* `>`:: wykonaj polecenie shellowe.
+
+== Przykłowy workflow
+
+1. Napisz `script.hacker`.
+2. Sprawdź składnię: `hackerc check script.hacker`.
+3. Uruchom testowo bez kompilacji: `hackerc run script.hacker`.
+4. Skompiluj do binarki: `hackerc compiler script.hacker /usr/local/bin/myscript`.
+5. Uruchamiaj bezpośrednio jako binarkę.
+
+== Integracja z bytes.io
+
+Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `hackerc install <nazwa>` aby pobrać paczkę; `hackerc update <nazwa>` aby ją zaktualizować.
+
+== FAQ (krótkie)
+
+* Jak debugować?:: Użyj `hackerc check` oraz `hackerc run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hackerc` znajdują się w domyślnym katalogu cache.
+* Czy `.hacker` może wywoływać polecenia systemowe?:: Tak — użyj `>` aby wykonać komendę shellową.
+* Gdzie znaleźć dokumentację?:: Pełna dokumentacja i wiki: [https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki](https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki)
+
+== Licencja
+
+Projekt jest dostępny na licencji MIT. Zobacz plik LICENSE w repozytorium.
+
+== Kontakt
+
+Masz pomysł albo błąd? Otwórz issue na GitHubie w repozytorium projektu.
