@@ -24,7 +24,7 @@ Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium 
 
 === Wymagania
 
-* HackerOS lub inna dystrybucja Linuksa z podstawowymi narzędziami developerskimi (najlepiej ubuntu albo debian).
+* HackerOS lub inna dystrybucja Linuksa z podstawowymi narzędziami developerskimi (najlepiej Ubuntu albo Debian).
 * `hackerc` — narzędzie CLI dla Hacker Lang (dostępne w repo projektu).
 
 == Komendy `hackerc`
@@ -46,13 +46,11 @@ Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
 
 Poniżej przykład prostego pliku `.hacker` z komentarzami składniowymi.
 
----
-
+[source,hacker]
+----
 // sudo
 // apt
-
 > sudo apt update
-
 "syntax example"
 Syntax Example:
 1 // sudo
@@ -78,7 +76,7 @@ Wyjaśnienie elementów składni (krótkie):
 * `&`:: uruchomienie polecenia w tle (asynchronicznie).
 * `>`:: wykonaj polecenie shellowe.
 
-== Przykłowy workflow
+== Przykładowy workflow
 
 1. Napisz `script.hacker`.
 2. Sprawdź składnię: `hackerc check script.hacker`.
@@ -94,7 +92,7 @@ Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `hackerc install <na
 
 * Jak debugować?:: Użyj `hackerc check` oraz `hackerc run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hackerc` znajdują się w domyślnym katalogu cache.
 * Czy `.hacker` może wywoływać polecenia systemowe?:: Tak — użyj `>` aby wykonać komendę shellową.
-* Gdzie znaleźć dokumentację?:: Pełna dokumentacja i wiki: [https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki](https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki)
+* Gdzie znaleźć dokumentację?:: Pełna dokumentacja i wiki: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki[Wiki na GitHubie].
 
 == Licencja
 
