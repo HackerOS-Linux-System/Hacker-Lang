@@ -11,25 +11,32 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use subprocess::{Exec, PopenError};
-const HACKER_DIR: &str = "~/.hacker-lang";
+use std::os::unix::fs::PermissionsExt;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+
+const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
+
 fn expand_home(path: &str) -> String {
     if path.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return path.replacen("~", home.to_str().unwrap(), 1);
+        if let Some(home) = env::var_os("HOME") {
+            return path.replacen("~", home.to_str().unwrap_or(""), 1);
         }
     }
     path.to_string()
 }
-fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>)> {
+
+fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, std::collections::HashMap<String, String>)> {
     let file = File::open(path)?;
     let mut deps = Vec::new();
     let mut libs = Vec::new();
     let mut vars = Vec::new();
     let mut cmds = Vec::new();
     let mut includes = Vec::new();
+    let mut binaries = Vec::new();  // Binary lib paths
     let mut errors = Vec::new();
+    let mut config = std::collections::HashMap::new();
     let mut in_config = false;
-    let mut config_lines = Vec::new();
     let mut line_num = 0;
     for line in io::BufReader::new(file).lines() {
         line_num += 1;
@@ -43,7 +50,6 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
                 errors.push(format!("Line {}: Nested config section", line_num));
             }
             in_config = true;
-            config_lines = Vec::new();
             continue;
         } else if line == "]" {
             if !in_config {
@@ -53,7 +59,11 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
             continue;
         }
         if in_config {
-            config_lines.push(line);
+            if let Some(eq_idx) = line.find('=') {
+                let key = line[..eq_idx].trim().to_string();
+                let value = line[eq_idx + 1..].trim().to_string();
+                config.insert(key, value);
+            }
             continue;
         }
         if line.starts_with("//") {
@@ -68,19 +78,24 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
             if lib.is_empty() {
                 errors.push(format!("Line {}: Empty library/include", line_num));
             } else {
-                let lib_path_str = expand_home(&format!("{}/libs/{}/main.hacker", HACKER_DIR, lib));
-                let lib_path = Path::new(&lib_path_str);
-                if lib_path.exists() {
+                let lib_dir = expand_home(&format!("{}/libs/{}", HACKER_DIR, lib));
+                let lib_hacker_path = format!("{}/main.hacker", lib_dir);
+                let lib_bin_path = expand_home(&format!("{}/libs/{}", HACKER_DIR, lib));  // Binary file
+                if Path::new(&lib_hacker_path).exists() {
                     includes.push(lib.clone());
-                    let (sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_errors) = parse_hacker_file(lib_path, verbose)?;
+                    let (sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_binaries, sub_errors, sub_config) = parse_hacker_file(Path::new(&lib_hacker_path), verbose)?;
                     deps.extend(sub_deps);
                     libs.extend(sub_libs);
                     vars.extend(sub_vars);
                     cmds.extend(sub_cmds);
                     includes.extend(sub_includes);
+                    binaries.extend(sub_binaries);
                     for err in sub_errors {
                         errors.push(format!("In {}: {}", lib, err));
                     }
+                    config.extend(sub_config);
+                } else if Path::new(&lib_bin_path).exists() && Path::new(&lib_bin_path).metadata()?.permissions().mode() & 0o111 != 0 {
+                    binaries.push(lib_bin_path);
                 } else {
                     libs.push(lib);
                 }
@@ -147,7 +162,7 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
                 cmds.push(format!("{} &", cmd));
             }
         } else if line.starts_with("!") {
-            // Ignore comment
+            // Comment
         } else {
             errors.push(format!("Line {}: Invalid syntax", line_num));
         }
@@ -161,18 +176,22 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
         println!("Vars: {:?}", vars);
         println!("Cmds: {:?}", cmds);
         println!("Includes: {:?}", includes);
+        println!("Binaries: {:?}", binaries);
+        println!("Config: {:?}", config);
         if !errors.is_empty() {
             println!("Errors: {:?}", errors);
         }
     }
-    Ok((deps, libs, vars, cmds, includes, errors))
+    Ok((deps, libs, vars, cmds, includes, binaries, errors, config))
 }
+
 fn generate_check_cmd(dep: &str) -> String {
     if dep == "sudo" {
         return String::new();
     }
     format!("command -v {} &> /dev/null || (sudo apt update && sudo apt install -y {})", dep, dep)
 }
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 || args.len() > 4 {
@@ -182,7 +201,7 @@ fn main() -> io::Result<()> {
     let verbose = args.len() == 4 && args[3] == "--verbose";
     let input_path = Path::new(&args[1]);
     let output_path = Path::new(&args[2]);
-    let (deps, _libs, vars, cmds, _includes, errors) = parse_hacker_file(input_path, verbose)?;
+    let (deps, _libs, vars, cmds, _includes, binaries, errors, _config) = parse_hacker_file(input_path, verbose)?;
     if !errors.is_empty() {
         for err in errors {
             eprintln!("{}", err);
@@ -197,6 +216,19 @@ fn main() -> io::Result<()> {
         }
     }
     final_cmds.extend(cmds);
+    // For binaries, add commands to extract and run them
+    let mut bin_extract_cmds = Vec::new();
+    for (i, bin_path) in binaries.iter().enumerate() {
+        let bin_data = fs::read(bin_path)?;
+        let data_name = format!("bin_lib_{i}");
+        // We'll embed later in Cranelift
+        // But for cmds, add extraction: e.g., write to /tmp and run
+        let extract_cmd = format!("echo '{}' | base64 -d > /tmp/{} && chmod +x /tmp/{} && /tmp/{}", BASE64_STANDARD.encode(&bin_data), data_name, data_name, data_name);
+        bin_extract_cmds.push(extract_cmd);
+    }
+    final_cmds.extend(bin_extract_cmds);
+
+    // Cranelift setup
     let flag_builder = settings::builder();
     let flags = settings::Flags::new(flag_builder);
     let triple = target_lexicon::Triple::host();
@@ -205,36 +237,45 @@ fn main() -> io::Result<()> {
     let builder = ObjectBuilder::new(
         isa,
         output_path.file_stem().unwrap().to_str().unwrap().as_bytes().to_vec(),
-                                     cranelift_module::default_libcall_names(),
-    ).expect("Failed to create ObjectBuilder");
+        cranelift_module::default_libcall_names(),
+    ).expect("ObjectBuilder failed");
     let mut module = ObjectModule::new(builder);
     let pointer_type = module.target_config().pointer_type();
+
+    // Declare external functions
     let mut sig_system = module.make_signature();
     sig_system.params.push(AbiParam::new(pointer_type));
     sig_system.returns.push(AbiParam::new(types::I32));
     sig_system.call_conv = module.target_config().default_call_conv;
     let system_id = module.declare_function("system", Linkage::Import, &sig_system).unwrap();
+
     let mut sig_putenv = module.make_signature();
     sig_putenv.params.push(AbiParam::new(pointer_type));
     sig_putenv.returns.push(AbiParam::new(types::I32));
     sig_putenv.call_conv = module.target_config().default_call_conv;
     let putenv_id = module.declare_function("putenv", Linkage::Import, &sig_putenv).unwrap();
+
+    // Main function
     let mut sig_main = module.make_signature();
     sig_main.returns.push(AbiParam::new(types::I32));
     sig_main.call_conv = module.target_config().default_call_conv;
     let main_id = module.declare_function("main", Linkage::Export, &sig_main).unwrap();
+
     let mut ctx = cranelift_codegen::Context::for_function(Function::with_name_signature(Default::default(), sig_main.clone()));
     let mut func_builder_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
     let entry_block = builder.create_block();
     builder.switch_to_block(entry_block);
     builder.seal_block(entry_block);
+
     let local_system = module.declare_func_in_func(system_id, &mut builder.func);
     let local_putenv = module.declare_func_in_func(putenv_id, &mut builder.func);
+
+    // Embed vars as putenv
     let mut var_data_ids = Vec::new();
-    for (var, value) in &vars {
+    for (i, (var, value)) in vars.iter().enumerate() {
         let env_str = format!("{}={}", var, value);
-        let data_name = format!("env_{}", var_data_ids.len());
+        let data_name = format!("env_{i}");
         let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
         let mut data_ctx = DataDescription::new();
         let mut bytes: Vec<u8> = env_str.into_bytes();
@@ -246,8 +287,10 @@ fn main() -> io::Result<()> {
     for data_id in var_data_ids {
         let global = module.declare_data_in_func(data_id, &mut builder.func);
         let ptr = builder.ins().global_value(pointer_type, global);
-        let _ = builder.ins().call(local_putenv, &[ptr]);
+        builder.ins().call(local_putenv, &[ptr]);
     }
+
+    // Embed cmd strings
     let mut cmd_data_ids = Vec::new();
     for (i, cmd) in final_cmds.iter().enumerate() {
         let data_name = format!("cmd_{i}");
@@ -262,19 +305,34 @@ fn main() -> io::Result<()> {
     for data_id in cmd_data_ids {
         let global = module.declare_data_in_func(data_id, &mut builder.func);
         let ptr = builder.ins().global_value(pointer_type, global);
-        let _ = builder.ins().call(local_system, &[ptr]);
+        builder.ins().call(local_system, &[ptr]);
     }
+
+    // Embed binary libs data
+    for (i, bin_path) in binaries.iter().enumerate() {
+        let bin_data = fs::read(bin_path)?;
+        let data_name = format!("bin_lib_data_{i}");
+        let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
+        let mut data_ctx = DataDescription::new();
+        data_ctx.define(bin_data.into_boxed_slice());
+        module.define_data(data_id, &data_ctx).unwrap();
+        // In runtime, we would need to extract, but since we're using system calls, we embed extraction cmds above
+    }
+
     let zero = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[zero]);
     builder.finalize();
+
     module.define_function(main_id, &mut ctx).unwrap();
-    let obj = module.finish().object.write().expect("Failed to write object");
+    let obj = module.finish().object.write().expect("Write object failed");
+
     let temp_obj_path = output_path.with_extension("o");
     let mut file = File::create(&temp_obj_path)?;
     file.write_all(&obj)?;
+
     let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display()))
-    .join()
-    .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .join()
+        .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "Linking failed"));
     }
