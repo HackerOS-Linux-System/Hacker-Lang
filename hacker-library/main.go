@@ -1,109 +1,184 @@
-const fs = require('fs');
-const path = require('path');
-const fetch = require('node-fetch');
-const { execSync } = require('child_process');
+package main
 
-const args = process.argv.slice(2);
-const action = args[0];
-const libDir = path.join(process.env.HOME, '.hacker-lang', 'libs');
-const packageListUrl = 'https://github.com/Bytes-Repository/bytes.io/blob/main/repository/bytes.io';
+import (
+	"fmt"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
 
-if (!fs.existsSync(libDir)) {
-    fs.mkdirSync(libDir, { recursive: true });
+func main() {
+	args := os.Args[1:]
+	if len(args) == 0 {
+		usage()
+	}
+	action := args[0]
+	home := os.Getenv("HOME")
+	if home == "" {
+		fmt.Println("Error: HOME environment variable not set")
+		os.Exit(1)
+	}
+	libDir := filepath.Join(home, ".hackeros", "hacker-lang", "libs")
+	err := os.MkdirAll(libDir, 0755)
+	if err != nil {
+		fmt.Printf("Error creating library directory: %v\n", err)
+		os.Exit(1)
+	}
+	packageListUrl := "https://raw.githubusercontent.com/Bytes-Repository/bytes.io/main/repository/bytes.io"
+	tmpList := "/tmp/bytes.io"
+
+	downloadList := func() error {
+		cmd := exec.Command("curl", "-s", "-o", tmpList, packageListUrl)
+		return cmd.Run()
+	}
+
+	parsePackages := func() map[string]string {
+		packages := make(map[string]string)
+		data, err := os.ReadFile(tmpList)
+		if err != nil {
+			fmt.Printf("Error reading package list: %v\n", err)
+			os.Exit(1)
+		}
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.Contains(trimmed, "=>") {
+				parts := strings.SplitN(trimmed, "=>", 2)
+				if len(parts) == 2 {
+					name := strings.TrimSpace(parts[0])
+					u := strings.TrimSpace(parts[1])
+					if name != "" && u != "" {
+						packages[name] = u
+					}
+				}
+			}
+		}
+		return packages
+	}
+
+	getPackages := func() map[string]string {
+		err := downloadList()
+		if err != nil {
+			fmt.Printf("Error downloading package list: %v\n", err)
+			os.Exit(1)
+		}
+		return parsePackages()
+	}
+
+	getFilename := func(urlStr string) string {
+		u, err := url.Parse(urlStr)
+		if err != nil {
+			fmt.Printf("Error parsing URL: %v\n", err)
+			os.Exit(1)
+		}
+		return filepath.Base(u.Path)
+	}
+
+	getInstalled := func(packages map[string]string, libDir string) []string {
+		var installed []string
+		for name, urlStr := range packages {
+			filename := getFilename(urlStr)
+			libPath := filepath.Join(libDir, filename)
+			if _, err := os.Stat(libPath); err == nil {
+				installed = append(installed, name)
+			}
+		}
+		return installed
+	}
+
+	if action == "list" {
+		fmt.Println("Fetching available libraries...")
+		packages := getPackages()
+		fmt.Println("Available libraries:")
+		for name := range packages {
+			fmt.Printf("- %s\n", name)
+		}
+		fmt.Println("\nInstalled libraries:")
+		installed := getInstalled(packages, libDir)
+		for _, name := range installed {
+			fmt.Printf("- %s\n", name)
+		}
+	} else if action == "install" {
+		if len(args) < 2 {
+			usage()
+		}
+		libname := args[1]
+		packages := getPackages()
+		urlStr, ok := packages[libname]
+		if !ok {
+			fmt.Printf("Library %s not found in package list.\n", libname)
+			os.Exit(1)
+		}
+		filename := getFilename(urlStr)
+		libPath := filepath.Join(libDir, filename)
+		tmpPath := filepath.Join("/tmp", filename)
+		if _, err := os.Stat(libPath); err == nil {
+			fmt.Printf("Removing existing %s...\n", libname)
+			err := os.Remove(libPath)
+			if err != nil {
+				fmt.Printf("Error removing existing library: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("Installing %s from %s...\n", libname, urlStr)
+		cmd := exec.Command("curl", "-L", "-o", tmpPath, urlStr)
+		err = cmd.Run()
+		if err != nil {
+			fmt.Printf("Error downloading library: %v\n", err)
+			os.Exit(1)
+		}
+		err = os.Rename(tmpPath, libPath)
+		if err != nil {
+			fmt.Printf("Error moving library: %v\n", err)
+			os.Exit(1)
+		}
+		cmd = exec.Command("chmod", "+x", libPath)
+		err = cmd.Run()
+		if err != nil {
+			fmt.Printf("Warning: Error making library executable: %v\n", err)
+		}
+		fmt.Printf("Installed %s to %s\n", libname, libPath)
+	} else if action == "update" {
+		fmt.Println("Checking for library updates...")
+		packages := getPackages()
+		installed := getInstalled(packages, libDir)
+		for _, lib := range installed {
+			urlStr := packages[lib]
+			filename := getFilename(urlStr)
+			libPath := filepath.Join(libDir, filename)
+			tmpPath := filepath.Join("/tmp", filename)
+			fmt.Printf("Updating %s...\n", lib)
+			err := os.Remove(libPath)
+			if err != nil {
+				fmt.Printf("Error removing old library: %v\n", err)
+				continue
+			}
+			cmd := exec.Command("curl", "-L", "-o", tmpPath, urlStr)
+			err = cmd.Run()
+			if err != nil {
+				fmt.Printf("Error downloading update: %v\n", err)
+				continue
+			}
+			err = os.Rename(tmpPath, libPath)
+			if err != nil {
+				fmt.Printf("Error moving update: %v\n", err)
+				continue
+			}
+			cmd = exec.Command("chmod", "+x", libPath)
+			err = cmd.Run()
+			if err != nil {
+				fmt.Printf("Warning: Error making library executable: %v\n", err)
+			}
+			fmt.Printf("%s updated\n", lib)
+		}
+	} else {
+		usage()
+	}
 }
 
-async function fetchPackageList() {
-    try {
-        const response = await fetch(packageListUrl);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const text = await response.text();
-        const lines = text.split('\n');
-        const packages = {};
-        let in_config = false;
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed === '[') {
-                in_config = true;
-                continue;
-            }
-            if (trimmed === ']') {
-                in_config = false;
-                continue;
-            }
-            if (in_config && trimmed.includes('=>')) {
-                const [name, url] = trimmed.split('=>').map(s => s.trim());
-                if (name && url) {
-                    packages[name] = url;
-                }
-            }
-        }
-        return packages;
-    } catch (err) {
-        console.error(`Error fetching package list: ${err.message}`);
-        process.exit(1);
-    }
-}
-
-if (action === 'list') {
-    console.log('Fetching available libraries...');
-    fetchPackageList().then(packages => {
-        console.log('Available libraries:');
-        Object.keys(packages).forEach(lib => console.log(`- ${lib}`));
-        const installed = fs.existsSync(libDir) ? fs.readdirSync(libDir).filter(f => fs.lstatSync(path.join(libDir, f)).isDirectory()) : [];
-        console.log('\nInstalled libraries:');
-        installed.forEach(lib => console.log(`- ${lib}`));
-    });
-} else if (action === 'install') {
-    const libname = args[1];
-    if (!libname) {
-        console.error('Usage: hacker-library install <libname>');
-        process.exit(1);
-    }
-    fetchPackageList().then(packages => {
-        if (!packages[libname]) {
-            console.error(`Library ${libname} not found in package list.`);
-            process.exit(1);
-        }
-        const repoUrl = packages[libname];
-        const libPath = path.join(libDir, libname);
-        console.log(`Installing ${libname} from ${repoUrl}...`);
-        try {
-            if (fs.existsSync(libPath)) {
-                console.log(`Removing existing ${libname}...`);
-                execSync(`rm -rf ${libPath}`);
-            }
-            execSync(`git clone ${repoUrl} ${libPath}`, { stdio: 'inherit' });
-            if (!fs.existsSync(path.join(libPath, 'main.hacker'))) {
-                console.error(`Library ${libname} missing main.hacker`);
-                execSync(`rm -rf ${libPath}`);
-                process.exit(1);
-            }
-            console.log(`Installed ${libname} to ${libPath}`);
-        } catch (err) {
-            console.error(`Error installing ${libname}: ${err.message}`);
-            process.exit(1);
-        }
-    });
-} else if (action === 'update') {
-    console.log('Checking for library updates...');
-    const installed = fs.existsSync(libDir) ? fs.readdirSync(libDir).filter(f => fs.lstatSync(path.join(libDir, f)).isDirectory()) : [];
-    fetchPackageList().then(packages => {
-        installed.forEach(lib => {
-            if (packages[lib]) {
-                const libPath = path.join(libDir, lib);
-                console.log(`Updating ${lib}...`);
-                try {
-                    execSync(`cd ${libPath} && git pull`, { stdio: 'inherit' });
-                    console.log(`${lib} updated`);
-                } catch (err) {
-                    console.error(`Error updating ${lib}: ${err.message}`);
-                }
-            } else {
-                console.log(`${lib}: No update info available`);
-            }
-        });
-    });
-} else {
-    console.error('Usage: hacker-library [list|install|update] [libname]');
-    process.exit(1);
+func usage() {
+	fmt.Println("Usage: hacker-library [list|install|update] [libname]")
+	os.Exit(1)
 }
