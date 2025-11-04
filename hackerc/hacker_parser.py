@@ -1,21 +1,21 @@
 import os
 from rich.console import Console
 
-HACKER_DIR = os.path.expanduser("~/.hackeros/hacker-lang")  # Updated path
+HACKER_DIR = os.path.expanduser("~/.hackeros/hacker-lang")
 
 def parse_hacker_file(file_path, verbose=False, console=None):
     if console is None:
         console = Console()
-
     deps = set()
-    libs = set()
+    libs = set()  # Custom libraries that are binaries
     vars_dict = {}
     cmds = []
-    includes = []
+    includes = []  # Libraries that are .hacker files
+    binaries = []  # Paths to binary libraries to embed or call
     errors = []
     in_config = False
+    config_data = {}
     line_num = 0
-
     try:
         with open(file_path, 'r') as f:
             for line in f:
@@ -23,7 +23,6 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                 line = line.strip()
                 if not line:
                     continue
-
                 if line == '[':
                     if in_config:
                         errors.append(f"Line {line_num}: Nested config section")
@@ -34,10 +33,11 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                         errors.append(f"Line {line_num}: Closing ] without [")
                     in_config = False
                     continue
-
                 if in_config:
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        config_data[key.strip()] = value.strip()
                     continue
-
                 if line.startswith('//'):
                     dep = line[2:].strip()
                     if dep:
@@ -47,19 +47,24 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                 elif line.startswith('#'):
                     lib = line[1:].strip()
                     if lib:
-                        lib_path = os.path.join(HACKER_DIR, "libs", lib, "main.hacker")
-                        if os.path.exists(lib_path):
+                        lib_dir = os.path.join(HACKER_DIR, "libs", lib)
+                        lib_hacker_path = os.path.join(lib_dir, "main.hacker")
+                        lib_bin_path = os.path.join(HACKER_DIR, "libs", lib)  # Assuming binary is libs/lib (file)
+                        if os.path.exists(lib_hacker_path):
                             includes.append(lib)
-                            sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_errors = parse_hacker_file(lib_path, verbose, console)
+                            sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_binaries, sub_errors, _ = parse_hacker_file(lib_hacker_path, verbose, console)
                             deps.update(sub_deps)
                             libs.update(sub_libs)
                             vars_dict.update(sub_vars)
                             cmds.extend(sub_cmds)
                             includes.extend(sub_includes)
+                            binaries.extend(sub_binaries)
                             for err in sub_errors:
                                 errors.append(f"In {lib}: {err}")
+                        elif os.path.exists(lib_bin_path) and os.access(lib_bin_path, os.X_OK):
+                            binaries.append(lib_bin_path)
                         else:
-                            libs.add(lib)
+                            libs.add(lib)  # To be installed
                     else:
                         errors.append(f"Line {line_num}: Empty library/include")
                 elif line.startswith('>'):
@@ -117,21 +122,19 @@ def parse_hacker_file(file_path, verbose=False, console=None):
                     pass
                 else:
                     errors.append(f"Line {line_num}: Invalid syntax")
-
         if in_config:
             errors.append("Unclosed config section")
-
         if verbose:
             console.print(f"[blue]System Deps: {deps}[/blue]")
             console.print(f"[blue]Custom Libs: {libs}[/blue]")
             console.print(f"[blue]Vars: {vars_dict}[/blue]")
             console.print(f"[blue]Cmds: {cmds}[/blue]")
             console.print(f"[blue]Includes: {includes}[/blue]")
+            console.print(f"[blue]Binaries: {binaries}[/blue]")
+            console.print(f"[blue]Config: {config_data}[/blue]")
             if errors:
                 console.print(f"[yellow]Errors: {errors}[/yellow]")
-
-        return deps, libs, vars_dict, cmds, includes, errors
-
+        return deps, libs, vars_dict, cmds, includes, binaries, errors, config_data
     except FileNotFoundError:
         console.print(f"[bold red]File {file_path} not found[/bold red]")
-        return set(), set(), {}, [], [], [f"File {file_path} not found"]
+        return set(), set(), {}, [], [], [], [f"File {file_path} not found"], {}
