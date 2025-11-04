@@ -129,7 +129,10 @@ Description=System maintenance script
             f.write(template)
         console.print(Panel(f"Initialized template at {file_path}", title="Init Mode", border_style="bold green"))
         if verbose:
-            console.print(Syntax(template, "hacker", theme="dracula", line_numbers=True))
+            try:
+                console.print(Syntax(template, "bash", theme="dracula", line_numbers=True))
+            except ImportError:
+                console.print(template)
         return True
     except Exception as e:
         console.print(f"[bold red]Initialization failed: {e}[/bold red]")
@@ -217,8 +220,7 @@ def help_command(show_banner=True):
         table.add_row(cmd, desc, args)
     console.print(table)
     console.print("\nSyntax Highlight Example:")
-    console.print(Syntax(
-        """// sudo
+    example_code = """// sudo
 # network-utils
 @USER=admin
 =2 > echo $USER
@@ -228,12 +230,11 @@ def help_command(show_banner=True):
 > sudo apt update
 [
 Config=Example
-]""",
-        "hacker",
-        theme="dracula",
-        line_numbers=True,
-        background_color="default"
-    ))
+]"""
+    try:
+        console.print(Syntax(example_code, "bash", theme="dracula", line_numbers=True, background_color="default"))
+    except ImportError:
+        console.print(example_code)
 
 def main():
     ensure_hacker_dir()
