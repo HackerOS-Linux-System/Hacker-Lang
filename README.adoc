@@ -51,19 +51,6 @@ Poniżej przykład prostego pliku `.hacker` z komentarzami składniowymi.
 // sudo
 // apt
 > sudo apt update
-"syntax example"
-Syntax Example:
-1 // sudo
-2 # bit-jump
-3 @USER=admin
-4 =2 > echo $USER
-5 ? [ -d /tmp ] > echo OK
-6 & sleep 10
-7 # util
-8 > sudo apt update
-9 [
-10 Config
-11 ]
 ----
 
 Wyjaśnienie elementów składni (krótkie):
