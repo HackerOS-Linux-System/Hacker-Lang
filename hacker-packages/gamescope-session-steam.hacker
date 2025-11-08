@@ -1,0 +1,6 @@
+// sudo
+// apt
+// git
+> sudo apt install gamescope
+> git clone https://github.com/ChimeraOS/gamescope-session-steam.git /tmp/gamescope-session
+> cd /tmp/gamescope-session
