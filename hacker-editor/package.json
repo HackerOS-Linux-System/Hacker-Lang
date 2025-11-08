@@ -1,1 +1,14 @@
-
+{
+  "name": "hacker-editor",
+  "version": "1.0.0",
+  "description": "Enhanced GUI IDE for Hacker Lang on Linux Hackeros",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "HackerOS Team",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0"
+  }
+}
