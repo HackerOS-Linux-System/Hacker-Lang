@@ -1,1 +1,19 @@
+package:
+  name: 3 example
+  version: 0.0.4
+  author: "HackerOS Team"
+  description: "example project using obsidian lib"
 
+entry: main.hacker
+
+libs:
+  - obsidian
+
+scripts:
+  build: "hackerc compile main.hacker"
+  run: "hacker run ."
+  release: "hacker compile --bytes"
+
+meta:
+  license: MIT
+  repo: "https://github.com/HackerOS-Linux-System/Hacker-Lang/"
