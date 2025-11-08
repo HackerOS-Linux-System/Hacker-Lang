@@ -44,7 +44,7 @@ Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
 
 == Składnia i przykład prostego skryptu `.hacker`
 
-Poniżej przykład prostego pliku `.hacker` z komentarzami składniowymi.
+Poniżej przykład prostego pliku `.hacker`.
 
 [source,hacker]
 ----
@@ -53,7 +53,7 @@ Poniżej przykład prostego pliku `.hacker` z komentarzami składniowymi.
 > sudo apt update
 ----
 
-= Składnia Hacker Lang – Prefiksy i ich znaczenie
+= Składnia Hacker Lang
 
 |===
 | Prefiks | Znaczenie | Przykład
