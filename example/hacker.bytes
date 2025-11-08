@@ -1,0 +1,19 @@
+package:
+  name: <project name>
+  version: <version>
+  author: "<autor name>"
+  description: "<my script/app in .hacker>"
+
+entry: <your file .hacker>
+
+libs:
+  - <lib name>
+
+scripts:
+  build: "hackerc compile <my file .hacker>"
+  run: "hacker run ."
+  release: "hacker compile --bytes"
+
+meta:
+  license: <your license>
+  repo: "<your repository>"
