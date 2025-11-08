@@ -56,7 +56,7 @@ ipcMain.handle('read-file', (event, filePath) => {
 });
 
 ipcMain.handle('write-file', (event, filePath, content) => {
-  fs.writeFileSync(filePath, content);
+  return fs.writeFileSync(filePath, content);
 });
 
 ipcMain.on('exec-command', (event, cmd) => {
