@@ -129,4 +129,4 @@ Projekt jest dostępny na licencji MIT. Zobacz plik LICENSE w repozytorium.
 
 == Kontakt
 
-Masz pomysł albo błąd? Otwórz issue na GitHubie w repozytorium projektu.
+Masz pomysł albo błąd? Otwórz issue na GitHubie w repozytorium projektu. Kontakt na email: hackeros068@gmail.com
