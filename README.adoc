@@ -114,7 +114,7 @@ Poniżej przykład prostego pliku `.hacker`.
 
 == Integracja z bytes.io
 
-Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `hackerc install <nazwa>` aby pobrać paczkę; `hackerc update <nazwa>` aby ją zaktualizować.
+Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `bytes install <nazwa>` aby pobrać paczkę; `bytes update` aby ją zaktualizować. Jeżeli nie masz zainstalowanego narzędzia cli bytes użyj komendy hackerc unpack bytes.
 
 == FAQ (krótkie)
 
