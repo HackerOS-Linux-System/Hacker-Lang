@@ -71,8 +71,8 @@ Poniżej przykład prostego pliku `.hacker`.
 | `// curl` → `sudo apt install curl`
 
 | `#`
-| **Biblioteka (lib)** – własna biblioteka lub moduł
-| `# network-utils`
+| **Biblioteka (lib)** – biblioteka z repozytorium bytes.io (zainstaluj ją za pomocą bytes install)
+| `# obsidian`
 
 | `@`
 | **Zmienna środowiskowa**
