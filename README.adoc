@@ -121,6 +121,7 @@ Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `bytes install <nazw
 * Jak debugować?:: Użyj `hackerc check` oraz `hackerc run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hackerc` znajdują się w domyślnym katalogu cache.
 * Czy `.hacker` może wywoływać polecenia systemowe?:: Tak — użyj `>` aby wykonać komendę shellową.
 * Gdzie znaleźć dokumentację?:: Pełna dokumentacja i wiki: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki[Wiki na GitHubie].
+* Zgłoś błąd:: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/issues[Issues na GitHubie]
 
 == Licencja
 
