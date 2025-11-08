@@ -1,3 +1,4 @@
+// main.rs
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
@@ -33,7 +34,7 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
     let mut vars = Vec::new();
     let mut cmds = Vec::new();
     let mut includes = Vec::new();
-    let mut binaries = Vec::new();  // Binary lib paths
+    let mut binaries = Vec::new(); // Binary lib paths
     let mut errors = Vec::new();
     let mut config = std::collections::HashMap::new();
     let mut in_config = false;
@@ -80,7 +81,7 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
             } else {
                 let lib_dir = expand_home(&format!("{}/libs/{}", HACKER_DIR, lib));
                 let lib_hacker_path = format!("{}/main.hacker", lib_dir);
-                let lib_bin_path = expand_home(&format!("{}/libs/{}", HACKER_DIR, lib));  // Binary file
+                let lib_bin_path = expand_home(&format!("{}/libs/{}", HACKER_DIR, lib)); // Binary file
                 if Path::new(&lib_hacker_path).exists() {
                     includes.push(lib.clone());
                     let (sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_binaries, sub_errors, sub_config) = parse_hacker_file(Path::new(&lib_hacker_path), verbose)?;
@@ -227,7 +228,6 @@ fn main() -> io::Result<()> {
         bin_extract_cmds.push(extract_cmd);
     }
     final_cmds.extend(bin_extract_cmds);
-
     // Cranelift setup
     let flag_builder = settings::builder();
     let flags = settings::Flags::new(flag_builder);
@@ -241,36 +241,30 @@ fn main() -> io::Result<()> {
     ).expect("ObjectBuilder failed");
     let mut module = ObjectModule::new(builder);
     let pointer_type = module.target_config().pointer_type();
-
     // Declare external functions
     let mut sig_system = module.make_signature();
     sig_system.params.push(AbiParam::new(pointer_type));
     sig_system.returns.push(AbiParam::new(types::I32));
     sig_system.call_conv = module.target_config().default_call_conv;
     let system_id = module.declare_function("system", Linkage::Import, &sig_system).unwrap();
-
     let mut sig_putenv = module.make_signature();
     sig_putenv.params.push(AbiParam::new(pointer_type));
     sig_putenv.returns.push(AbiParam::new(types::I32));
     sig_putenv.call_conv = module.target_config().default_call_conv;
     let putenv_id = module.declare_function("putenv", Linkage::Import, &sig_putenv).unwrap();
-
     // Main function
     let mut sig_main = module.make_signature();
     sig_main.returns.push(AbiParam::new(types::I32));
     sig_main.call_conv = module.target_config().default_call_conv;
     let main_id = module.declare_function("main", Linkage::Export, &sig_main).unwrap();
-
     let mut ctx = cranelift_codegen::Context::for_function(Function::with_name_signature(Default::default(), sig_main.clone()));
     let mut func_builder_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
     let entry_block = builder.create_block();
     builder.switch_to_block(entry_block);
     builder.seal_block(entry_block);
-
     let local_system = module.declare_func_in_func(system_id, &mut builder.func);
     let local_putenv = module.declare_func_in_func(putenv_id, &mut builder.func);
-
     // Embed vars as putenv
     let mut var_data_ids = Vec::new();
     for (i, (var, value)) in vars.iter().enumerate() {
@@ -289,7 +283,6 @@ fn main() -> io::Result<()> {
         let ptr = builder.ins().global_value(pointer_type, global);
         builder.ins().call(local_putenv, &[ptr]);
     }
-
     // Embed cmd strings
     let mut cmd_data_ids = Vec::new();
     for (i, cmd) in final_cmds.iter().enumerate() {
@@ -307,7 +300,6 @@ fn main() -> io::Result<()> {
         let ptr = builder.ins().global_value(pointer_type, global);
         builder.ins().call(local_system, &[ptr]);
     }
-
     // Embed binary libs data
     for (i, bin_path) in binaries.iter().enumerate() {
         let bin_data = fs::read(bin_path)?;
@@ -318,18 +310,14 @@ fn main() -> io::Result<()> {
         module.define_data(data_id, &data_ctx).unwrap();
         // In runtime, we would need to extract, but since we're using system calls, we embed extraction cmds above
     }
-
     let zero = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[zero]);
     builder.finalize();
-
     module.define_function(main_id, &mut ctx).unwrap();
     let obj = module.finish().object.write().expect("Write object failed");
-
     let temp_obj_path = output_path.with_extension("o");
     let mut file = File::create(&temp_obj_path)?;
     file.write_all(&obj)?;
-
     let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display()))
         .join()
         .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
