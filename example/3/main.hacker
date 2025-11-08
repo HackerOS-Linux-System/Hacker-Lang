@@ -1,1 +1,23 @@
+# obsidian              ! Użycie biblioteki binarnej Obsidian (GUI dialogs)
 
+@TITLE = "Witaj w HackerOS"     ! Przykładowe zmienne
+@PROMPT = "Podaj swój nick:"
+@MSG = "Dziękujemy za skorzystanie z Obsidian Dialogs!"
+
+! Wyświetl komunikat powitalny
+> obsidian message --text "$TITLE" --level info
+
+! Pobierz od użytkownika dane (okno input)
+> NICK=$(obsidian input --prompt "$PROMPT")
+
+! Jeśli pusty — przerwij
+? [ -z "$NICK" ] > obsidian message --text "Nie podano żadnej wartości." --level warning
+
+! Potwierdzenie
+> RESPONSE=$(obsidian confirm --text "Czy nazwa użytkownika ma być: $NICK ?")
+
+! Jeśli użytkownik potwierdził — zapisz
+? [ "$RESPONSE" = "yes" ] > echo "$NICK" > ~/.hackeros/user_name || obsidian message --text "Odrzucono." --level error
+
+! Wyświetl wiadomość końcową
+> obsidian message --text "$MSG" --level info
