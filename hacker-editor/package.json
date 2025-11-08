@@ -2,7 +2,7 @@
   "name": "hacker-editor",
   "productName": "Hacker Editor",
   "version": "1.0.0",
-  "description": "Enhanced GUI IDE for Hacker Lang on Linux Hackeros",
+  "description": "Enhanced GUI IDE for Hacker Lang on Linux HackerOS",
   "main": "main.js",
   "author": "HackerOS Team",
   "license": "MIT",
@@ -20,12 +20,13 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "asar": true,
     "files": [
-      "package.json",
       "main.js",
       "preload.js",
-      "renderer/**",
-      "assets/**",
+      "package.json",
+      "renderer/**/*",
+      "assets/**/*",
       "node_modules/**/*"
     ],
     "extraResources": [
@@ -48,17 +49,10 @@
         "StartupNotify": "true"
       }
     },
-    "asar": true,
-    "files": [
-      "main.js",
-      "package.json",
-      "renderer/**/*",
-      "assets/**/*",
-      "node_modules/**/*"
-    ],
     "compression": "normal"
   },
   "dependencies": {
+    "@electron/remote": "^2.1.2",
     "electron-is-dev": "^2.0.0"
   },
   "devDependencies": {
