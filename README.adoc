@@ -53,15 +53,52 @@ Poniżej przykład prostego pliku `.hacker` z komentarzami składniowymi.
 > sudo apt update
 ----
 
-Wyjaśnienie elementów składni (krótkie):
+= Składnia Hacker Lang – Prefiksy i ich znaczenie
 
-* `//`:: komentarz jednoliniowy.
-* `#`:: sekcja lub etykieta logiczna.
-* `@VAR=wartosc`:: deklaracja zmiennej (dostęp przez `$VAR`).
-* `=N >`:: operator wykonania o priorytecie/znaczeniu (np. `=2 > echo`).
-* `? [ warunek ] >`:: warunkowe wykonanie — jeśli `warunek` prawdziwy.
-* `&`:: uruchomienie polecenia w tle (asynchronicznie).
-* `>`:: wykonaj polecenie shellowe.
+|===
+| Prefiks | Znaczenie | Przykład
+
+| `!`
+| **Komentarz** (cała linia jest ignorowana)
+| `! To jest komentarz`
+
+| `//`
+| **Zależność systemowa** (pakiet z `apt`)
+| `// curl` → `sudo apt install curl`
+
+| `#`
+| **Biblioteka (lib)** – własna biblioteka lub moduł
+| `# network-utils`
+
+| `@`
+| **Zmienna środowiskowa**
+| `@USER=admin`
+
+| `>`
+| **Komenda do wykonania**
+| `> echo "Hello"`
+
+| `=`
+| **Pętla** (`liczba > komenda`)
+| `=3 > echo "Hi"` → 3 razy
+
+| `?`
+| **Warunek** (`warunek > komenda`)
+| `? [ -f file ] > echo OK`
+
+| `&`
+| **Uruchom w tle**
+| `& sleep 10`
+
+| `[`
+| **Początek sekcji konfiguracyjnej**
+| `[`
+
+| `]`
+| **Koniec sekcji konfiguracyjnej**
+| `]`
+
+|===
 
 == Przykładowy workflow
 
