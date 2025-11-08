@@ -24,8 +24,9 @@
     "files": [
       "main.js",
       "preload.js",
+      "renderer.js",
       "package.json",
-      "renderer/**/*",
+      "index.html",
       "assets/**/*",
       "node_modules/**/*"
     ],
@@ -52,7 +53,6 @@
     "compression": "normal"
   },
   "dependencies": {
-    "@electron/remote": "^2.1.2",
     "electron-is-dev": "^2.0.0"
   },
   "devDependencies": {
