@@ -1,4 +1,3 @@
-// main.rs
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
