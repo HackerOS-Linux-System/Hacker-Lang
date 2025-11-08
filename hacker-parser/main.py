@@ -1,4 +1,3 @@
-# hacker_parser.py
 import os
 import json
 import sys
@@ -146,7 +145,7 @@ if __name__ == '__main__':
     verbose = '--verbose' in sys.argv
     args = [arg for arg in sys.argv[1:] if arg != '--verbose']
     if len(args) != 1:
-        print("Usage: python hacker_parser.py <file_path> [--verbose]")
+        print("Usage: hacker-parser <file_path> [--verbose]")
         sys.exit(1)
     file_path = args[0]
     deps, libs, vars_dict, cmds, includes, binaries, errors, config_data = parse_hacker_file(file_path, verbose)
