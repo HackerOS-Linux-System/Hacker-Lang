@@ -1,1 +1,370 @@
+<!-- index.html - HTML with inline CSS and JS -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hacker Lang IDE</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #1e1e1e;
+      color: #d4d4d4;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      background-color: #252526;
+      border-bottom: 1px solid #3c3c3c;
+    }
+    button {
+      padding: 6px 12px;
+      background-color: #007acc;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background-color: #005a9e;
+    }
+    button:disabled {
+      background-color: #3c3c3c;
+      cursor: not-allowed;
+    }
+    #editor-container {
+      flex: 1;
+      position: relative;
+    }
+    #editor {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+    #output-container {
+      height: 200px;
+      background-color: #1e1e1e;
+      border-top: 1px solid #3c3c3c;
+      display: flex;
+      flex-direction: column;
+    }
+    #output-header {
+      padding: 4px 8px;
+      background-color: #252526;
+      font-size: 12px;
+      border-bottom: 1px solid #3c3c3c;
+    }
+    #output {
+      flex: 1;
+      overflow: auto;
+      padding: 8px;
+      font-family: 'Consolas', monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .status-bar {
+      padding: 4px 8px;
+      background-color: #007acc;
+      color: white;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+    }
+    #status-message {
+      flex: 1;
+    }
+    #status-info {
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="open">Open</button>
+    <button id="save">Save</button>
+    <button id="run">Run</button>
+    <button id="compile">Compile</button>
+    <button id="check">Check</button>
+    <button id="init">Init</button>
+    <button id="clean">Clean</button>
+    <button id="repl">REPL</button>
+  </div>
+  <div id="editor-container">
+    <div id="editor"></div>
+  </div>
+  <div id="output-container">
+    <div id="output-header">Output</div>
+    <div id="output">Welcome to Hacker Lang IDE. Edit your code above and use the toolbar to interact.</div>
+  </div>
+  <div class="status-bar">
+    <span id="status-message">Ready</span>
+    <span id="status-info">Ln 1, Col 1 | Hacker Lang</span>
+  </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs/loader.min.js"></script>
+  <script>
+    // Load Monaco Editor
+    require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs' } });
+    require(['vs/editor/editor.main'], function () {
+      // Register Hacker Lang
+      monaco.languages.register({ id: 'hackerlang' });
+
+      // Monarch tokenizer
+      monaco.languages.setMonarchTokensProvider('hackerlang', {
+        tokenizer: {
+          root: [
+            [/^\/\/.*/, 'dependency'],
+            [/^#.*/, 'library'],
+            [/^@[\w-]+=.*/, 'variable'],
+            [/^>.*/, 'command'],
+            [/^=\d+\s*>.*/, 'loop'],
+            [/^\?\s*.+\s*>.*/, 'conditional'],
+            [/^&.*/, 'background'],
+            [/^!.*/, 'comment'],
+            [/^\[.*\]$/, 'config-section'],
+            [/^[\w-]+=.*$/, 'config-key']
+          ]
+        }
+      });
+
+      // Theme
+      monaco.editor.defineTheme('hackerTheme', {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [
+          { token: 'dependency', foreground: '4ec9b0' }, // Greenish
+          { token: 'library', foreground: '569cd6' },    // Blue
+          { token: 'variable', foreground: 'c586c0' },   // Purple
+          { token: 'command', foreground: 'd4d4d4' },    // Light gray
+          { token: 'loop', foreground: 'dcdcaa' },       // Yellow
+          { token: 'conditional', foreground: '9cdcfe' },// Light blue
+          { token: 'background', foreground: 'ce9178' }, // Orange
+          { token: 'comment', foreground: '6a9955' },    // Green comment
+          { token: 'config-section', foreground: 'd7ba7d', fontStyle: 'bold' },
+          { token: 'config-key', foreground: 'ce9178' }
+        ],
+        colors: {
+          'editor.background': '#1e1e1e',
+          'editor.foreground': '#d4d4d4',
+          'editorLineNumber.foreground': '#858585',
+          'editorCursor.foreground': '#ffffff',
+          'editor.selectionBackground': '#264f78'
+        }
+      });
+
+      // Create editor
+      window.editor = monaco.editor.create(document.getElementById('editor'), {
+        value: '// Welcome to Hacker Lang IDE\n// Start coding here...\n',
+        language: 'hackerlang',
+        theme: 'hackerTheme',
+        automaticLayout: true,
+        minimap: { enabled: true },
+        scrollBeyondLastLine: false,
+        fontSize: 14,
+        lineNumbers: 'on',
+        roundedSelection: false,
+        padding: { top: 10 }
+      });
+
+      // Update status bar on cursor change
+      editor.onDidChangeCursorPosition(e => {
+        document.getElementById('status-info').innerText = `Ln ${e.position.lineNumber}, Col ${e.position.column} | Hacker Lang`;
+      });
+    });
+
+    // Node modules
+    const fs = require('fs');
+    const { exec } = require('child_process');
+    const path = require('path');
+    const os = require('os');
+    const remote = require('electron').remote;
+    const dialog = remote.dialog;
+    const shell = remote.shell;
+
+    const HACKERC_BIN = '/usr/bin/hackerc';
+    let currentFile = null;
+    const outputDiv = document.getElementById('output');
+    const statusMessage = document.getElementById('status-message');
+
+    function updateStatus(msg) {
+      statusMessage.innerText = msg;
+    }
+
+    function appendOutput(text, color = '#d4d4d4') {
+      const span = document.createElement('span');
+      span.style.color = color;
+      span.innerText = text + '\n';
+      outputDiv.appendChild(span);
+      outputDiv.scrollTop = outputDiv.scrollHeight;
+    }
+
+    function runCommand(cmd, verbose = false) {
+      if (verbose) cmd += ' --verbose';
+      appendOutput(`Executing: ${cmd}`, '#569cd6');
+      updateStatus('Running...');
+      exec(cmd, (err, stdout, stderr) => {
+        if (err) {
+          appendOutput(`Error: ${stderr || err.message}`, '#f44747');
+        } else {
+          appendOutput(stdout, '#d4d4d4');
+        }
+        updateStatus('Ready');
+      });
+    }
+
+    // Exposed functions for menu
+    window.openFile = function() {
+      dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [{ name: 'Hacker Files', extensions: ['hacker'] }]
+      }).then(result => {
+        if (!result.canceled) {
+          const filePath = result.filePaths[0];
+          fs.readFile(filePath, 'utf8', (err, data) => {
+            if (err) {
+              appendOutput(`Error opening: ${err.message}`, '#f44747');
+              return;
+            }
+            editor.setValue(data);
+            currentFile = filePath;
+            appendOutput(`Opened: ${filePath}`, '#4ec9b0');
+            updateStatus('File opened');
+          });
+        }
+      });
+    };
+
+    window.saveFile = function() {
+      const content = editor.getValue();
+      if (currentFile) {
+        fs.writeFile(currentFile, content, err => {
+          if (err) {
+            appendOutput(`Error saving: ${err.message}`, '#f44747');
+          } else {
+            appendOutput(`Saved: ${currentFile}`, '#4ec9b0');
+            updateStatus('Saved');
+          }
+        });
+      } else {
+        saveAsFile();
+      }
+    };
+
+    window.saveAsFile = function() {
+      dialog.showSaveDialog({
+        filters: [{ name: 'Hacker Files', extensions: ['hacker'] }]
+      }).then(result => {
+        if (!result.canceled) {
+          currentFile = result.filePath;
+          fs.writeFile(currentFile, editor.getValue(), err => {
+            if (err) {
+              appendOutput(`Error saving: ${err.message}`, '#f44747');
+            } else {
+              appendOutput(`Saved as: ${currentFile}`, '#4ec9b0');
+              updateStatus('Saved');
+            }
+          });
+        }
+      });
+    };
+
+    window.runScript = function() {
+      if (!currentFile) {
+        currentFile = path.join(os.tmpdir(), `temp_${Date.now()}.hacker`);
+        fs.writeFileSync(currentFile, editor.getValue());
+      }
+      runCommand(`${HACKERC_BIN} run ${currentFile}`);
+    };
+
+    window.compileScript = function() {
+      if (!currentFile) {
+        appendOutput('Save the file first to compile.', '#f44747');
+        return;
+      }
+      dialog.showSaveDialog({
+        title: 'Compile to',
+        defaultPath: path.join(path.dirname(currentFile), path.basename(currentFile, '.hacker'))
+      }).then(result => {
+        if (!result.canceled) {
+          const outputPath = result.filePath;
+          runCommand(`${HACKERC_BIN} compile ${currentFile} -o ${outputPath}`);
+        }
+      });
+    };
+
+    window.checkSyntax = function() {
+      let file = currentFile;
+      if (!file) {
+        file = path.join(os.tmpdir(), `temp_${Date.now()}.hacker`);
+        fs.writeFileSync(file, editor.getValue());
+      }
+      runCommand(`${HACKERC_BIN} check ${file}`);
+    };
+
+    window.initTemplate = function() {
+      dialog.showSaveDialog({
+        filters: [{ name: 'Hacker Files', extensions: ['hacker'] }]
+      }).then(result => {
+        if (!result.canceled) {
+          const filePath = result.filePath;
+          runCommand(`${HACKERC_BIN} init ${filePath}`);
+          setTimeout(() => {
+            fs.readFile(filePath, 'utf8', (err, data) => {
+              if (!err) {
+                editor.setValue(data);
+                currentFile = filePath;
+                appendOutput(`Initialized and loaded: ${filePath}`, '#4ec9b0');
+                updateStatus('Template initialized');
+              }
+            });
+          }, 1000);
+        }
+      });
+    };
+
+    window.cleanTemps = function() {
+      runCommand(`${HACKERC_BIN} clean`);
+    };
+
+    window.launchRepl = function() {
+      exec(`xterm -e ${HACKERC_BIN} repl`, (err) => {
+        if (err) {
+          appendOutput(`Error launching REPL: ${err.message}\n(Ensure xterm is installed)`, '#f44747');
+        } else {
+          appendOutput('REPL launched in new terminal.', '#4ec9b0');
+        }
+      });
+    };
+
+    window.showAbout = function() {
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'About Hacker Lang IDE',
+        message: 'Hacker Lang IDE v1.0\nBuilt with Electron and Monaco Editor\nFor Linux Hackeros',
+        buttons: ['OK']
+      });
+    };
+
+    // Button event listeners
+    document.getElementById('open').addEventListener('click', openFile);
+    document.getElementById('save').addEventListener('click', saveFile);
+    document.getElementById('run').addEventListener('click', runScript);
+    document.getElementById('compile').addEventListener('click', compileScript);
+    document.getElementById('check').addEventListener('click', checkSyntax);
+    document.getElementById('init').addEventListener('click', initTemplate);
+    document.getElementById('clean').addEventListener('click', cleanTemps);
+    document.getElementById('repl').addEventListener('click', launchRepl);
+  </script>
+</body>
+</html>
