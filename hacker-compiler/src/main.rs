@@ -16,7 +16,6 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
 const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
-
 fn expand_home(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = env::var_os("HOME") {
@@ -25,8 +24,12 @@ fn expand_home(path: &str) -> String {
     }
     path.to_string()
 }
-
-fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, std::collections::HashMap<String, String>)> {
+#[derive(Debug)]
+struct Plugin {
+    name: String,
+    // Dodatkowe pola dla pluginów, np. path: String,
+}
+fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result<(Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, std::collections::HashMap<String, String>, Vec<Plugin>)> {
     let file = File::open(path)?;
     let mut deps = Vec::new();
     let mut libs = Vec::new();
@@ -36,6 +39,7 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
     let mut binaries = Vec::new(); // Binary lib paths
     let mut errors = Vec::new();
     let mut config = std::collections::HashMap::new();
+    let mut plugins = Vec::new(); // Nowe: lista pluginów
     let mut in_config = false;
     let mut line_num = 0;
     for line in io::BufReader::new(file).lines() {
@@ -83,7 +87,7 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
                 let lib_bin_path = expand_home(&format!("{}/libs/{}", HACKER_DIR, lib)); // Binary file
                 if Path::new(&lib_hacker_path).exists() {
                     includes.push(lib.clone());
-                    let (sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_binaries, sub_errors, sub_config) = parse_hacker_file(Path::new(&lib_hacker_path), verbose)?;
+                    let (sub_deps, sub_libs, sub_vars, sub_cmds, sub_includes, sub_binaries, sub_errors, sub_config, sub_plugins) = parse_hacker_file(Path::new(&lib_hacker_path), verbose, bytes_mode)?;
                     deps.extend(sub_deps);
                     libs.extend(sub_libs);
                     vars.extend(sub_vars);
@@ -94,8 +98,13 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
                         errors.push(format!("In {}: {}", lib, err));
                     }
                     config.extend(sub_config);
+                    plugins.extend(sub_plugins);
                 } else if Path::new(&lib_bin_path).exists() && Path::new(&lib_bin_path).metadata()?.permissions().mode() & 0o111 != 0 {
-                    binaries.push(lib_bin_path);
+                    binaries.push(lib_bin_path.clone());
+                    if bytes_mode {
+                        // W trybie --bytes, embeduj binarkę biblioteki
+                        println!("Embedding library binary: {}", lib_bin_path);
+                    }
                 } else {
                     libs.push(lib);
                 }
@@ -118,7 +127,23 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
                     vars.push((var, value));
                 }
             } else {
-                errors.push(format!("Line {}: Missing = in variable", line_num));
+                // Nowe: obsługa pluginów @ nazwa_pluginu (bez =)
+                let plugin_name = line[1..].trim().to_string();
+                if plugin_name.is_empty() {
+                    errors.push(format!("Line {}: Empty plugin name", line_num));
+                } else {
+                    // Szukaj pluginu w ~/.hackeros/hacker-lang/plugins/ jako binarka lub źródło
+                    let plugin_path = expand_home(&format!("{}/plugins/{}", HACKER_DIR, plugin_name));
+                    if Path::new(&plugin_path).exists() && Path::new(&plugin_path).metadata()?.permissions().mode() & 0o111 != 0 {
+                        plugins.push(Plugin { name: plugin_name.clone() });
+                        if verbose {
+                            println!("Loaded plugin: {}", plugin_name);
+                        }
+                        // Dodaj komendę do wykonania pluginu, np. cmds.push(format!("{} &", plugin_path));
+                    } else {
+                        errors.push(format!("Line {}: Plugin {} not found or not executable", line_num, plugin_name));
+                    }
+                }
             }
         } else if line.starts_with("=") {
             let parts: Vec<String> = line[1..].split('>').map(|s| s.trim().to_string()).collect();
@@ -177,31 +202,48 @@ fn parse_hacker_file(path: &Path, verbose: bool) -> io::Result<(Vec<String>, Vec
         println!("Cmds: {:?}", cmds);
         println!("Includes: {:?}", includes);
         println!("Binaries: {:?}", binaries);
+        println!("Plugins: {:?}", plugins);
         println!("Config: {:?}", config);
         if !errors.is_empty() {
             println!("Errors: {:?}", errors);
         }
     }
-    Ok((deps, libs, vars, cmds, includes, binaries, errors, config))
+    Ok((deps, libs, vars, cmds, includes, binaries, errors, config, plugins))
 }
-
 fn generate_check_cmd(dep: &str) -> String {
     if dep == "sudo" {
         return String::new();
     }
     format!("command -v {} &> /dev/null || (sudo apt update && sudo apt install -y {})", dep, dep)
 }
-
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 3 || args.len() > 4 {
-        eprintln!("Usage: hacker-compiler <input.hacker> <output> [--verbose]");
+    let mut bytes_mode = false;
+    let mut verbose = false;
+    let mut input_path_str = String::new();
+    let mut output_path_str = String::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bytes" => bytes_mode = true,
+            "--verbose" => verbose = true,
+            _ => {
+                if input_path_str.is_empty() {
+                    input_path_str = args[i].clone();
+                } else if output_path_str.is_empty() {
+                    output_path_str = args[i].clone();
+                }
+            }
+        }
+        i += 1;
+    }
+    if input_path_str.is_empty() || output_path_str.is_empty() {
+        eprintln!("Usage: hacker-compiler <input.hacker> <output> [--verbose] [--bytes]");
         process::exit(1);
     }
-    let verbose = args.len() == 4 && args[3] == "--verbose";
-    let input_path = Path::new(&args[1]);
-    let output_path = Path::new(&args[2]);
-    let (deps, _libs, vars, cmds, _includes, binaries, errors, _config) = parse_hacker_file(input_path, verbose)?;
+    let input_path = Path::new(&input_path_str);
+    let output_path = Path::new(&output_path_str);
+    let (deps, _libs, vars, cmds, _includes, binaries, errors, _config, plugins) = parse_hacker_file(input_path, verbose, bytes_mode)?;
     if !errors.is_empty() {
         for err in errors {
             eprintln!("{}", err);
@@ -216,18 +258,20 @@ fn main() -> io::Result<()> {
         }
     }
     final_cmds.extend(cmds);
-    // For binaries, add commands to extract and run them
+    // Dla pluginów, dodaj komendy wykonania
+    for plugin in plugins {
+        let plugin_path = expand_home(&format!("{}/plugins/{}", HACKER_DIR, plugin.name));
+        final_cmds.push(format!("{} &", plugin_path));
+    }
+    // Dla binarek, extract cmds
     let mut bin_extract_cmds = Vec::new();
     for (i, bin_path) in binaries.iter().enumerate() {
         let bin_data = fs::read(bin_path)?;
         let data_name = format!("bin_lib_{i}");
-        // We'll embed later in Cranelift
-        // But for cmds, add extraction: e.g., write to /tmp and run
         let extract_cmd = format!("echo '{}' | base64 -d > /tmp/{} && chmod +x /tmp/{} && /tmp/{}", BASE64_STANDARD.encode(&bin_data), data_name, data_name, data_name);
         bin_extract_cmds.push(extract_cmd);
     }
     final_cmds.extend(bin_extract_cmds);
-    // Cranelift setup
     let flag_builder = settings::builder();
     let flags = settings::Flags::new(flag_builder);
     let triple = target_lexicon::Triple::host();
@@ -236,7 +280,7 @@ fn main() -> io::Result<()> {
     let builder = ObjectBuilder::new(
         isa,
         output_path.file_stem().unwrap().to_str().unwrap().as_bytes().to_vec(),
-        cranelift_module::default_libcall_names(),
+                                     cranelift_module::default_libcall_names(),
     ).expect("ObjectBuilder failed");
     let mut module = ObjectModule::new(builder);
     let pointer_type = module.target_config().pointer_type();
@@ -309,6 +353,29 @@ fn main() -> io::Result<()> {
         module.define_data(data_id, &data_ctx).unwrap();
         // In runtime, we would need to extract, but since we're using system calls, we embed extraction cmds above
     }
+    if bytes_mode {
+        for (i, bin_path) in binaries.iter().enumerate() {
+            let bin_data = fs::read(bin_path)?;
+            let encoded = BASE64_STANDARD.encode(&bin_data);
+            let extract_str = format!("echo '{}' | base64 -d > /tmp/bin_lib_{i} && chmod +x /tmp/bin_lib_{i} && /tmp/bin_lib_{i}", encoded);
+            let data_name = format!("bin_lib_data_{i}");
+            let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
+            let mut data_ctx = DataDescription::new();
+            data_ctx.define(bin_data.into_boxed_slice());
+            module.define_data(data_id, &data_ctx).unwrap();
+            // Dodaj kod do wyodrębniania w runtime
+            // Dodaj call do system z komendą extract
+            let extract_data_id = module.declare_data(&format!("extract_cmd_{i}"), Linkage::Local, true, false).unwrap();
+            let mut extract_ctx = DataDescription::new();
+            let mut bytes: Vec<u8> = extract_str.as_bytes().to_vec();
+            bytes.push(0);
+            extract_ctx.define(bytes.into_boxed_slice());
+            module.define_data(extract_data_id, &extract_ctx).unwrap();
+            let extract_global = module.declare_data_in_func(extract_data_id, &mut builder.func);
+            let extract_ptr = builder.ins().global_value(pointer_type, extract_global);
+            builder.ins().call(local_system, &[extract_ptr]);
+        }
+    }
     let zero = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[zero]);
     builder.finalize();
@@ -318,8 +385,8 @@ fn main() -> io::Result<()> {
     let mut file = File::create(&temp_obj_path)?;
     file.write_all(&obj)?;
     let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display()))
-        .join()
-        .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    .join()
+    .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "Linking failed"));
     }
