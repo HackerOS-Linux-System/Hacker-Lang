@@ -19,9 +19,9 @@ import (
 )
 
 const VERSION = "0.0.8"
-const HACKER_DIR = "~/hackeros/hacker-lang"
+const HACKER_DIR = "~/.hackeros/hacker-lang"
 const BIN_DIR = HACKER_DIR + "/bin"
-const HISTORY_FILE = "~/hackeros/hacker_repl_history" // Zmiana, aby nie było ukryte
+const HISTORY_FILE = "~./hackeros/history/hacker_repl_history" // Zmiana, aby nie było ukryte
 
 const (
 	colorReset  = "\033[0m"
