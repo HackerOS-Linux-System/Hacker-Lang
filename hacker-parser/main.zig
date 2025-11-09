@@ -1,246 +1,6 @@
 const std = @import("std");
-const HACKER_DIR_SUFFIX = "/.hackeros/hacker-lang";
-fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, verbose: bool) !struct {
-    deps: std.StringHashMap(void),
-    libs: std.StringHashMap(void),
-    vars_dict: std.StringHashMap([]const u8),
-    cmds: std.ArrayList([]const u8),
-    includes: std.ArrayList([]const u8),
-    binaries: std.ArrayList([]const u8),
-    errors: std.ArrayList([]const u8),
-    config_data: std.StringHashMap([]const u8),
-} {
-    var deps = std.StringHashMap(void).init(allocator);
-    var libs = std.StringHashMap(void).init(allocator);
-    var vars_dict = std.StringHashMap([]const u8).init(allocator);
-    var cmds = std.ArrayList([]const u8).init(allocator);
-    var includes = std.ArrayList([]const u8).init(allocator);
-    var binaries = std.ArrayList([]const u8).init(allocator);
-    var errors = std.ArrayList([]const u8).init(allocator);
-    var config_data = std.StringHashMap([]const u8).init(allocator);
-    var in_config = false;
-    var line_num: u32 = 0;
-    const home = std.posix.getenv("HOME") orelse "";
-    const hacker_dir = try std.fs.path.join(allocator, &.{ home, HACKER_DIR_SUFFIX });
-    defer allocator.free(hacker_dir);
-    const console = std.io.getStdOut().writer();
-    const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
-        if (err == error.FileNotFound) {
-            if (verbose) try console.print("File {s} not found\n", .{file_path});
-            try errors.append(try std.fmt.allocPrint(allocator, "File {s} not found", .{file_path}));
-            return .{
-                .deps = deps,
-                .libs = libs,
-                .vars_dict = vars_dict,
-                .cmds = cmds,
-                .includes = includes,
-                .binaries = binaries,
-                .errors = errors,
-                .config_data = config_data,
-            };
-        }
-        return err;
-    };
-    defer file.close();
-    const reader = file.reader();
-    var line_buf: [4096]u8 = undefined;
-    while (reader.readUntilDelimiterOrEof(&line_buf, '\n') catch null) |line_slice| {
-        line_num += 1;
-        const line_trimmed = std.mem.trim(u8, line_slice, " \t\r\n");
-        if (line_trimmed.len == 0) continue;
-        const line = try allocator.dupe(u8, line_trimmed);
-        defer allocator.free(line);
-        if (std.mem.eql(u8, line, "[")) {
-            if (in_config) {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Nested config section", .{line_num}));
-            }
-            in_config = true;
-            continue;
-        } else if (std.mem.eql(u8, line, "]")) {
-            if (!in_config) {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Closing ] without [", .{line_num}));
-            }
-            in_config = false;
-            continue;
-        }
-        if (in_config) {
-            if (std.mem.indexOfScalar(u8, line, '=')) |eq_pos| {
-                const key = std.mem.trim(u8, line[0..eq_pos], " \t");
-                const value = std.mem.trim(u8, line[eq_pos + 1 ..], " \t");
-                try config_data.put(try allocator.dupe(u8, key), try allocator.dupe(u8, value));
-            }
-            continue;
-        }
-        if (std.mem.startsWith(u8, line, "//")) {
-            const dep = std.mem.trim(u8, line[2..], " \t");
-            if (dep.len > 0) {
-                _ = try deps.put(try allocator.dupe(u8, dep), {});
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty system dependency", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, "#")) {
-            const lib = std.mem.trim(u8, line[1..], " \t");
-            if (lib.len > 0) {
-                const lib_dir = try std.fs.path.join(allocator, &.{ hacker_dir, "libs", lib });
-                defer allocator.free(lib_dir);
-                const lib_hacker_path = try std.fs.path.join(allocator, &.{ lib_dir, "main.hacker" });
-                defer allocator.free(lib_hacker_path);
-                const lib_bin_path = try std.fs.path.join(allocator, &.{ hacker_dir, "libs", lib });
-                defer allocator.free(lib_bin_path);
-                if (std.fs.cwd().access(lib_hacker_path, .{})) |_| {
-                    try includes.append(try allocator.dupe(u8, lib));
-                    var sub = try parse_hacker_file(allocator, lib_hacker_path, verbose);
-                    var dep_it = sub.deps.keyIterator();
-                    while (dep_it.next()) |sub_dep_ptr| {
-                        const sub_dep = sub_dep_ptr.*;
-                        _ = try deps.put(try allocator.dupe(u8, sub_dep), {});
-                    }
-                    var lib_it = sub.libs.keyIterator();
-                    while (lib_it.next()) |sub_lib_ptr| {
-                        const sub_lib = sub_lib_ptr.*;
-                        _ = try libs.put(try allocator.dupe(u8, sub_lib), {});
-                    }
-                    {
-                        var sub_it = sub.vars_dict.iterator();
-                        while (sub_it.next()) |entry| {
-                            try vars_dict.put(try allocator.dupe(u8, entry.key_ptr.*), try allocator.dupe(u8, entry.value_ptr.*));
-                        }
-                    }
-                    try cmds.appendSlice(sub.cmds.items);
-                    try includes.appendSlice(sub.includes.items);
-                    try binaries.appendSlice(sub.binaries.items);
-                    for (sub.errors.items) |sub_err| {
-                        try errors.append(try std.fmt.allocPrint(allocator, "In {s}: {s}", .{ lib, sub_err }));
-                    }
-                    // Deinit sub resources
-                    sub.deps.deinit();
-                    sub.libs.deinit();
-                    sub.vars_dict.deinit();
-                    sub.cmds.deinit();
-                    sub.includes.deinit();
-                    sub.binaries.deinit();
-                    sub.errors.deinit();
-                    sub.config_data.deinit();
-                } else |_| {} // ignore access error for now
-                if (std.posix.access(lib_bin_path, std.posix.X_OK)) |_| {
-                    try binaries.append(try allocator.dupe(u8, lib_bin_path));
-                } else |_| {
-                    _ = try libs.put(try allocator.dupe(u8, lib), {});
-                }
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty library/include", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, ">")) {
-            const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[1..], '!')) |pos| line[1 .. 1 + pos] else line[1..], " \t");
-            if (cmd_part.len > 0) {
-                try cmds.append(try allocator.dupe(u8, cmd_part));
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty command", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, "@")) {
-            if (std.mem.indexOfScalar(u8, line[1..], '=')) |eq_pos| {
-                const var_name = std.mem.trim(u8, line[1 .. 1 + eq_pos], " \t");
-                const value = std.mem.trim(u8, line[1 + eq_pos + 1 ..], " \t");
-                if (var_name.len > 0 and value.len > 0) {
-                    try vars_dict.put(try allocator.dupe(u8, var_name), try allocator.dupe(u8, value));
-                } else {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid variable", .{line_num}));
-                }
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Missing = in variable", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, "=")) {
-            if (std.mem.indexOfScalar(u8, line[1..], '>')) |gt_pos| {
-                const num_str = std.mem.trim(u8, line[1 .. 1 + gt_pos], " \t");
-                const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[1 + gt_pos + 1 ..], '!')) |pos| line[1 + gt_pos + 1 .. 1 + gt_pos + 1 + pos] else line[1 + gt_pos + 1 ..], " \t");
-                const num = std.fmt.parseInt(i32, num_str, 10) catch {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid loop count", .{line_num}));
-                    continue;
-                };
-                if (num < 0) {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Negative loop count", .{line_num}));
-                    continue;
-                }
-                if (cmd_part.len > 0) {
-                    var i: i32 = 0;
-                    while (i < num) : (i += 1) {
-                        try cmds.append(try allocator.dupe(u8, cmd_part));
-                    }
-                } else {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty loop command", .{line_num}));
-                }
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid loop syntax", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, "?")) {
-            if (std.mem.indexOfScalar(u8, line[1..], '>')) |gt_pos| {
-                const condition = std.mem.trim(u8, line[1 .. 1 + gt_pos], " \t");
-                const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[1 + gt_pos + 1 ..], '!')) |pos| line[1 + gt_pos + 1 .. 1 + gt_pos + 1 + pos] else line[1 + gt_pos + 1 ..], " \t");
-                if (condition.len > 0 and cmd_part.len > 0) {
-                    const if_cmd = try std.fmt.allocPrint(allocator, "if {s}; then {s}; fi", .{ condition, cmd_part });
-                    try cmds.append(if_cmd);
-                } else {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid conditional", .{line_num}));
-                }
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid conditional syntax", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, "&")) {
-            const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[1..], '!')) |pos| line[1 .. 1 + pos] else line[1..], " \t");
-            if (cmd_part.len > 0) {
-                const bg_cmd = try std.fmt.allocPrint(allocator, "{s} &", .{ cmd_part });
-                try cmds.append(bg_cmd);
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty background command", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, "!")) {
-            // pass
-        } else {
-            try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid syntax", .{line_num}));
-        }
-    }
-    if (in_config) {
-        try errors.append(try allocator.dupe(u8, "Unclosed config section"));
-    }
-    if (verbose) {
-        var dep_keys = try allocator.alloc([]const u8, deps.count());
-        defer allocator.free(dep_keys);
-        var i: usize = 0;
-        var dep_it = deps.keyIterator();
-        while (dep_it.next()) |key| {
-            dep_keys[i] = key.*;
-            i += 1;
-        }
-        try console.print("System Deps: {any}\n", .{dep_keys});
-        var lib_keys = try allocator.alloc([]const u8, libs.count());
-        defer allocator.free(lib_keys);
-        i = 0;
-        var lib_it = libs.keyIterator();
-        while (lib_it.next()) |key| {
-            lib_keys[i] = key.*;
-            i += 1;
-        }
-        try console.print("Custom Libs: {any}\n", .{lib_keys});
-        try console.print("Vars: {any}\n", .{vars_dict});
-        try console.print("Cmds: {any}\n", .{cmds.items});
-        try console.print("Includes: {any}\n", .{includes.items});
-        try console.print("Binaries: {any}\n", .{binaries.items});
-        try console.print("Config: {any}\n", .{config_data});
-        if (errors.items.len > 0) {
-            try console.print("Errors: {any}\n", .{errors.items});
-        }
-    }
-    return .{
-        .deps = deps,
-        .libs = libs,
-        .vars_dict = vars_dict,
-        .cmds = cmds,
-        .includes = includes,
-        .binaries = binaries,
-        .errors = errors,
-        .config_data = config_data,
-    };
-}
+const parse = @import("parse.zig");
+const utils = @import("utils.zig");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -262,43 +22,29 @@ pub fn main() !void {
         try std.io.getStdErr().writer().print("Usage: hacker-parser [--verbose] <file>\n", .{});
         std.process.exit(1);
     }
-    var res = try parse_hacker_file(allocator, file_path.?, verbose);
-    defer res.deps.deinit();
-    defer res.libs.deinit();
-    defer res.vars_dict.deinit();
-    defer res.cmds.deinit();
-    defer res.includes.deinit();
-    defer res.binaries.deinit();
-    defer res.errors.deinit();
-    defer res.config_data.deinit();
-    var deps_list = std.ArrayList([]const u8).init(allocator);
-    defer deps_list.deinit();
-    var dep_it = res.deps.keyIterator();
-    while (dep_it.next()) |key| {
-        try deps_list.append(key.*);
-    }
-    var libs_list = std.ArrayList([]const u8).init(allocator);
-    defer libs_list.deinit();
-    var lib_it = res.libs.keyIterator();
-    while (lib_it.next()) |key| {
-        try libs_list.append(key.*);
-    }
+    var res = try parse.parse_hacker_file(allocator, file_path.?, verbose);
+    defer utils.deinitParseResult(&res, allocator);
+    try outputJson(res);
+}
+fn outputJson(res: parse.ParseResult) !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{{", .{});
     try stdout.print("\"deps\":[", .{});
     var first = true;
-    for (deps_list.items) |d| {
+    var dep_it = res.deps.keyIterator();
+    while (dep_it.next()) |key| {
         if (!first) try stdout.print(",", .{});
         first = false;
-        try std.json.encodeJsonString(d, .{}, stdout);
+        try std.json.encodeJsonString(key.*, .{}, stdout);
     }
     try stdout.print("],", .{});
     try stdout.print("\"libs\":[", .{});
     first = true;
-    for (libs_list.items) |l| {
+    var lib_it = res.libs.keyIterator();
+    while (lib_it.next()) |key| {
         if (!first) try stdout.print(",", .{});
         first = false;
-        try std.json.encodeJsonString(l, .{}, stdout);
+        try std.json.encodeJsonString(key.*, .{}, stdout);
     }
     try stdout.print("],", .{});
     try stdout.print("\"vars\":{{", .{});
@@ -334,6 +80,14 @@ pub fn main() !void {
         if (!first) try stdout.print(",", .{});
         first = false;
         try std.json.encodeJsonString(b, .{}, stdout);
+    }
+    try stdout.print("],", .{});
+    try stdout.print("\"plugins\":[", .{});
+    first = true;
+    for (res.plugins.items) |p| {
+        if (!first) try stdout.print(",", .{});
+        first = false;
+        try std.json.encodeJsonString(p, .{}, stdout);
     }
     try stdout.print("],", .{});
     try stdout.print("\"errors\":[", .{});
