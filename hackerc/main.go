@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,12 +15,13 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
+	"gopkg.in/yaml.v3"
 )
 
-const VERSION = "0.0.4"
-const HACKER_DIR = "~/.hackeros/hacker-lang"
+const VERSION = "0.0.8"
+const HACKER_DIR = "~/hackeros/hacker-lang"
 const BIN_DIR = HACKER_DIR + "/bin"
-const HISTORY_FILE = "~/.hacker_repl_history"
+const HISTORY_FILE = "~/hackeros/hacker_repl_history" // Zmiana, aby nie było ukryte
 
 const (
 	colorReset  = "\033[0m"
@@ -70,14 +73,15 @@ func runCommand(file string, verbose bool) bool {
 		return false
 	}
 	var parsed struct {
-		Deps     []string            `json:"deps"`
-		Libs     []string            `json:"libs"`
-		Vars     map[string]string   `json:"vars"`
-		Cmds     []string            `json:"cmds"`
-		Includes []string            `json:"includes"`
-		Binaries []string            `json:"binaries"`
-		Errors   []string            `json:"errors"`
-		Config   map[string]string   `json:"config"`
+		Deps     []string          `json:"deps"`
+		Libs     []string          `json:"libs"`
+		Vars     map[string]string `json:"vars"`
+		Cmds     []string          `json:"cmds"`
+		Includes []string          `json:"includes"`
+		Binaries []string          `json:"binaries"`
+		Errors   []string          `json:"errors"`
+		Config   map[string]string `json:"config"`
+		Plugins  []string          `json:"plugins"`
 	}
 	if err := json.Unmarshal(output, &parsed); err != nil {
 		fmt.Printf("%sError unmarshaling parse output: %v%s\n", colorRed, err, colorReset)
@@ -93,7 +97,6 @@ func runCommand(file string, verbose bool) bool {
 	if len(parsed.Libs) > 0 {
 		fmt.Printf("%sWarning: Missing custom libs: %v%s\n", colorYellow, parsed.Libs, colorReset)
 		fmt.Printf("%sPlease install them using bytes install <lib>%s\n", colorYellow, colorReset)
-		// Proceed anyway
 	}
 	tempSh, err := os.CreateTemp("", "*.sh")
 	if err != nil {
@@ -127,6 +130,9 @@ func runCommand(file string, verbose bool) bool {
 	}
 	for _, bin := range parsed.Binaries {
 		tempSh.WriteString(bin + "\n")
+	}
+	for _, plugin := range parsed.Plugins {
+		tempSh.WriteString(plugin + " &\n")
 	}
 	tempSh.Close()
 	os.Chmod(tempSh.Name(), 0755)
@@ -249,6 +255,58 @@ func cleanCommand(verbose bool) bool {
 	return true
 }
 
+func unpackBytes(verbose bool) bool {
+	bytesPath1 := expandHome("~/hackeros/hacker-lang/bin/bytes")
+	bytesPath2 := "/usr/bin/bytes"
+	if _, err := os.Stat(bytesPath1); err == nil {
+		fmt.Printf("%sBytes already installed at %s.%s\n", colorGreen, bytesPath1, colorReset)
+		return true
+	}
+	if _, err := os.Stat(bytesPath2); err == nil {
+		fmt.Printf("%sBytes already installed at %s.%s\n", colorGreen, bytesPath2, colorReset)
+		return true
+	}
+	// Pobierz do bytesPath1
+	dir := filepath.Dir(bytesPath1)
+	err := os.MkdirAll(dir, os.ModePerm)
+	if err != nil {
+		fmt.Printf("%sError creating directory: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	url := "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.3/bytes"
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Printf("%sError downloading bytes: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("%sError: status code %d%s\n", colorRed, resp.StatusCode, colorReset)
+		return false
+	}
+	f, err := os.Create(bytesPath1)
+	if err != nil {
+		fmt.Printf("%sError creating file: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	if err != nil {
+		fmt.Printf("%sError writing file: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	err = os.Chmod(bytesPath1, 0755)
+	if err != nil {
+		fmt.Printf("%sError setting permissions: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	if verbose {
+		fmt.Printf("%sDownloaded and installed bytes from %s to %s%s\n", colorGreen, url, bytesPath1, colorReset)
+	}
+	fmt.Printf("%sBytes installed successfully!%s\n", colorGreen, colorReset)
+	return true
+}
+
 type errMsg error
 
 type replModel struct {
@@ -270,10 +328,8 @@ func newReplModel(verbose bool) *replModel {
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
-
 	vp := viewport.New(80, 20)
-	vp.SetContent("Hacker Lang REPL v0.1 - Enhanced Interactive Mode\nType 'exit' to quit, 'help' for commands, 'clear' to reset\nSupported: //deps, #libs, @vars, =loops, ?ifs, &bg, >cmds, [config], !comments")
-
+	vp.SetContent("Hacker Lang REPL v0.8 - Enhanced Interactive Mode\nType 'exit' to quit, 'help' for commands, 'clear' to reset\nSupported: //deps, #libs, @vars, =loops, ?ifs, &bg, >cmds, [config], !comments")
 	return &replModel{
 		textinput:    ti,
 		viewport:     vp,
@@ -315,7 +371,6 @@ func (m *replModel) Init() tea.Cmd {
 
 func (m *replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-
 	switch msg := msg.(type) {
 		case tea.WindowSizeMsg:
 			m.width = msg.Width
@@ -374,7 +429,7 @@ func (m *replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.lines = append(m.lines, line)
 						if !m.inConfig && line != "" && !strings.HasPrefix(line, "!") {
-							deps, libs, varsDict, cmds, includes, binaries, errors, _ := parseLines(m.lines, m.verbose)
+							deps, libs, varsDict, cmds, includes, binaries, plugins, errors, _ := parseLines(m.lines, m.verbose)
 							if len(errors) > 0 {
 								m.output = append(m.output, "REPL Errors:\n"+strings.Join(errors, "\n"))
 							} else {
@@ -417,6 +472,9 @@ func (m *replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								for _, bin := range binaries {
 									tempSh.WriteString(bin + "\n")
 								}
+								for _, plugin := range plugins {
+									tempSh.WriteString(plugin + " &\n")
+								}
 								tempSh.Close()
 								os.Chmod(tempSh.Name(), 0755)
 								runCmd := exec.Command("bash", tempSh.Name())
@@ -455,15 +513,15 @@ func (m *replModel) View() string {
 	return m.viewport.View() + "\n" + promptStyle.Render(prompt) + m.textinput.View() + "\n"
 }
 
-func parseLines(lines []string, verbose bool) ([]string, []string, map[string]string, []string, []string, []string, []string, map[string]string) {
+func parseLines(lines []string, verbose bool) ([]string, []string, map[string]string, []string, []string, []string, []string, []string, map[string]string) {
 	temp, err := os.CreateTemp("", "*.hacker")
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
+		return nil, nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
 	}
 	defer os.Remove(temp.Name())
 	_, err = temp.WriteString(strings.Join(lines, "\n") + "\n")
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
+		return nil, nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
 	}
 	temp.Close()
 	parserPath := expandHome(BIN_DIR + "/hacker-parser")
@@ -473,22 +531,23 @@ func parseLines(lines []string, verbose bool) ([]string, []string, map[string]st
 	}
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
+		return nil, nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
 	}
 	var parsed struct {
-		Deps     []string            `json:"deps"`
-		Libs     []string            `json:"libs"`
-		Vars     map[string]string   `json:"vars"`
-		Cmds     []string            `json:"cmds"`
-		Includes []string            `json:"includes"`
-		Binaries []string            `json:"binaries"`
-		Errors   []string            `json:"errors"`
-		Config   map[string]string   `json:"config"`
+		Deps     []string          `json:"deps"`
+		Libs     []string          `json:"libs"`
+		Vars     map[string]string `json:"vars"`
+		Cmds     []string          `json:"cmds"`
+		Includes []string          `json:"includes"`
+		Binaries []string          `json:"binaries"`
+		Plugins  []string          `json:"plugins"`
+		Errors   []string          `json:"errors"`
+		Config   map[string]string `json:"config"`
 	}
 	if err := json.Unmarshal(output, &parsed); err != nil {
-		return nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
+		return nil, nil, nil, nil, nil, nil, nil, []string{err.Error()}, nil
 	}
-	return parsed.Deps, parsed.Libs, parsed.Vars, parsed.Cmds, parsed.Includes, parsed.Binaries, parsed.Errors, parsed.Config
+	return parsed.Deps, parsed.Libs, parsed.Vars, parsed.Cmds, parsed.Includes, parsed.Binaries, parsed.Plugins, parsed.Errors, parsed.Config
 }
 
 func runRepl(verbose bool) bool {
@@ -519,15 +578,18 @@ func helpCommand(showBanner bool) bool {
 		{"init", "Generate template script", "file [--verbose]"},
 		{"clean", "Remove temporary files", "[--verbose]"},
 		{"repl", "Launch interactive REPL", "[--verbose]"},
+		{"unpack", "Unpack and install bytes", "bytes [--verbose]"},
 		{"version", "Display version", ""},
 		{"help", "Show this help menu", ""},
+		{"help-ui", "Show special commands list", ""},
+		{"unpack bytes", "Checks if the bytes utility is installed, if not installs it.", ""},
 	}
 	for _, cmd := range commands {
 		fmt.Printf("%-10s %-30s %-30s\n", cmd[0], cmd[1], cmd[2])
 	}
 	fmt.Printf("\n%sSyntax Highlight Example:%s\n", headerStyle.Render(""), colorReset)
 	exampleCode := `// sudo
-	# network-utils
+	# obsidian
 	@USER=admin
 	=2 > echo $USER
 	? [ -d /tmp ] > echo OK
@@ -538,6 +600,90 @@ func helpCommand(showBanner bool) bool {
 	Config=Example
 	]`
 	fmt.Println(exampleStyle.Render(exampleCode))
+	return true
+}
+
+func runBytesProject(verbose bool) bool {
+	bytesFile := "hacker.bytes"
+	data, err := os.ReadFile(bytesFile)
+	if err != nil {
+		fmt.Printf("%sError reading %s: %v%s\n", colorRed, bytesFile, err, colorReset)
+		return false
+	}
+	var project struct {
+		Package struct {
+			Name        string `yaml:"name"`
+			Version     string `yaml:"version"`
+			Author      string `yaml:"author"`
+			Description string `yaml:"description"`
+		} `yaml:"package"`
+		Entry  string   `yaml:"entry"`
+		Libs   []string `yaml:"libs"`
+		Scripts struct {
+			Build   string `yaml:"build"`
+			Run     string `yaml:"run"`
+			Release string `yaml:"release"`
+		} `yaml:"scripts"`
+		Meta struct {
+			License string `yaml:"license"`
+			Repo    string `yaml:"repo"`
+		} `yaml:"meta"`
+	}
+	if err := yaml.Unmarshal(data, &project); err != nil {
+		fmt.Printf("%sError parsing YAML: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	fmt.Printf("%sRunning project %s v%s by %s%s\n", colorGreen, project.Package.Name, project.Package.Version, project.Package.Author, colorReset)
+	return runCommand(project.Entry, verbose)
+}
+
+func compileBytesProject(output string, verbose bool) bool {
+	bytesFile := "hacker.bytes"
+	data, err := os.ReadFile(bytesFile)
+	if err != nil {
+		fmt.Printf("%sError reading %s: %v%s\n", colorRed, bytesFile, err, colorReset)
+		return false
+	}
+	var project struct {
+		Package struct {
+			Name        string `yaml:"name"`
+			Version     string `yaml:"version"`
+			Author      string `yaml:"author"`
+			Description string `yaml:"description"`
+		} `yaml:"package"`
+		Entry  string   `yaml:"entry"`
+		Libs   []string `yaml:"libs"`
+		Scripts struct {
+			Build   string `yaml:"build"`
+			Run     string `yaml:"run"`
+			Release string `yaml:"release"`
+		} `yaml:"scripts"`
+		Meta struct {
+			License string `yaml:"license"`
+			Repo    string `yaml:"repo"`
+		} `yaml:"meta"`
+	}
+	if err := yaml.Unmarshal(data, &project); err != nil {
+		fmt.Printf("%sError parsing YAML: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	if output == "" {
+		output = project.Package.Name
+	}
+	binPath := expandHome(BIN_DIR + "/hacker-compiler")
+	cmd := exec.Command(binPath, project.Entry, output, "--bytes")
+	if verbose {
+		cmd.Args = append(cmd.Args, "--verbose")
+	}
+	fmt.Printf("%sCompiling project %s to %s with --bytes%s\n", colorBlue, project.Package.Name, output, colorReset)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		fmt.Printf("%sCompilation failed: %v%s\n", colorRed, err, colorReset)
+		return false
+	}
+	fmt.Printf("%sCompilation successful!%s\n", colorGreen, colorReset)
 	return true
 }
 
@@ -569,31 +715,51 @@ func main() {
 				os.Exit(1)
 			}
 			file = args[0]
-			if len(args) > 1 && args[1] == "--verbose" {
-				verbose = true
+			if file == "." {
+				success = runBytesProject(verbose)
+			} else {
+				if len(args) > 1 && args[1] == "--verbose" {
+					verbose = true
+				}
+				success = runCommand(file, verbose)
 			}
-			success = runCommand(file, verbose)
 		case "compile":
 			if len(args) < 1 {
-				fmt.Printf("%sUsage: hackerc compile <file> [-o <output>] [--verbose]%s\n", colorRed, colorReset)
+				fmt.Printf("%sUsage: hackerc compile <file> [-o <output>] [--verbose] [--bytes]%s\n", colorRed, colorReset)
 				os.Exit(1)
 			}
 			file = args[0]
 			output = strings.TrimSuffix(file, filepath.Ext(file))
-			i := 1
-			if i < len(args) && args[i] == "-o" {
-				i++
-				if i >= len(args) {
-					fmt.Printf("%sMissing output after -o%s\n", colorRed, colorReset)
-					os.Exit(1)
+			bytes_mode := false
+			i := 0
+			for i < len(args) {
+				if args[i] == "--bytes" {
+					bytes_mode = true
+					i++
+					continue
 				}
-				output = args[i]
+				if args[i] == "-o" {
+					i++
+					if i >= len(args) {
+						fmt.Printf("%sMissing output after -o%s\n", colorRed, colorReset)
+						os.Exit(1)
+					}
+					output = args[i]
+					i++
+					continue
+				}
+				if args[i] == "--verbose" {
+					verbose = true
+					i++
+					continue
+				}
 				i++
 			}
-			if i < len(args) && args[i] == "--verbose" {
-				verbose = true
+			if bytes_mode {
+				success = compileBytesProject(output, verbose)
+			} else {
+				success = compileCommand(file, output, verbose)
 			}
-			success = compileCommand(file, output, verbose)
 		case "check":
 			if len(args) < 1 {
 				fmt.Printf("%sUsage: hackerc check <file> [--verbose]%s\n", colorRed, colorReset)
@@ -624,10 +790,25 @@ func main() {
 				verbose = true
 			}
 			success = runRepl(verbose)
+		case "unpack":
+			if len(args) < 1 {
+				fmt.Printf("%sUsage: hackerc unpack bytes [--verbose]%s\n", colorRed, colorReset)
+				success = false
+			} else if args[0] == "bytes" {
+				if len(args) > 1 && args[1] == "--verbose" {
+					verbose = true
+				}
+				success = unpackBytes(verbose)
+			} else {
+				fmt.Printf("%sUnknown unpack target: %s%s\n", colorRed, args[0], colorReset)
+				success = false
+			}
 		case "version":
 			success = versionCommand()
 		case "help":
 			success = helpCommand(true)
+		case "help-ui":
+			success = runHelpUI()
 		case "install", "update", "remove":
 			fmt.Printf("%sPlease use bytes %s%s\n", colorYellow, command, colorReset)
 			success = true
