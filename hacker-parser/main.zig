@@ -1,6 +1,7 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const utils = @import("utils.zig");
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -26,6 +27,7 @@ pub fn main() !void {
     defer utils.deinitParseResult(&res, allocator);
     try outputJson(res);
 }
+
 fn outputJson(res: parse.ParseResult) !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{{", .{});
@@ -51,6 +53,17 @@ fn outputJson(res: parse.ParseResult) !void {
     first = true;
     var vars_it = res.vars_dict.iterator();
     while (vars_it.next()) |entry| {
+        if (!first) try stdout.print(",", .{});
+        first = false;
+        try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
+        try stdout.print(":", .{});
+        try std.json.encodeJsonString(entry.value_ptr.*, .{}, stdout);
+    }
+    try stdout.print("}},", .{});
+    try stdout.print("\"local_vars\":{{", .{});
+    first = true;
+    var local_vars_it = res.local_vars.iterator();
+    while (local_vars_it.next()) |entry| {
         if (!first) try stdout.print(",", .{});
         first = false;
         try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
@@ -87,9 +100,30 @@ fn outputJson(res: parse.ParseResult) !void {
     for (res.plugins.items) |p| {
         if (!first) try stdout.print(",", .{});
         first = false;
-        try std.json.encodeJsonString(p, .{}, stdout);
+        try stdout.print("{{", .{});
+        try stdout.print("\"path\":", .{});
+        try std.json.encodeJsonString(p.path, .{}, stdout);
+        try stdout.print(",\"super\":{}", .{p.is_super});
+        try stdout.print("}}", .{});
     }
     try stdout.print("],", .{});
+    try stdout.print("\"functions\":{{", .{});
+    first = true;
+    var func_it = res.functions.iterator();
+    while (func_it.next()) |entry| {
+        if (!first) try stdout.print(",", .{});
+        first = false;
+        try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
+        try stdout.print(":[", .{});
+        var first2 = true;
+        for (entry.value_ptr.items) |c| {
+            if (!first2) try stdout.print(",", .{});
+            first2 = false;
+            try std.json.encodeJsonString(c, .{}, stdout);
+        }
+        try stdout.print("]", .{});
+    }
+    try stdout.print("}},", .{});
     try stdout.print("\"errors\":[", .{});
     first = true;
     for (res.errors.items) |e| {
