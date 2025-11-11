@@ -33,7 +33,8 @@ func (m helpUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.String() == "enter" {
 				selected := m.list.SelectedItem().(item)
-				fmt.Printf("%s\nDetails: %s\n", selected.title, selected.details)
+				fmt.Println(lipgloss.NewStyle().Bold(true).Render(selected.title))
+				fmt.Println("Details: " + selected.details)
 				return m, nil
 			}
 		case tea.WindowSizeMsg:
@@ -57,19 +58,20 @@ func runHelpUI() bool {
 		item{title: "init", desc: "Generate template", details: "Usage: hackerc init <file> [--verbose]"},
 		item{title: "clean", desc: "Remove temps", details: "Usage: hackerc clean [--verbose]"},
 		item{title: "repl", desc: "Interactive REPL", details: "Usage: hackerc repl [--verbose]"},
+		item{title: "editor", desc: "Launch editor", details: "Usage: hackerc editor [file]"},
 		item{title: "unpack", desc: "Unpack and install bytes", details: "Usage: hackerc unpack bytes [--verbose]"},
 		item{title: "version", desc: "Show version", details: "Usage: hackerc version"},
 		item{title: "help", desc: "Show help", details: "Usage: hackerc help"},
 		item{title: "help-ui", desc: "Interactive help UI", details: "This UI"},
 	}
-
-	m := helpUIModel{list: list.New(items, list.NewDefaultDelegate(), 0, 0)}
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	m := helpUIModel{list: list.New(items, delegate, 0, 0)}
 	m.list.Title = "Hacker Lang Commands"
 	m.list.KeyMap.NextPage = key.NewBinding(key.WithKeys("pgdown", "d"))
 	m.list.KeyMap.PrevPage = key.NewBinding(key.WithKeys("pgup", "u"))
-
 	p := tea.NewProgram(m, tea.WithAltScreen())
-
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Error running UI:", err)
 		return false
