@@ -102,6 +102,26 @@ Poniżej przykład prostego pliku `.hacker`.
 | **Koniec sekcji konfiguracyjnej**
 | `]`
 
+| `\\`
+| **Plugin** (pluginy przechowywane w `~/.hackeros/hacker-lang/plugins/`, mogą być binarkami)
+| `\\ moj-plugin`
+
+| `$`
+| **Zmienna lokalna**
+| `$TEMP=tmp_value`
+
+| `:`
+| **Funkcja/blok** (początek definicji funkcji `:nazwa`, koniec `:` , wywołanie `.nazwa`)
+| `:moja_funkcja` ... `:`
+
+| `!!`
+| **Komentarz blokowy** (otwarcie i zamknięcie)
+| `!!` ... `!!`
+
+| `^`
+| **Tryb superuser** (dodaj `sudo` do komendy)
+| `^ > rm file` → `sudo rm file`
+
 |===
 
 == Przykładowy workflow
