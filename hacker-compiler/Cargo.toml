@@ -1,6 +1,6 @@
 [package]
 name = "hacker-compiler"
-version = "0.0.4"
+version = "0.0.9"
 edition = "2021"
 
 [dependencies]
