@@ -1,15 +1,4 @@
-// sudo
-// wget
-// java
-// native-image
+// python3
+// nuitka
 > cd src
-> javac -cp lib/gson.jar:lib/jline-reader.jar:lib/jline-terminal.jar:lib/jline-terminal-jna.jar:lib/picocli.jar:lib/snakeyaml.jar main.java
-> echo "Main-Class: HackerCLI" > manifest.txt
-> jar cfm hackerc.jar manifest.txt *.class
-> native-image \
-  -cp hackerc.jar:lib/gson.jar:lib/jline-reader.jar:lib/jline-terminal.jar:lib/jline-terminal-jna.jar:lib/picocli.jar:lib/snakeyaml.jar \
-  --no-fallback \
-  --enable-preview \
-  -H:+ReportExceptionStackTraces \
-  -H:Name=hackerc \
-  HackerCLI
+> python3 -m nuitka --onefile main.py
