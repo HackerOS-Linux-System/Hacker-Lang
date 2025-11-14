@@ -2,6 +2,7 @@
 // wget
 // java
 // native-image
+> cd src
 > javac -cp lib/gson.jar:lib/jline-reader.jar:lib/jline-terminal.jar:lib/jline-terminal-jna.jar:lib/picocli.jar:lib/snakeyaml.jar main.java
 > echo "Main-Class: HackerCLI" > manifest.txt
 > jar cfm hackerc.jar manifest.txt *.class
