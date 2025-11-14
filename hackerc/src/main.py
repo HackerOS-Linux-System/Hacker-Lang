@@ -8,11 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from prompt_toolkit import PromptSession
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -334,87 +329,28 @@ def editor_command(file: Optional[str] = None) -> bool:
         return False
 
 def run_repl(verbose: bool) -> bool:
-    history = FileHistory(str(HISTORY_FILE))
-    session = PromptSession(history=history, auto_suggest=AutoSuggestFromHistory(), style=Style.from_dict({
-        'prompt': prompt_style,
-    }))
-    lines = []
-    in_config = False
-    output_lines = [
-        Text(f"Hacker Lang REPL v{VERSION} - Enhanced Interactive Mode", style=success_style),
-        Text("Type 'exit' to quit, 'help' for commands, 'clear' to reset", style=info_style),
-        Text("Supported: //deps, #libs, @vars, =loops, ?ifs, &bg, >cmds, [config], !comments", style=info_style)
-    ]
-    while True:
-        try:
-            prompt = "CONFIG> " if in_config else "hacker> "
-            line = session.prompt(Text(prompt, style=prompt_style))
-            if not line.strip():
-                continue
-            if line == "exit":
-                break
-            if line == "help":
-                output_lines.append(Text("REPL Commands:\n- exit: Quit REPL\n- help: This menu\n- clear: Reset session\n- verbose: Toggle verbose", style=header_style))
-            elif line == "clear":
-                lines = []
-                in_config = False
-                output_lines.append(Text("Session cleared!", style=success_style))
-            elif line == "verbose":
-                verbose = not verbose
-                output_lines.append(Text(f"Verbose mode: {verbose}", style=info_style))
-            else:
-                if line == "[":
-                    in_config = True
-                elif line == "]":
-                    if not in_config:
-                        output_lines.append(Text("Error: Unmatched ']'", style=error_style))
-                    in_config = False
-                lines.append(line)
-                if not in_config and line and not line.startswith("!"):
-                    parsed = parse_lines(lines, verbose)
-                    if parsed["errors"]:
-                        output_lines.append(Text("REPL Errors:\n" + "\n".join(parsed["errors"]), style=error_style))
-                    else:
-                        if parsed["libs"]:
-                            output_lines.append(Text(f"Warning: Missing custom libs: {', '.join(parsed['libs'])}", style=warning_style))
-                        with tempfile.NamedTemporaryFile(mode="w+", suffix=".sh", delete=False) as temp_sh:
-                            temp_sh.write("#!/bin/bash\nset -e\n")
-                            for k, v in parsed["vars"].items():
-                                temp_sh.write(f'export {k}="{v}"\n')
-                            for dep in parsed["deps"]:
-                                if dep != "sudo":
-                                    temp_sh.write(f'command -v {dep} || (sudo apt update && sudo apt install -y {dep})\n')
-                            for inc in parsed["includes"]:
-                                lib_path = LIBS_DIR / inc / "main.hacker"
-                                with open(lib_path, "r") as lib_f:
-                                    temp_sh.write(f"# include {inc}\n")
-                                    temp_sh.write(lib_f.read())
-                                    temp_sh.write("\n")
-                            for cmd in parsed["cmds"]:
-                                temp_sh.write(f"{cmd}\n")
-                            for bin in parsed["binaries"]:
-                                temp_sh.write(f"{bin}\n")
-                            for plugin in parsed["plugins"]:
-                                temp_sh.write(f"{plugin} &\n")
-                            temp_path = temp_sh.name
-                        os.chmod(temp_path, 0o755)
-                        env = os.environ.copy()
-                        env.update(parsed["vars"])
-                        result = subprocess.run(["bash", temp_path], env=env, capture_output=True, text=True)
-                        os.remove(temp_path)
-                        out_str = result.stdout + result.stderr
-                        if result.returncode != 0:
-                            output_lines.append(Text("REPL Error:\n" + out_str.strip(), style=error_style))
-                        elif out_str.strip():
-                            output_lines.append(Text("REPL Output:\n" + out_str.strip(), style=success_style))
-            for out in output_lines:
-                console.print(out)
-            output_lines = []  # Clear after print? No, accumulate like viewport
-            # To simulate viewport, perhaps print all each time, but for simplicity, print incrementally
-        except KeyboardInterrupt:
-            break
-    console.print(Text("REPL session ended.", style=success_style))
-    return True
+    repl_path = BIN_DIR / "hackerc" / "repl"
+    args = [str(repl_path)]
+    if verbose:
+        args.append("--verbose")
+    console.print(Text("Launching REPL...", style=info_style))
+    try:
+        result = subprocess.run(args, check=True)
+        console.print(Text("REPL session ended.", style=success_style))
+        return result.returncode == 0
+    except Exception as e:
+        console.print(Text(f"REPL failed: {e}", style=error_style))
+        return False
+
+def run_help_ui() -> bool:
+    help_ui_path = BIN_DIR / "hackerc" / "help-ui"
+    console.print(Text("Launching Help UI...", style=info_style))
+    try:
+        result = subprocess.run([str(help_ui_path)], check=True)
+        return result.returncode == 0
+    except Exception as e:
+        console.print(Text(f"Help UI failed: {e}", style=error_style))
+        return False
 
 def version_command() -> bool:
     console.print(Text(f"Hacker Lang v{VERSION}", style=info_style))
@@ -543,13 +479,17 @@ def version():
     success = version_command()
     raise typer.Exit(code=0 if success else 1)
 
-@app.command()
-def help_cmd():  # Renamed to avoid conflict with help
+@app.command(name="help")
+def help_cmd():
     ensure_hacker_dir()
     success = help_command(True)
     raise typer.Exit(code=0 if success else 1)
 
-# TODO: help-ui if needed
+@app.command(name="help-ui")
+def help_ui():
+    ensure_hacker_dir()
+    success = run_help_ui()
+    raise typer.Exit(code=0 if success else 1)
 
 if __name__ == "__main__":
     ensure_hacker_dir()
