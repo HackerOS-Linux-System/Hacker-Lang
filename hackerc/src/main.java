@@ -46,16 +46,13 @@ import java.util.concurrent.Callable;
 class HackerCLI implements Callable<Integer> {
     @Option(names = {"-h", "--help"}, usageHelp = true, description = "Show this help message and exit.")
     boolean helpRequested;
-
     @Option(names = {"-V", "--version"}, versionHelp = true, description = "Print version information and exit.")
     boolean versionRequested;
-
     private static final String VERSION = "0.0.9";
     private static final String HACKER_DIR = "~/.hackeros/hacker-lang";
     private static final String BIN_DIR = HACKER_DIR + "/bin";
     private static final String HISTORY_FILE = "~/.hackeros/history/hacker_repl_history";
     private static final Gson gson = new Gson();
-
     // ---------- Kolory (ładniejsze niż w Go) ----------
     private static final String RESET = "\u001B[0m";
     private static final String BOLD = "\u001B[1m";
@@ -66,26 +63,22 @@ class HackerCLI implements Callable<Integer> {
     private static final String YELLOW = "\u001B[93m";
     private static final String BLUE = "\u001B[94m";
     private static final String WHITE = "\u001B[97m";
-
     private static String expand(String p) {
         if (p.startsWith("~")) {
             p = System.getProperty("user.home") + p.substring(1);
         }
         return p;
     }
-
     private static void ensureDirs() throws IOException {
         Files.createDirectories(Paths.get(expand(BIN_DIR)));
         Files.createDirectories(Paths.get(expand(HACKER_DIR + "/libs")));
         Files.createDirectories(Paths.get(expand(HISTORY_FILE)).getParent());
     }
-
     // ---------- Parsowanie wyjścia parsera ----------
     private record ParseResult(
             List<String> deps, List<String> libs, Map<String, String> vars,
             List<String> cmds, List<String> includes, List<String> binaries,
             List<String> plugins, List<String> errors, Map<String, String> config) {}
-
     private static ParseResult runParser(String file, boolean verbose) throws Exception {
         String parser = expand(BIN_DIR + "/hacker-parser");
         List<String> cmd = new ArrayList<>(List.of(parser, file));
@@ -112,25 +105,49 @@ class HackerCLI implements Callable<Integer> {
         Map<String, String> config = getMap(map, "config");
         return new ParseResult(deps, libs, vars, cmds, includes, binaries, plugins, errors, config);
     }
-
-    @SuppressWarnings("unchecked")
     private static List<String> getList(Map<String, Object> m, String key) {
-        return m.containsKey(key) ? (List<String>) m.get(key) : new ArrayList<>();
+        Object obj = m.get(key);
+        if (obj == null || !(obj instanceof List<?>)) {
+            return new ArrayList<>();
+        }
+        List<?> rawList = (List<?>) obj;
+        List<String> result = new ArrayList<>();
+        for (Object item : rawList) {
+            if (item instanceof String) {
+                result.add((String) item);
+            } else {
+                throw new RuntimeException("Non-string item in list for key: " + key);
+            }
+        }
+        return result;
     }
-
-    @SuppressWarnings("unchecked")
     private static Map<String, String> getMap(Map<String, Object> m, String key) {
-        return m.containsKey(key) ? (Map<String, String>) m.get(key) : new HashMap<>();
+        Object obj = m.get(key);
+        if (obj == null || !(obj instanceof Map<?, ?>)) {
+            return new HashMap<>();
+        }
+        Map<?, ?> rawMap = (Map<?, ?>) obj;
+        Map<String, String> result = new HashMap<>();
+        for (Map.Entry<?, ?> entry : rawMap.entrySet()) {
+            if (entry.getKey() instanceof String && entry.getValue() instanceof String) {
+                result.put((String) entry.getKey(), (String) entry.getValue());
+            } else {
+                throw new RuntimeException("Invalid key-value in map for key: " + key);
+            }
+        }
+        return result;
     }
-
     // ---------- Komendy ----------
     @Command(name = "run", description = "Execute .hacker script")
     public static class Run implements Callable<Integer> {
         public Run() {}
-
         @Parameters(index = "0") String file;
         @Option(names = "--verbose") boolean verbose;
         @Override public Integer call() throws Exception {
+            if (file == null) {
+                System.out.println(RED + BOLD + "Missing file parameter." + RESET);
+                return 1;
+            }
             System.out.println(CYAN + BOLD + "Running script..." + RESET);
             if (".".equals(file)) {
                 runBytesProject(verbose);
@@ -140,16 +157,18 @@ class HackerCLI implements Callable<Integer> {
             return 0;
         }
     }
-
     @Command(name = "compile", description = "Compile to native binary")
     public static class Compile implements Callable<Integer> {
         public Compile() {}
-
         @Parameters(index = "0") String file;
         @Option(names = {"-o", "--output"}) String output;
         @Option(names = "--verbose") boolean verbose;
         @Option(names = "--bytes") boolean bytesMode;
         @Override public Integer call() throws Exception {
+            if (file == null) {
+                System.out.println(RED + BOLD + "Missing file parameter." + RESET);
+                return 1;
+            }
             System.out.println(CYAN + BOLD + "Compiling..." + RESET);
             if (bytesMode) {
                 compileBytesProject(output != null ? output : "", verbose);
@@ -159,14 +178,16 @@ class HackerCLI implements Callable<Integer> {
             return 0;
         }
     }
-
     @Command(name = "check", description = "Validate syntax")
     public static class Check implements Callable<Integer> {
         public Check() {}
-
         @Parameters(index = "0") String file;
         @Option(names = "--verbose") boolean verbose;
         @Override public Integer call() throws Exception {
+            if (file == null) {
+                System.out.println(RED + BOLD + "Missing file parameter." + RESET);
+                return 1;
+            }
             System.out.println(CYAN + BOLD + "Checking syntax..." + RESET);
             ParseResult r = runParser(file, verbose);
             if (!r.errors().isEmpty()) {
@@ -178,14 +199,16 @@ class HackerCLI implements Callable<Integer> {
             return 0;
         }
     }
-
     @Command(name = "init", description = "Generate template script")
     public static class Init implements Callable<Integer> {
         public Init() {}
-
         @Parameters(index = "0") String file;
         @Option(names = "--verbose") boolean verbose;
         @Override public Integer call() throws Exception {
+            if (file == null) {
+                System.out.println(RED + BOLD + "Missing file parameter." + RESET);
+                return 1;
+            }
             System.out.println(CYAN + BOLD + "Initializing template..." + RESET);
             Path path = Paths.get(file);
             if (Files.exists(path)) {
@@ -219,11 +242,9 @@ Description=System maintenance script
             return 0;
         }
     }
-
     @Command(name = "clean", description = "Remove temporary files")
     public static class Clean implements Callable<Integer> {
         public Clean() {}
-
         @Option(names = "--verbose") boolean verbose;
         @Override public Integer call() throws Exception {
             System.out.println(CYAN + BOLD + "Cleaning temporary files..." + RESET);
@@ -244,11 +265,9 @@ Description=System maintenance script
             return 0;
         }
     }
-
     @Command(name = "repl", description = "Interactive REPL")
     public static class Repl implements Callable<Integer> {
         public Repl() {}
-
         @Option(names = "--verbose") boolean verbose;
         @Override public Integer call() throws Exception {
             System.out.println(CYAN + BOLD + "Starting REPL..." + RESET);
@@ -256,11 +275,9 @@ Description=System maintenance script
             return 0;
         }
     }
-
     @Command(name = "editor", description = "Launch hacker-editor")
     public static class Editor implements Callable<Integer> {
         public Editor() {}
-
         @Parameters(arity = "0..1", description = "Optional file to edit") String file = "";
         @Override public Integer call() throws Exception {
             System.out.println(CYAN + BOLD + "Launching editor..." + RESET);
@@ -278,14 +295,16 @@ Description=System maintenance script
             return 0;
         }
     }
-
     @Command(name = "unpack", description = "Unpack and install bytes")
     public static class Unpack implements Callable<Integer> {
         public Unpack() {}
-
         @Parameters(index = "0", description = "Target to unpack, e.g., bytes") String target;
         @Option(names = "--verbose") boolean verbose;
         @Override public Integer call() throws Exception {
+            if (target == null) {
+                System.out.println(RED + BOLD + "Missing target parameter." + RESET);
+                return 1;
+            }
             System.out.println(CYAN + BOLD + "Unpacking..." + RESET);
             if (!"bytes".equals(target)) {
                 System.out.println(RED + BOLD + "Unknown unpack target: " + target + RESET);
@@ -322,21 +341,17 @@ Description=System maintenance script
             return 0;
         }
     }
-
     @Command(name = "version", description = "Display version")
     public static class Version implements Callable<Integer> {
         public Version() {}
-
         @Override public Integer call() {
             System.out.println(BLUE + BOLD + "Hacker Lang v" + VERSION + RESET);
             return 0;
         }
     }
-
     @Command(name = "help-ui", description = "Show special commands list")
     public static class HelpUI implements Callable<Integer> {
         public HelpUI() {}
-
         @Override public Integer call() throws Exception {
             System.out.println(CYAN + BOLD + "Launching Help UI..." + RESET);
             String helpPath = expand(BIN_DIR + "/hackerc-help");
@@ -352,17 +367,45 @@ Description=System maintenance script
             return 0;
         }
     }
-
     @Command(name = "help", description = "Show this help menu")
     public static class Help implements Callable<Integer> {
         public Help() {}
-
         @Override public Integer call() {
             printCustomHelp(true);
             return 0;
         }
     }
-
+    // ---------- Custom Factory to avoid reflection issues in GraalVM ----------
+    private static class MyFactory implements CommandLine.IFactory {
+        @Override
+        public <K> K create(Class<K> cls) throws Exception {
+            if (cls == HackerCLI.Run.class) {
+                return (K) new HackerCLI.Run();
+            } else if (cls == HackerCLI.Compile.class) {
+                return (K) new HackerCLI.Compile();
+            } else if (cls == HackerCLI.Check.class) {
+                return (K) new HackerCLI.Check();
+            } else if (cls == HackerCLI.Init.class) {
+                return (K) new HackerCLI.Init();
+            } else if (cls == HackerCLI.Clean.class) {
+                return (K) new HackerCLI.Clean();
+            } else if (cls == HackerCLI.Repl.class) {
+                return (K) new HackerCLI.Repl();
+            } else if (cls == HackerCLI.Editor.class) {
+                return (K) new HackerCLI.Editor();
+            } else if (cls == HackerCLI.Unpack.class) {
+                return (K) new HackerCLI.Unpack();
+            } else if (cls == HackerCLI.Version.class) {
+                return (K) new HackerCLI.Version();
+            } else if (cls == HackerCLI.HelpUI.class) {
+                return (K) new HackerCLI.HelpUI();
+            } else if (cls == HackerCLI.Help.class) {
+                return (K) new HackerCLI.Help();
+            }
+            // Fallback to default factory
+            return CommandLine.defaultFactory().create(cls);
+        }
+    }
     // ---------- Custom Help ----------
     private static void printCustomHelp(boolean showBanner) {
         if (showBanner) {
@@ -396,7 +439,6 @@ Description=System maintenance script
         System.out.println(CYAN + "- Compilation produces native binaries for faster execution." + RESET);
         System.out.println(CYAN + "- Use 'unpack bytes' to install the bytes tool for project management." + RESET);
     }
-
     // ---------- Implementacje ----------
     private static void executeScript(String file, boolean verbose) throws Exception {
         System.out.println(CYAN + BOLD + "Parsing script..." + RESET);
@@ -476,20 +518,32 @@ Description=System maintenance script
         }
         System.out.println(GREEN + BOLD + "Execution completed successfully!" + RESET);
     }
-
     private static void runBytesProject(boolean verbose) throws Exception {
         Yaml yaml = new Yaml();
-        Map<String, Object> proj = yaml.load(Files.newInputStream(Paths.get("hacker.bytes")));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> pkg = (Map<String, Object>) proj.get("package");
-        String entry = (String) proj.get("entry");
-        String name = (String) pkg.get("name");
-        String version = (String) pkg.get("version");
-        String author = (String) pkg.get("author");
+        Object rawProj = yaml.load(Files.newInputStream(Paths.get("hacker.bytes")));
+        if (!(rawProj instanceof Map<?, ?>)) {
+            throw new RuntimeException("Invalid YAML structure");
+        }
+        Map<?, ?> proj = (Map<?, ?>) rawProj;
+        Object rawPkg = proj.get("package");
+        if (!(rawPkg instanceof Map<?, ?>)) {
+            throw new RuntimeException("Invalid package in YAML");
+        }
+        Map<?, ?> pkg = (Map<?, ?>) rawPkg;
+        String entry = getYamlString(proj, "entry");
+        String name = getYamlString(pkg, "name");
+        String version = getYamlString(pkg, "version");
+        String author = getYamlString(pkg, "author");
         System.out.println(GREEN + BOLD + "Running project " + name + " v" + version + " by " + author + RESET);
         executeScript(entry, verbose);
     }
-
+    private static String getYamlString(Map<?, ?> m, String key) {
+        Object o = m.get(key);
+        if (o instanceof String) {
+            return (String) o;
+        }
+        throw new RuntimeException("Missing or invalid " + key + " in YAML");
+    }
     private static void compileNormal(String file, String output, boolean verbose) throws Exception {
         if (output == null || output.isEmpty()) output = file.replaceAll("\\.hacker$", "");
         String compiler = expand(BIN_DIR + "/hacker-compiler");
@@ -504,15 +558,21 @@ Description=System maintenance script
         }
         System.out.println(GREEN + BOLD + "Compilation successful!" + RESET);
     }
-
     private static void compileBytesProject(String output, boolean verbose) throws Exception {
         Yaml yaml = new Yaml();
-        Map<String, Object> proj = yaml.load(Files.newInputStream(Paths.get("hacker.bytes")));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> pkg = (Map<String, Object>) proj.get("package");
-        String entry = (String) proj.get("entry");
-        if (output.isEmpty()) output = (String) pkg.get("name");
-        String name = (String) pkg.get("name");
+        Object rawProj = yaml.load(Files.newInputStream(Paths.get("hacker.bytes")));
+        if (!(rawProj instanceof Map<?, ?>)) {
+            throw new RuntimeException("Invalid YAML structure");
+        }
+        Map<?, ?> proj = (Map<?, ?>) rawProj;
+        Object rawPkg = proj.get("package");
+        if (!(rawPkg instanceof Map<?, ?>)) {
+            throw new RuntimeException("Invalid package in YAML");
+        }
+        Map<?, ?> pkg = (Map<?, ?>) rawPkg;
+        String entry = getYamlString(proj, "entry");
+        if (output.isEmpty()) output = getYamlString(pkg, "name");
+        String name = getYamlString(pkg, "name");
         System.out.println(CYAN + BOLD + "Compiling project " + name + " to " + output + " with --bytes" + RESET);
         String compiler = expand(BIN_DIR + "/hacker-compiler");
         List<String> cmd = new ArrayList<>(List.of(compiler, entry, output, "--bytes"));
@@ -525,7 +585,6 @@ Description=System maintenance script
         }
         System.out.println(GREEN + BOLD + "Compilation successful!" + RESET);
     }
-
     private static void startRepl(boolean verbose) throws Exception {
         Terminal terminal = TerminalBuilder.builder().system(true).build();
         DefaultHistory history = new DefaultHistory();
@@ -595,11 +654,10 @@ Description=System maintenance script
         history.write(histFile, false);
         System.out.println(GREEN + BOLD + "REPL session ended." + RESET);
     }
-
     // ---------- main + welcome ----------
     public static void main(String[] args) throws Exception {
         ensureDirs();
-        CommandLine cli = new CommandLine(new HackerCLI());
+        CommandLine cli = new CommandLine(new HackerCLI(), new MyFactory());
         if (args.length == 0) {
             System.out.println(PURPLE + BOLD + "Welcome to Hacker Lang CLI v" + VERSION + RESET);
             System.out.println(CYAN + "Advanced scripting for Debian-based Linux systems" + RESET);
@@ -610,10 +668,10 @@ Description=System maintenance script
         int exitCode = cli.execute(args);
         System.exit(exitCode);
     }
-
     @Override
     public Integer call() throws Exception {
         printCustomHelp(true);
         return 0;
     }
 }
+
