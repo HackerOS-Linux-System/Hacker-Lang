@@ -1,8 +1,6 @@
 const std = @import("std");
 const parse = @import("parse.zig");
-
 pub const HACKER_DIR_SUFFIX = "/.hackeros/hacker-lang";
-
 pub fn deinitParseResult(res: *parse.ParseResult, allocator: std.mem.Allocator) void {
     {
         var it = res.deps.keyIterator();
@@ -84,21 +82,18 @@ pub fn deinitParseResult(res: *parse.ParseResult, allocator: std.mem.Allocator) 
         res.config_data.deinit();
     }
 }
-
 pub fn mergeHashMaps(comptime V: type, dest: *std.StringHashMap(V), src: std.StringHashMap(V), allocator: std.mem.Allocator) !void {
     var it = src.iterator();
     while (it.next()) |entry| {
         try dest.put(try allocator.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
     }
 }
-
 pub fn mergeStringHashMaps(dest: *std.StringHashMap([]const u8), src: std.StringHashMap([]const u8), allocator: std.mem.Allocator) !void {
     var it = src.iterator();
     while (it.next()) |entry| {
         try dest.put(try allocator.dupe(u8, entry.key_ptr.*), try allocator.dupe(u8, entry.value_ptr.*));
     }
 }
-
 pub fn mergeFunctionMaps(dest: *std.StringHashMap(std.ArrayList([]const u8)), src: std.StringHashMap(std.ArrayList([]const u8)), allocator: std.mem.Allocator) !void {
     var it = src.iterator();
     while (it.next()) |entry| {
