@@ -1,1 +1,12 @@
-
+@USER = $(whoami)
+# not-scripting
+{
+let user = "$USER";  // Użycie zmiennej z .hacker
+if user == "root" {
+    print "Jesteś administratorem!";
+    > whoami
+} else {
+    print "Zwykły użytkownik: {}", user;
+    > id -un
+}
+}
