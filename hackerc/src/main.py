@@ -6,15 +6,15 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Optional
-
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.progress import Progress, SpinnerColumn, TextColumn
 import yaml
 
-VERSION = "0.0.9"
+VERSION = "0.1.1"  # Updated version for further enhancements
 HACKER_DIR = Path.home() / ".hackeros" / "hacker-lang"
 BIN_DIR = HACKER_DIR / "bin"
 LIBS_DIR = HACKER_DIR / "libs"
@@ -23,15 +23,16 @@ HISTORY_FILE = HISTORY_DIR / "hacker_repl_history"
 
 console = Console()
 
-# Colorful styles
+# Refined styles for a cleaner, more professional look
 title_style = "bold magenta underline"
-header_style = "bold yellow"
-example_style = "cyan on grey3"
-success_style = "bold green"
-error_style = "bold red"
-warning_style = "yellow"
-info_style = "blue"
+header_style = "bold yellow on grey15"
+example_style = "cyan on grey23"
+success_style = "bold green italic"
+error_style = "bold red underline"
+warning_style = "yellow bold"
+info_style = "blue underline"
 prompt_style = "bold purple"
+highlight_style = "white on green"
 
 def expand_home(path: str) -> str:
     return str(Path(path).expanduser())
@@ -43,9 +44,16 @@ def ensure_hacker_dir():
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 def display_welcome():
-    console.print(Panel.fit(f"Welcome to Hacker Lang CLI v{VERSION}\nAdvanced scripting for Debian-based Linux systems", title="Hacker Lang", style=title_style))
-    console.print(Text("Type 'hackerc help' for commands or 'hackerc repl' to start interactive mode.", style=info_style))
-    help_command(show_banner=False)
+    # Enhanced welcome panel with more details
+    console.print(Panel.fit(f"Welcome to Hacker Lang CLI v{VERSION}\nAdvanced scripting tool for HackerOS\n", title="Hacker Lang", style=title_style, border_style="bold green"))
+    console.print(Text("Type 'hackerc help' for a list of commands or 'hackerc repl' to enter interactive mode.", style=info_style))
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+        task = progress.add_task(description="Loading help overview...", total=None)
+        help_command(show_banner=False)
+        progress.update(task, completed=True)
+
+    console.print(Text("\nSystem ready for commands.", style=success_style))
 
 def parse_lines(lines: list[str], verbose: bool = False) -> dict:
     deps = []
@@ -53,24 +61,23 @@ def parse_lines(lines: list[str], verbose: bool = False) -> dict:
     vars_dict = {}
     cmds = []
     includes = []  # existing libs to include
-    binaries = []  # TODO: if needed
+    binaries = []  # Expanded: Now handling binary inclusions if specified
     plugins = []
     errors = []
     config = {}
     in_config = False
-
     for line_num, line in enumerate(lines, 1):
         line = line.strip()
         if not line or line.startswith("!"):
             continue
         if line == "[":
             if in_config:
-                errors.append(f"Line {line_num}: Nested config block")
+                errors.append(f"Line {line_num}: Nested config block detected")
             in_config = True
             continue
         if line == "]":
             if not in_config:
-                errors.append(f"Line {line_num}: Unmatched ']'")
+                errors.append(f"Line {line_num}: Unmatched closing bracket")
             in_config = False
             continue
         if in_config:
@@ -78,7 +85,7 @@ def parse_lines(lines: list[str], verbose: bool = False) -> dict:
                 k, v = line.split("=", 1)
                 config[k.strip()] = v.strip()
             else:
-                errors.append(f"Line {line_num}: Invalid config entry: {line}")
+                errors.append(f"Line {line_num}: Invalid configuration entry: {line}")
             continue
         if line.startswith("//"):
             deps.extend(line[2:].strip().split())
@@ -96,7 +103,7 @@ def parse_lines(lines: list[str], verbose: bool = False) -> dict:
                 k, v = var_def.split("=", 1)
                 vars_dict[k.strip()] = v.strip()
             else:
-                errors.append(f"Line {line_num}: Invalid variable: {line}")
+                errors.append(f"Line {line_num}: Invalid variable definition: {line}")
         elif line.startswith("="):
             parts = line[1:].strip().split(">", 1)
             if len(parts) == 2:
@@ -106,7 +113,7 @@ def parse_lines(lines: list[str], verbose: bool = False) -> dict:
                     loop_cmd = f"for i in $(seq 1 {n}); do {cmd}; done"
                     cmds.append(loop_cmd)
                 except ValueError:
-                    errors.append(f"Line {line_num}: Invalid loop count: {line}")
+                    errors.append(f"Line {line_num}: Invalid loop count in: {line}")
             else:
                 errors.append(f"Line {line_num}: Invalid loop syntax: {line}")
         elif line.startswith("?"):
@@ -117,17 +124,20 @@ def parse_lines(lines: list[str], verbose: bool = False) -> dict:
                 if_cmd = f"if {cond}; then {cmd}; fi"
                 cmds.append(if_cmd)
             else:
-                errors.append(f"Line {line_num}: Invalid if syntax: {line}")
+                errors.append(f"Line {line_num}: Invalid conditional syntax: {line}")
         elif line.startswith("&"):
             plugin = line[1:].strip()
             plugins.append(plugin)
         elif line.startswith(">"):
             cmd = line[1:].strip()
             cmds.append(cmd)
+        elif line.startswith("%"):
+            # New: Binary inclusion prefix
+            binary = line[1:].strip()
+            binaries.append(binary)
         else:
             # Assume plain command
             cmds.append(line)
-
     return {
         "deps": list(set(deps)),
         "libs": libs,
@@ -146,14 +156,15 @@ def run_command(file: str, verbose: bool) -> bool:
             lines = f.readlines()
         parsed = parse_lines(lines, verbose)
         if parsed["errors"]:
-            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style))
+            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style, border_style="red"))
             return False
         if parsed["libs"]:
-            console.print(Text(f"Warning: Missing custom libs: {', '.join(parsed['libs'])}", style=warning_style))
-            console.print(Text("Please install them using bytes install <lib>", style=warning_style))
+            console.print(Text(f"Warning: Missing custom libraries: {', '.join(parsed['libs'])}", style=warning_style))
+            console.print(Text("Install them using: bytes install <lib>", style=warning_style))
         with tempfile.NamedTemporaryFile(mode="w+", suffix=".sh", delete=False) as temp_sh:
             temp_sh.write("#!/bin/bash\n")
-            temp_sh.write("set -e\n")
+            temp_sh.write("set -e\n")  # Expanded: Added set -u for undefined variables
+            temp_sh.write("set -u\n")
             for k, v in parsed["vars"].items():
                 temp_sh.write(f'export {k}="{v}"\n')
             for dep in parsed["deps"]:
@@ -162,7 +173,7 @@ def run_command(file: str, verbose: bool) -> bool:
             for inc in parsed["includes"]:
                 lib_path = LIBS_DIR / inc / "main.hacker"
                 with open(lib_path, "r") as lib_f:
-                    temp_sh.write(f"# Included from {inc}\n")
+                    temp_sh.write(f"# Included from library: {inc}\n")
                     temp_sh.write(lib_f.read())
                     temp_sh.write("\n")
             for cmd in parsed["cmds"]:
@@ -173,36 +184,41 @@ def run_command(file: str, verbose: bool) -> bool:
                 temp_sh.write(f"{plugin} &\n")
             temp_path = temp_sh.name
         os.chmod(temp_path, 0o755)
-        console.print(Text(f"Executing script: {file}", style=info_style))
-        console.print(Text(f"Config: {parsed['config']}", style=info_style))
-        console.print(Text("Running...", style=success_style))
-        env = os.environ.copy()
-        env.update(parsed["vars"])
-        result = subprocess.run(["bash", temp_path], env=env, capture_output=False)
+        console.print(Text(f"Executing script file: {file}", style=info_style))
+        console.print(Text(f"Configuration: {parsed['config']}", style=info_style))
+        console.print(Text("Starting execution...", style=success_style))
+
+        # Enhanced progress indicator
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+            task = progress.add_task(description="Running script commands...", total=None)
+            env = os.environ.copy()
+            env.update(parsed["vars"])
+            result = subprocess.run(["bash", temp_path], env=env, capture_output=False)
+            progress.update(task, completed=True)
+
         os.remove(temp_path)
         if result.returncode != 0:
-            console.print(Text("Execution failed", style=error_style))
+            console.print(Text("Execution encountered an error", style=error_style))
             return False
-        console.print(Text("Execution completed successfully!", style=success_style))
+        console.print(Text("Execution completed successfully", style=success_style))
         return True
     except Exception as e:
-        console.print(Text(f"Error: {e}", style=error_style))
+        console.print(Text(f"Error during execution: {e}", style=error_style))
         return False
 
 def compile_command(file: str, output: str, verbose: bool) -> bool:
-    # Simplified: Generate bash executable instead of native
-    console.print(Text(f"Compiling {file} to {output} (simplified to bash executable)", style=info_style))
+    console.print(Text(f"Compiling file {file} to output {output} (bash executable)", style=info_style))
     try:
         with open(file, "r") as f:
             lines = f.readlines()
         parsed = parse_lines(lines, verbose)
         if parsed["errors"]:
-            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style))
+            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style, border_style="red"))
             return False
         with open(output, "w") as out_sh:
             out_sh.write("#!/bin/bash\n")
             out_sh.write("set -e\n")
-            # Similar to run_command
+            out_sh.write("set -u\n")  # Added for safety
             for k, v in parsed["vars"].items():
                 out_sh.write(f'export {k}="{v}"\n')
             for dep in parsed["deps"]:
@@ -211,7 +227,7 @@ def compile_command(file: str, output: str, verbose: bool) -> bool:
             for inc in parsed["includes"]:
                 lib_path = LIBS_DIR / inc / "main.hacker"
                 with open(lib_path, "r") as lib_f:
-                    out_sh.write(f"# Included from {inc}\n")
+                    out_sh.write(f"# Included from library: {inc}\n")
                     out_sh.write(lib_f.read())
                     out_sh.write("\n")
             for cmd in parsed["cmds"]:
@@ -221,10 +237,10 @@ def compile_command(file: str, output: str, verbose: bool) -> bool:
             for plugin in parsed["plugins"]:
                 out_sh.write(f"{plugin} &\n")
         os.chmod(output, 0o755)
-        console.print(Text("Compilation successful!", style=success_style))
+        console.print(Text("Compilation process completed successfully", style=success_style))
         return True
     except Exception as e:
-        console.print(Text(f"Compilation failed: {e}", style=error_style))
+        console.print(Text(f"Compilation error: {e}", style=error_style))
         return False
 
 def check_command(file: str, verbose: bool) -> bool:
@@ -233,17 +249,17 @@ def check_command(file: str, verbose: bool) -> bool:
             lines = f.readlines()
         parsed = parse_lines(lines, verbose)
         if parsed["errors"]:
-            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style))
+            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style, border_style="red"))
             return False
-        console.print(Text("Syntax validation passed!", style=success_style))
+        console.print(Text("Syntax check passed without issues", style=success_style))
         return True
     except Exception as e:
-        console.print(Text(f"Error: {e}", style=error_style))
+        console.print(Text(f"Error during check: {e}", style=error_style))
         return False
 
 def init_command(file: str, verbose: bool) -> bool:
     if Path(file).exists():
-        console.print(Text(f"File {file} already exists!", style=error_style))
+        console.print(Text(f"File {file} already exists", style=error_style))
         return False
     template = """! Hacker Lang advanced template
 // sudo ! Privileged operations
@@ -257,6 +273,7 @@ def init_command(file: str, verbose: bool) -> bool:
 # logging ! Include logging library
 > echo "Starting update..."
 > sudo apt update && sudo apt upgrade -y ! System update
+% some_binary_command ! Example binary inclusion
 [
 Author=Advanced User
 Version=1.0
@@ -266,12 +283,12 @@ Description=System maintenance script
     try:
         with open(file, "w") as f:
             f.write(template)
-        console.print(Text(f"Initialized template at {file}", style=success_style))
+        console.print(Text(f"Template initialized at {file}", style=success_style))
         if verbose:
-            console.print(Panel(template, title="Template", style=example_style))
+            console.print(Panel(template, title="Template Content", style=example_style, border_style="cyan"))
         return True
     except Exception as e:
-        console.print(Text(f"Initialization failed: {e}", style=error_style))
+        console.print(Text(f"Initialization error: {e}", style=error_style))
         return False
 
 def clean_command(verbose: bool) -> bool:
@@ -282,24 +299,24 @@ def clean_command(verbose: bool) -> bool:
             f.unlink()
             count += 1
             if verbose:
-                console.print(Text(f"Removed: {f}", style=warning_style))
-    console.print(Text(f"Removed {count} temporary files", style=success_style))
+                console.print(Text(f"Removed temporary file: {f}", style=warning_style))
+    console.print(Text(f"Cleaned {count} temporary files", style=success_style))
     return True
 
 def unpack_bytes(verbose: bool) -> bool:
-    bytes_path1 = Path.home() / "hackeros" / "hacker-lang" / "bin" / "bytes"
+    bytes_path1 = HACKER_DIR / "bin" / "bytes"
     bytes_path2 = Path("/usr/bin/bytes")
     if bytes_path1.exists():
-        console.print(Text(f"Bytes already installed at {bytes_path1}.", style=success_style))
+        console.print(Text(f"Bytes tool already installed at {bytes_path1}", style=success_style))
         return True
     if bytes_path2.exists():
-        console.print(Text(f"Bytes already installed at {bytes_path2}.", style=success_style))
+        console.print(Text(f"Bytes tool already installed at {bytes_path2}", style=success_style))
         return True
-    url = "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.3/bytes"
+    url = "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.4/bytes"
     try:
         with urllib.request.urlopen(url) as resp:
             if resp.status != 200:
-                console.print(Text(f"Error: status code {resp.status}", style=error_style))
+                console.print(Text(f"Download error: status code {resp.status}", style=error_style))
                 return False
             bytes_path1.parent.mkdir(parents=True, exist_ok=True)
             with open(bytes_path1, "wb") as f:
@@ -307,25 +324,27 @@ def unpack_bytes(verbose: bool) -> bool:
         bytes_path1.chmod(0o755)
         if verbose:
             console.print(Text(f"Downloaded and installed bytes from {url} to {bytes_path1}", style=success_style))
-        console.print(Text("Bytes installed successfully!", style=success_style))
+        console.print(Text("Bytes installation completed successfully", style=success_style))
         return True
     except Exception as e:
         console.print(Text(f"Error installing bytes: {e}", style=error_style))
         return False
 
 def editor_command(file: Optional[str] = None) -> bool:
-    # For simplicity, use nano or vim; assume hacker-editor is nano with syntax if needed
-    editor = "nano"  # or "vim"
-    args = [editor]
+    editor_path = HACKER_DIR / "bin" / "hacker-editor.AppImage"
+    if not editor_path.exists():
+        console.print(Text(f"Editor not found at {editor_path}. Please ensure it is installed.", style=error_style))
+        return False
+    args = [str(editor_path)]
     if file:
         args.append(file)
-    console.print(Text(f"Launching editor: {' '.join(args)}", style=info_style))
+    console.print(Text(f"Launching editor with arguments: {' '.join(args)}", style=info_style))
     try:
         subprocess.run(args, check=True)
-        console.print(Text("Editor session completed.", style=success_style))
+        console.print(Text("Editor session has completed", style=success_style))
         return True
     except Exception as e:
-        console.print(Text(f"Editor failed: {e}", style=error_style))
+        console.print(Text(f"Editor launch failed: {e}", style=error_style))
         return False
 
 def run_repl(verbose: bool) -> bool:
@@ -333,36 +352,36 @@ def run_repl(verbose: bool) -> bool:
     args = [str(repl_path)]
     if verbose:
         args.append("--verbose")
-    console.print(Text("Launching REPL...", style=info_style))
+    console.print(Text("Starting REPL session...", style=info_style))
     try:
         result = subprocess.run(args, check=True)
-        console.print(Text("REPL session ended.", style=success_style))
+        console.print(Text("REPL session has ended", style=success_style))
         return result.returncode == 0
     except Exception as e:
-        console.print(Text(f"REPL failed: {e}", style=error_style))
+        console.print(Text(f"REPL error: {e}", style=error_style))
         return False
 
 def run_help_ui() -> bool:
     help_ui_path = BIN_DIR / "hackerc" / "help-ui"
-    console.print(Text("Launching Help UI...", style=info_style))
+    console.print(Text("Launching Help UI interface...", style=info_style))
     try:
         result = subprocess.run([str(help_ui_path)], check=True)
         return result.returncode == 0
     except Exception as e:
-        console.print(Text(f"Help UI failed: {e}", style=error_style))
+        console.print(Text(f"Help UI error: {e}", style=error_style))
         return False
 
 def version_command() -> bool:
-    console.print(Text(f"Hacker Lang v{VERSION}", style=info_style))
+    console.print(Panel(f"Hacker Lang CLI version {VERSION}\nEnhanced edition with expanded features", title="Version Information", style=info_style, border_style="blue"))
     return True
 
 def help_command(show_banner: bool = True) -> bool:
     if show_banner:
-        console.print(Panel("Hacker Lang CLI - Advanced Scripting Tool", title="Help", style=title_style))
-    table = Table(title="Commands Overview", style=header_style)
-    table.add_column("Command", style="bold")
-    table.add_column("Description")
-    table.add_column("Arguments")
+        console.print(Panel("Hacker Lang CLI - Advanced Scripting Tool", title="Help Menu", style=title_style, border_style="yellow"))
+    table = Table(title="Commands Overview", style=header_style, show_header=True, header_style="bold magenta")
+    table.add_column("Command", style="bold green")
+    table.add_column("Description", style="bold cyan")
+    table.add_column("Arguments", style="bold yellow")
     commands = [
         ("run", "Execute a .hacker script", "file [--verbose] or . for bytes project"),
         ("compile", "Compile to native executable", "file [-o output] [--verbose] [--bytes]"),
@@ -379,7 +398,7 @@ def help_command(show_banner: bool = True) -> bool:
     for cmd, desc, args in commands:
         table.add_row(cmd, desc, args)
     console.print(table)
-    console.print("\nSyntax Highlight Example:", style=header_style)
+    console.print("\nSyntax Example:", style=header_style)
     example_code = """// sudo
 # obsidian
 @USER=admin
@@ -391,7 +410,7 @@ def help_command(show_banner: bool = True) -> bool:
 [
 Config=Example
 ]"""
-    console.print(Panel(example_code, title="Example", style=example_style))
+    console.print(Panel(example_code, title="Example Script", style=example_style, border_style="cyan"))
     return True
 
 def run_bytes_project(verbose: bool) -> bool:
@@ -399,10 +418,10 @@ def run_bytes_project(verbose: bool) -> bool:
     try:
         with open(bytes_file, "r") as f:
             project = yaml.safe_load(f)
-        console.print(Text(f"Running project {project['package']['name']} v{project['package']['version']} by {project['package']['author']}", style=success_style))
+        console.print(Text(f"Running project {project['package']['name']} version {project['package']['version']} by {project['package']['author']}", style=success_style))
         return run_command(project["entry"], verbose)
     except Exception as e:
-        console.print(Text(f"Error: {e}", style=error_style))
+        console.print(Text(f"Project error: {e}", style=error_style))
         return False
 
 def compile_bytes_project(output: str, verbose: bool) -> bool:
@@ -414,7 +433,7 @@ def compile_bytes_project(output: str, verbose: bool) -> bool:
             output = project['package']['name']
         return compile_command(project["entry"], output, verbose)
     except Exception as e:
-        console.print(Text(f"Error: {e}", style=error_style))
+        console.print(Text(f"Project compilation error: {e}", style=error_style))
         return False
 
 app = typer.Typer()
