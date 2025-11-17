@@ -24,7 +24,7 @@ Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium 
 
 === Wymagania
 
-* HackerOS lub inna dystrybucja Linuksa z podstawowymi narzędziami developerskimi (najlepiej Ubuntu albo Debian).
+* Dystrybucja HackerOS.
 * `hackerc` — narzędzie CLI dla Hacker Lang (dostępne w repo projektu).
 
 == Komendy `hackerc`
