@@ -1,7 +1,7 @@
 languages:
   Hacker Lang:
     type: programming
-    color: ""
+    color: "#ced1ab"
     extensions:
       - ".hacker"
     tm_scope: source.hacker
