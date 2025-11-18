@@ -1,16 +1,13 @@
 require "file_utils"
 require "http/client"
-require "tempfile"
 require "process"
 require "yaml"
-
 VERSION = "0.1.1"
 HACKER_DIR = Path.home / ".hackeros" / "hacker-lang"
 BIN_DIR = HACKER_DIR / "bin"
 LIBS_DIR = HACKER_DIR / "libs"
 HISTORY_DIR = Path.home / ".hackeros" / "history"
 HISTORY_FILE = HISTORY_DIR / "hacker_repl_history"
-
 TITLE_STYLE = "\e[1;4;35m"
 HEADER_STYLE = "\e[1;33m"
 EXAMPLE_STYLE = "\e[36m"
@@ -21,15 +18,12 @@ INFO_STYLE = "\e[4;34m"
 PROMPT_STYLE = "\e[1;35m"
 HIGHLIGHT_STYLE = "\e[42;37m"
 RESET = "\e[0m"
-
 def colored(text : String, style : String) : String
   "#{style}#{text}#{RESET}"
 end
-
 def strip_ansi(s : String) : String
   s.gsub(/\e\[[\d;]*[a-zA-Z]/, "")
 end
-
 def print_panel(content : String, title : String, title_style : String, border_style : String)
   content_lines = content.lines
   content_max = content_lines.map { |l| strip_ansi(l).size }.max? || 0
@@ -57,7 +51,6 @@ def print_panel(content : String, title : String, title_style : String, border_s
   end
   puts bottom
 end
-
 def parse_lines(lines : Array(String), verbose : Bool = false) : Hash(String, (Array(String) | Hash(String, String)))
   deps = [] of String
   libs = [] of String
@@ -154,19 +147,19 @@ def parse_lines(lines : Array(String), verbose : Bool = false) : Hash(String, (A
     end
   end
   {
-    "deps"     => deps.uniq,
-    "libs"     => libs,
-    "vars"     => vars_dict,
-    "cmds"     => cmds,
+    "deps" => deps.uniq,
+    "libs" => libs,
+    "vars" => vars_dict,
+    "cmds" => cmds,
     "includes" => includes,
     "binaries" => binaries,
-    "plugins"  => plugins,
-    "errors"   => errors,
-    "config"   => config,
+    "plugins" => plugins,
+    "errors" => errors,
+    "config" => config,
   }
 end
-
 def run_command(file : String, verbose : Bool) : Bool
+  tmp_path : String? = nil
   begin
     lines = File.read_lines(file)
     parsed = parse_lines(lines, verbose)
@@ -180,7 +173,8 @@ def run_command(file : String, verbose : Bool) : Bool
       puts colored("Warning: Missing custom libraries: #{libs_arr.join(", ")}", WARNING_STYLE)
       puts colored("Install them using: bytes install <lib>", WARNING_STYLE)
     end
-    Tempfile.open(".sh") do |temp|
+    tmp_path = "/tmp/hackerc_#{Process.pid}_#{Random.rand(10000)}.sh"
+    File.open(tmp_path, "w") do |temp|
       temp.puts "#!/bin/bash"
       temp.puts "set -e"
       temp.puts "set -u"
@@ -207,29 +201,31 @@ def run_command(file : String, verbose : Bool) : Bool
       parsed["plugins"].as(Array(String)).each do |plugin|
         temp.puts "#{plugin} &"
       end
-      temp.flush
-      File.chmod(temp.path, 0o755)
-      puts colored("Executing script file: #{file}", INFO_STYLE)
-      puts colored("Configuration: #{parsed["config"]}", INFO_STYLE)
-      puts colored("Starting execution...", SUCCESS_STYLE)
-      puts "Running script commands..."
-      env = ENV.to_h
-      env.merge! parsed["vars"].as(Hash(String, String))
-      status = Process.run("bash", args: [temp.path], env: env, output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
-      puts "Completed"
-      if !status.success?
-        puts colored("Execution encountered an error", ERROR_STYLE)
-        return false
-      end
-      puts colored("Execution completed successfully", SUCCESS_STYLE)
-      return true
     end
+    File.chmod(tmp_path, 0o755)
+    puts colored("Executing script file: #{file}", INFO_STYLE)
+    puts colored("Configuration: #{parsed["config"]}", INFO_STYLE)
+    puts colored("Starting execution...", SUCCESS_STYLE)
+    puts "Running script commands..."
+    env = ENV.to_h
+    env.merge! parsed["vars"].as(Hash(String, String))
+    status = Process.run("bash", args: [tmp_path], env: env, output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
+    File.delete(tmp_path)
+    puts "Completed"
+    if !status.success?
+      puts colored("Execution encountered an error", ERROR_STYLE)
+      return false
+    end
+    puts colored("Execution completed successfully", SUCCESS_STYLE)
+    return true
   rescue ex
     puts colored("Error during execution: #{ex.message}", ERROR_STYLE)
+    if tmp_path && File.exists?(tmp_path)
+      File.delete(tmp_path)
+    end
     false
   end
 end
-
 def compile_command(file : String, output : String, verbose : Bool) : Bool
   puts colored("Compiling file #{file} to output #{output} (bash executable)", INFO_STYLE)
   begin
@@ -239,32 +235,32 @@ def compile_command(file : String, output : String, verbose : Bool) : Bool
       print_panel(parsed["errors"].as(Array(String)).join("\n"), "Syntax Errors", ERROR_STYLE, "\e[31m")
       return false
     end
-    File.open(output, "w") do |out|
-      out.puts "#!/bin/bash"
-      out.puts "set -e"
-      out.puts "set -u"
+    File.open(output, "w") do |io|
+      io.puts "#!/bin/bash"
+      io.puts "set -e"
+      io.puts "set -u"
       parsed["vars"].as(Hash(String, String)).each do |k, v|
-        out.puts "export #{k}=\"#{v}\""
+        io.puts "export #{k}=\"#{v}\""
       end
       parsed["deps"].as(Array(String)).each do |dep|
         if dep != "sudo"
-          out.puts "command -v #{dep} &> /dev/null || (sudo apt update && sudo apt install -y #{dep})"
+          io.puts "command -v #{dep} &> /dev/null || (sudo apt update && sudo apt install -y #{dep})"
         end
       end
       parsed["includes"].as(Array(String)).each do |inc|
         lib_path = LIBS_DIR / inc / "main.hacker"
-        out.puts "# Included from library: #{inc}"
-        out.puts File.read(lib_path)
-        out.puts
+        io.puts "# Included from library: #{inc}"
+        io.puts File.read(lib_path)
+        io.puts
       end
       parsed["cmds"].as(Array(String)).each do |cmd|
-        out.puts cmd
+        io.puts cmd
       end
       parsed["binaries"].as(Array(String)).each do |bin|
-        out.puts bin
+        io.puts bin
       end
       parsed["plugins"].as(Array(String)).each do |plugin|
-        out.puts "#{plugin} &"
+        io.puts "#{plugin} &"
       end
     end
     File.chmod(output, 0o755)
@@ -275,7 +271,6 @@ def compile_command(file : String, output : String, verbose : Bool) : Bool
     false
   end
 end
-
 def check_command(file : String, verbose : Bool) : Bool
   begin
     lines = File.read_lines(file)
@@ -292,7 +287,6 @@ def check_command(file : String, verbose : Bool) : Bool
     false
   end
 end
-
 def init_command(file : String, verbose : Bool) : Bool
   if File.exists?(file)
     puts colored("File #{file} already exists", ERROR_STYLE)
@@ -330,7 +324,6 @@ TEMPLATE
     false
   end
 end
-
 def clean_command(verbose : Bool) : Bool
   temp_dir = Dir.tempdir
   count = 0
@@ -346,7 +339,6 @@ def clean_command(verbose : Bool) : Bool
   puts colored("Cleaned #{count} temporary files", SUCCESS_STYLE)
   true
 end
-
 def unpack_bytes(verbose : Bool) : Bool
   bytes_path1 = HACKER_DIR / "bin" / "bytes"
   bytes_path2 = Path.new("/usr/bin/bytes")
@@ -378,7 +370,6 @@ def unpack_bytes(verbose : Bool) : Bool
     false
   end
 end
-
 def editor_command(file : String? = nil) : Bool
   editor_path = HACKER_DIR / "bin" / "hacker-editor.AppImage"
   if !File.exists?(editor_path)
@@ -397,7 +388,6 @@ def editor_command(file : String? = nil) : Bool
     false
   end
 end
-
 def run_repl(verbose : Bool) : Bool
   repl_path = BIN_DIR / "hackerc" / "repl"
   args = [repl_path.to_s]
@@ -414,7 +404,6 @@ def run_repl(verbose : Bool) : Bool
     false
   end
 end
-
 def run_help_ui : Bool
   help_ui_path = BIN_DIR / "hackerc" / "help-ui"
   puts colored("Launching Help UI interface...", INFO_STYLE)
@@ -426,12 +415,10 @@ def run_help_ui : Bool
     false
   end
 end
-
 def version_command : Bool
   print_panel("Hacker Lang CLI version #{VERSION}\nEnhanced edition with expanded features", "Version Information", INFO_STYLE, "\e[34m")
   true
 end
-
 def help_command(show_banner : Bool = true) : Bool
   if show_banner
     print_panel("Hacker Lang CLI - Advanced Scripting Tool", "Help Menu", TITLE_STYLE, "\e[33m")
@@ -489,7 +476,6 @@ EXAMPLE
   print_panel(example_code, "Example Script", EXAMPLE_STYLE, "\e[36m")
   true
 end
-
 def display_welcome
   print_panel("Welcome to Hacker Lang CLI v#{VERSION}\nAdvanced scripting tool for HackerOS\n", "Hacker Lang", TITLE_STYLE, "\e[1;32m")
   puts colored("Type 'hackerc help' for a list of commands or 'hackerc repl' to enter interactive mode.", INFO_STYLE)
@@ -497,7 +483,6 @@ def display_welcome
   help_command(false)
   puts colored("\nSystem ready for commands.", SUCCESS_STYLE)
 end
-
 def run_bytes_project(verbose : Bool) : Bool
   bytes_file = "hacker.bytes"
   begin
@@ -511,7 +496,6 @@ def run_bytes_project(verbose : Bool) : Bool
     false
   end
 end
-
 def compile_bytes_project(output : String, verbose : Bool) : Bool
   bytes_file = "hacker.bytes"
   begin
@@ -526,14 +510,12 @@ def compile_bytes_project(output : String, verbose : Bool) : Bool
     false
   end
 end
-
 def ensure_hacker_dir
   Dir.mkdir_p(HACKER_DIR.to_s)
   Dir.mkdir_p(BIN_DIR.to_s)
   Dir.mkdir_p(LIBS_DIR.to_s)
   Dir.mkdir_p(HISTORY_DIR.to_s)
 end
-
 def main
   ensure_hacker_dir
   if ARGV.empty?
@@ -729,5 +711,4 @@ def main
     exit 1
   end
 end
-
 main
