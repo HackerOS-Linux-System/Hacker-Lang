@@ -1,0 +1,13 @@
+name: hacker-lang
+version: 0.1.1
+
+authors:
+  - HackerOS Team <hackeros068@gmail.com>
+
+targets:
+  hackerc:
+    main: main.cr
+
+crystal: 1.9.0
+
+license: MIT
