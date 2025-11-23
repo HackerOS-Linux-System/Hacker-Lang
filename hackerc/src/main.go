@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const VERSION = "0.0.9" // Zaktualizowana wersja po zmianach
+const VERSION = "1.1" // Zaktualizowana wersja po zmianach
 
 const HACKER_DIR = "~/.hackeros/hacker-lang"
 const BIN_DIR = HACKER_DIR + "/bin"
@@ -60,7 +60,7 @@ func ensureHackerDir() {
 
 func displayWelcome() {
 	fmt.Printf("%s%sWelcome to Hacker Lang CLI v%s%s\n", colorBold, colorPurple, VERSION, colorReset)
-	fmt.Printf("%sAdvanced scripting for Debian-based Linux systems%s\n", colorGray, colorReset)
+	fmt.Printf("%sAdvanced scripting for HackerOS Linux system%s\n", colorGray, colorReset)
 	fmt.Printf("%sType 'hackerc help' for commands or 'hackerc repl' to start interactive mode.%s\n", colorWhite, colorReset)
 	helpCommand(false)
 }
