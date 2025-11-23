@@ -15,11 +15,9 @@ import (
 )
 
 const VERSION = "1.1" // Zaktualizowana wersja po zmianach
-
 const HACKER_DIR = "~/.hackeros/hacker-lang"
 const BIN_DIR = HACKER_DIR + "/bin"
 const HISTORY_FILE = "~/.hackeros/history/hacker_repl_history"
-
 const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"
@@ -77,31 +75,36 @@ func runCommand(file string, verbose bool) bool {
 		return false
 	}
 	var parsed struct {
-		Deps     []string          `json:"deps"`
-		Libs     []string          `json:"libs"`
-		Vars     map[string]string `json:"vars"`
-		Cmds     []string          `json:"cmds"`
-		Includes []string          `json:"includes"`
-		Binaries []string          `json:"binaries"`
-		Errors   []string          `json:"errors"`
-		Config   map[string]string `json:"config"`
-		Plugins  []string          `json:"plugins"`
+		Deps         []string                  `json:"deps"`
+		Libs         []string                  `json:"libs"`
+		Vars         map[string]string         `json:"vars"`
+		LocalVars    map[string]string         `json:"local_vars"`
+		Cmds         []string                  `json:"cmds"`
+		CmdsWithVars []string                  `json:"cmds_with_vars"`
+		CmdsSeparate []string                  `json:"cmds_separate"`
+		Includes     []string                  `json:"includes"`
+		Binaries     []string                  `json:"binaries"`
+		Errors       []string                  `json:"errors"`
+		Config       map[string]string         `json:"config"`
+		Plugins      []map[string]interface{}  `json:"plugins"` // Adjusted for JSON structure
 	}
 	if err := json.Unmarshal(output, &parsed); err != nil {
 		fmt.Println(errorStyle.Render(fmt.Sprintf("Error unmarshaling parse output: %v", err)))
 		return false
 	}
 	if len(parsed.Errors) > 0 {
-		fmt.Println(errorStyle.Render("Syntax Errors:"))
+		fmt.Println("\n" + errorStyle.Render("Errors:"))
 		for _, e := range parsed.Errors {
-			fmt.Println(" - " + e)
+			fmt.Println("  " + colorRed + "✖ " + colorReset + e)
 		}
+		fmt.Println()
 		return false
 	}
 	if len(parsed.Libs) > 0 {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Warning: Missing custom libs: %v", parsed.Libs)))
 		fmt.Println(warningStyle.Render("Please install them using bytes install <lib>"))
 	}
+	// Main temp script
 	tempSh, err := os.CreateTemp("", "*.sh")
 	if err != nil {
 		fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating temp file: %v", err)))
@@ -112,6 +115,9 @@ func runCommand(file string, verbose bool) bool {
 	tempSh.WriteString("set -e\n")
 	for k, v := range parsed.Vars {
 		tempSh.WriteString(fmt.Sprintf("export %s=\"%s\"\n", k, v))
+	}
+	for k, v := range parsed.LocalVars {
+		tempSh.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, v))
 	}
 	for _, dep := range parsed.Deps {
 		if dep != "sudo" {
@@ -132,17 +138,68 @@ func runCommand(file string, verbose bool) bool {
 	for _, cmd := range parsed.Cmds {
 		tempSh.WriteString(cmd + "\n")
 	}
+	for _, cmd := range parsed.CmdsWithVars {
+		tempSh.WriteString(cmd + "\n")
+	}
 	for _, bin := range parsed.Binaries {
 		tempSh.WriteString(bin + "\n")
 	}
 	for _, plugin := range parsed.Plugins {
-		tempSh.WriteString(plugin + " &\n")
+		path := plugin["path"].(string)
+		isSuper := plugin["super"].(bool)
+		cmdStr := path + " &"
+		if isSuper {
+			cmdStr = "sudo " + cmdStr
+		}
+		tempSh.WriteString(cmdStr + "\n")
 	}
 	tempSh.Close()
 	os.Chmod(tempSh.Name(), 0755)
+
+	// Separate scripts for cmds_separate
+	var separateTemps []string
+	for i, sepCmd := range parsed.CmdsSeparate {
+		sepTemp, err := os.CreateTemp("", fmt.Sprintf("sep_%d_*.sh", i))
+		if err != nil {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating separate temp file: %v", err)))
+			return false
+		}
+		defer os.Remove(sepTemp.Name())
+		sepTemp.WriteString("#!/bin/bash\n")
+		sepTemp.WriteString("set -e\n")
+		for k, v := range parsed.Vars {
+			sepTemp.WriteString(fmt.Sprintf("export %s=\"%s\"\n", k, v))
+		}
+		for k, v := range parsed.LocalVars {
+			sepTemp.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, v))
+		}
+		sepTemp.WriteString(sepCmd + "\n")
+		sepTemp.Close()
+		os.Chmod(sepTemp.Name(), 0755)
+		separateTemps = append(separateTemps, sepTemp.Name())
+	}
+
 	fmt.Println(infoStyle.Render(fmt.Sprintf("Executing script: %s", file)))
 	fmt.Println(infoStyle.Render(fmt.Sprintf("Config: %v", parsed.Config)))
 	fmt.Println(successStyle.Render("Running..."))
+
+	// Run separate scripts
+	for _, sepPath := range separateTemps {
+		runSep := exec.Command("bash", sepPath)
+		runSep.Env = os.Environ()
+		for k, v := range parsed.Vars {
+			runSep.Env = append(runSep.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+		runSep.Stdout = os.Stdout
+		runSep.Stderr = os.Stderr
+		err = runSep.Run()
+		if err != nil {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("Separate command execution failed: %v", err)))
+			return false
+		}
+	}
+
+	// Run main script
 	runCmd := exec.Command("bash", tempSh.Name())
 	runCmd.Env = os.Environ()
 	for k, v := range parsed.Vars {
@@ -196,10 +253,11 @@ func checkCommand(file string, verbose bool) bool {
 		return false
 	}
 	if len(parsed.Errors) > 0 {
-		fmt.Println(errorStyle.Render("Syntax Errors:"))
+		fmt.Println("\n" + errorStyle.Render("Errors:"))
 		for _, e := range parsed.Errors {
-			fmt.Println(" - " + e)
+			fmt.Println("  " + colorRed + "✖ " + colorReset + e)
 		}
+		fmt.Println()
 		return false
 	}
 	fmt.Println(successStyle.Render("Syntax validation passed!"))
@@ -223,6 +281,8 @@ func initCommand(file string, verbose bool) bool {
 	# logging ! Include logging library
 	> echo "Starting update..."
 	> sudo apt update && sudo apt upgrade -y ! System update
+	>> echo "With var: $APP_NAME"
+	>>> long_running_command_with_vars
 	[
 	Author=Advanced User
 	Version=1.0
@@ -361,6 +421,8 @@ func syntaxCommand() bool {
 	=2 > echo $USER
 	? [ -d /tmp ] > echo OK
 	& sleep 10
+	>> echo "With var: $USER"
+	>>> separate_command
 	# logging
 	> sudo apt update
 	[
