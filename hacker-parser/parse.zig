@@ -12,6 +12,8 @@ pub const ParseResult = struct {
     vars_dict: std.StringHashMap([]const u8),
     local_vars: std.StringHashMap([]const u8),
     cmds: std.ArrayList([]const u8),
+    cmds_with_vars: std.ArrayList([]const u8),
+    cmds_separate: std.ArrayList([]const u8),
     includes: std.ArrayList([]const u8),
     binaries: std.ArrayList([]const u8),
     plugins: std.ArrayList(Plugin),
@@ -26,20 +28,26 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
     var vars_dict = std.StringHashMap([]const u8).init(allocator);
     var local_vars = std.StringHashMap([]const u8).init(allocator);
     var cmds = std.ArrayList([]const u8).init(allocator);
+    var cmds_with_vars = std.ArrayList([]const u8).init(allocator);
+    var cmds_separate = std.ArrayList([]const u8).init(allocator);
     var includes = std.ArrayList([]const u8).init(allocator);
     var binaries = std.ArrayList([]const u8).init(allocator);
     var plugins = std.ArrayList(Plugin).init(allocator);
     var functions = std.StringHashMap(std.ArrayList([]const u8)).init(allocator);
     var errors = std.ArrayList([]const u8).init(allocator);
     var config_data = std.StringHashMap([]const u8).init(allocator);
+
     var in_config = false;
     var in_comment = false;
     var in_function: ?[]const u8 = null;
     var line_num: u32 = 0;
+
     const home = std.posix.getenv("HOME") orelse "";
     const hacker_dir = try std.fs.path.join(allocator, &.{ home, utils.HACKER_DIR_SUFFIX });
     defer allocator.free(hacker_dir);
+
     const console = std.io.getStdOut().writer();
+
     const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
             if (verbose) try console.print("File {s} not found\n", .{file_path});
@@ -50,6 +58,8 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                 .vars_dict = vars_dict,
                 .local_vars = local_vars,
                 .cmds = cmds,
+                .cmds_with_vars = cmds_with_vars,
+                .cmds_separate = cmds_separate,
                 .includes = includes,
                 .binaries = binaries,
                 .plugins = plugins,
@@ -61,25 +71,31 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
         return err;
     };
     defer file.close();
+
     const reader = file.reader();
     var line_buf: [4096]u8 = undefined;
+
     while (reader.readUntilDelimiterOrEof(&line_buf, '\n') catch null) |line_slice| {
         line_num += 1;
         const line_trimmed = std.mem.trim(u8, line_slice, " \t\r\n");
         if (line_trimmed.len == 0) continue;
+
         var line = try allocator.dupe(u8, line_trimmed);
         defer allocator.free(line);
+
         if (std.mem.eql(u8, line, "!!")) {
             in_comment = !in_comment;
             continue;
         }
         if (in_comment) continue;
+
         const is_super = std.mem.startsWith(u8, line, "^");
         if (is_super) {
             const new_line = std.mem.trim(u8, line[1..], " \t");
             allocator.free(line);
             line = try allocator.dupe(u8, new_line);
         }
+
         if (std.mem.eql(u8, line, "[")) {
             if (in_config) {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Nested config section", .{line_num}));
@@ -96,6 +112,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             in_config = false;
             continue;
         }
+
         if (in_config) {
             if (std.mem.indexOfScalar(u8, line, '=')) |eq_pos| {
                 const key = std.mem.trim(u8, line[0..eq_pos], " \t");
@@ -104,6 +121,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             }
             continue;
         }
+
         if (std.mem.eql(u8, line, ":")) {
             if (in_function != null) {
                 in_function = null;
@@ -140,12 +158,14 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             }
             continue;
         }
+
         if (in_function != null) {
-            if (!std.mem.startsWith(u8, line, ">") and !std.mem.startsWith(u8, line, "=") and !std.mem.startsWith(u8, line, "?") and !std.mem.startsWith(u8, line, "&") and !std.mem.startsWith(u8, line, "!") and !std.mem.startsWith(u8, line, "@") and !std.mem.startsWith(u8, line, "$") and !std.mem.startsWith(u8, line, "\\")) {
+            if (!std.mem.startsWith(u8, line, ">") and !std.mem.startsWith(u8, line, ">>") and !std.mem.startsWith(u8, line, ">>>") and !std.mem.startsWith(u8, line, "=") and !std.mem.startsWith(u8, line, "?") and !std.mem.startsWith(u8, line, "&") and !std.mem.startsWith(u8, line, "!") and !std.mem.startsWith(u8, line, "@") and !std.mem.startsWith(u8, line, "$") and !std.mem.startsWith(u8, line, "\\")) {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid in function", .{line_num}));
                 continue;
             }
         }
+
         if (std.mem.startsWith(u8, line, "//")) {
             if (in_function != null) {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Deps not allowed in function", .{line_num}));
@@ -170,6 +190,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                 defer allocator.free(lib_hacker_path);
                 const lib_bin_path = try std.fs.path.join(allocator, &.{ hacker_dir, "libs", lib });
                 defer allocator.free(lib_bin_path);
+
                 if (std.fs.cwd().access(lib_hacker_path, .{})) |_| {
                     try includes.append(try allocator.dupe(u8, lib));
                     var sub = try parse_hacker_file(allocator, lib_hacker_path, verbose);
@@ -178,6 +199,8 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                     try utils.mergeStringHashMaps(&vars_dict, sub.vars_dict, allocator);
                     try utils.mergeStringHashMaps(&local_vars, sub.local_vars, allocator);
                     try cmds.appendSlice(sub.cmds.items);
+                    try cmds_with_vars.appendSlice(sub.cmds_with_vars.items);
+                    try cmds_separate.appendSlice(sub.cmds_separate.items);
                     try includes.appendSlice(sub.includes.items);
                     try binaries.appendSlice(sub.binaries.items);
                     try plugins.appendSlice(sub.plugins.items);
@@ -187,6 +210,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                     }
                     utils.deinitParseResult(&sub, allocator);
                 } else |_| {}
+
                 if (std.posix.access(lib_bin_path, std.posix.X_OK)) |_| {
                     try binaries.append(try allocator.dupe(u8, lib_bin_path));
                 } else |_| {
@@ -208,6 +232,34 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                 try target.append(cmd);
             } else {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty command", .{line_num}));
+            }
+        } else if (std.mem.startsWith(u8, line, ">>")) {
+            const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[2..], '!')) |pos| line[2 .. 2 + pos] else line[2..], " \t");
+            var cmd = try allocator.dupe(u8, cmd_part);
+            if (is_super) {
+                const sudo_cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd});
+                allocator.free(cmd);
+                cmd = sudo_cmd;
+            }
+            if (cmd.len > 0) {
+                var target = if (in_function) |f| functions.getPtr(f).? else &cmds_with_vars;
+                try target.append(cmd);
+            } else {
+                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty command with vars", .{line_num}));
+            }
+        } else if (std.mem.startsWith(u8, line, ">>>")) {
+            const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[3..], '!')) |pos| line[3 .. 3 + pos] else line[3..], " \t");
+            var cmd = try allocator.dupe(u8, cmd_part);
+            if (is_super) {
+                const sudo_cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd});
+                allocator.free(cmd);
+                cmd = sudo_cmd;
+            }
+            if (cmd.len > 0) {
+                var target = if (in_function) |f| functions.getPtr(f).? else &cmds_separate;
+                try target.append(cmd);
+            } else {
+                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty separate file command", .{line_num}));
             }
         } else if (std.mem.startsWith(u8, line, "@")) {
             if (std.mem.indexOfScalar(u8, line[1..], '=')) |eq_pos| {
@@ -318,6 +370,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid syntax", .{line_num}));
         }
     }
+
     if (in_config) {
         try errors.append(try allocator.dupe(u8, "Unclosed config section"));
     }
@@ -327,7 +380,18 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
     if (in_function != null) {
         try errors.append(try allocator.dupe(u8, "Unclosed function block"));
     }
+
     if (verbose) {
+        if (errors.items.len > 0) {
+            try console.print("\n\x1b[31m\x1b[1mErrors:\x1b[0m\n", .{});
+            for (errors.items) |e| {
+                try console.print("  \x1b[31m✖ \x1b[0m{s}\n", .{e});
+            }
+            try console.print("\n", .{});
+        } else {
+            try console.print("\x1b[32mNo errors found.\x1b[0m\n", .{});
+        }
+
         var dep_keys = try allocator.alloc([]const u8, deps.count());
         defer allocator.free(dep_keys);
         var i: usize = 0;
@@ -337,6 +401,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             i += 1;
         }
         try console.print("System Deps: {any}\n", .{dep_keys});
+
         var lib_keys = try allocator.alloc([]const u8, libs.count());
         defer allocator.free(lib_keys);
         i = 0;
@@ -346,24 +411,27 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             i += 1;
         }
         try console.print("Custom Libs: {any}\n", .{lib_keys});
+
         try console.print("Vars: {any}\n", .{vars_dict});
         try console.print("Local Vars: {any}\n", .{local_vars});
         try console.print("Cmds: {any}\n", .{cmds.items});
+        try console.print("Cmds with Vars: {any}\n", .{cmds_with_vars.items});
+        try console.print("Separate Cmds: {any}\n", .{cmds_separate.items});
         try console.print("Includes: {any}\n", .{includes.items});
         try console.print("Binaries: {any}\n", .{binaries.items});
         try console.print("Plugins: {any}\n", .{plugins.items});
         try console.print("Functions: {any}\n", .{functions});
         try console.print("Config: {any}\n", .{config_data});
-        if (errors.items.len > 0) {
-            try console.print("Errors: {any}\n", .{errors.items});
-        }
     }
+
     return ParseResult{
         .deps = deps,
         .libs = libs,
         .vars_dict = vars_dict,
         .local_vars = local_vars,
         .cmds = cmds,
+        .cmds_with_vars = cmds_with_vars,
+        .cmds_separate = cmds_separate,
         .includes = includes,
         .binaries = binaries,
         .plugins = plugins,
