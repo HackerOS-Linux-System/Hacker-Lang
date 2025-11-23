@@ -1,518 +1,621 @@
-import json
-import os
-import subprocess
-import sys
-import tempfile
-import urllib.request
-from pathlib import Path
-from typing import Optional
-import typer
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich.progress import Progress, SpinnerColumn, TextColumn
-import yaml
+package main
 
-VERSION = "0.1.1"  # Updated version for further enhancements
-HACKER_DIR = Path.home() / ".hackeros" / "hacker-lang"
-BIN_DIR = HACKER_DIR / "bin"
-LIBS_DIR = HACKER_DIR / "libs"
-HISTORY_DIR = Path.home() / ".hackeros" / "history"
-HISTORY_FILE = HISTORY_DIR / "hacker_repl_history"
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
-console = Console()
+	"github.com/charmbracelet/lipgloss"
+	"gopkg.in/yaml.v3"
+)
 
-# Refined styles for a cleaner, more professional look
-title_style = "bold magenta underline"
-header_style = "bold yellow on grey15"
-example_style = "cyan on grey23"
-success_style = "bold green italic"
-error_style = "bold red underline"
-warning_style = "yellow bold"
-info_style = "blue underline"
-prompt_style = "bold purple"
-highlight_style = "white on green"
+const VERSION = "0.0.9" // Zaktualizowana wersja po zmianach
 
-def expand_home(path: str) -> str:
-    return str(Path(path).expanduser())
+const HACKER_DIR = "~/.hackeros/hacker-lang"
+const BIN_DIR = HACKER_DIR + "/bin"
+const HISTORY_FILE = "~/.hackeros/history/hacker_repl_history"
 
-def ensure_hacker_dir():
-    HACKER_DIR.mkdir(parents=True, exist_ok=True)
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
-    LIBS_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+	colorBold   = "\033[1m"
+	colorGray   = "\033[90m"
+)
 
-def display_welcome():
-    # Enhanced welcome panel with more details
-    console.print(Panel.fit(f"Welcome to Hacker Lang CLI v{VERSION}\nAdvanced scripting tool for HackerOS\n", title="Hacker Lang", style=title_style, border_style="bold green"))
-    console.print(Text("Type 'hackerc help' for a list of commands or 'hackerc repl' to enter interactive mode.", style=info_style))
+var (
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("201")).Underline(true).MarginBottom(1)
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245")).MarginTop(1)
+	exampleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Padding(1)
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	infoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	promptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Bold(true)
+)
 
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task = progress.add_task(description="Loading help overview...", total=None)
-        help_command(show_banner=False)
-        progress.update(task, completed=True)
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~") {
+		home, _ := os.UserHomeDir()
+		return strings.Replace(path, "~", home, 1)
+	}
+	return path
+}
 
-    console.print(Text("\nSystem ready for commands.", style=success_style))
+func ensureHackerDir() {
+	os.MkdirAll(expandHome(BIN_DIR), os.ModePerm)
+	os.MkdirAll(expandHome(HACKER_DIR+"/libs"), os.ModePerm)
+	os.MkdirAll(filepath.Dir(expandHome(HISTORY_FILE)), os.ModePerm)
+}
 
-def parse_lines(lines: list[str], verbose: bool = False) -> dict:
-    deps = []
-    libs = []  # missing libs
-    vars_dict = {}
-    cmds = []
-    includes = []  # existing libs to include
-    binaries = []  # Expanded: Now handling binary inclusions if specified
-    plugins = []
-    errors = []
-    config = {}
-    in_config = False
-    for line_num, line in enumerate(lines, 1):
-        line = line.strip()
-        if not line or line.startswith("!"):
-            continue
-        if line == "[":
-            if in_config:
-                errors.append(f"Line {line_num}: Nested config block detected")
-            in_config = True
-            continue
-        if line == "]":
-            if not in_config:
-                errors.append(f"Line {line_num}: Unmatched closing bracket")
-            in_config = False
-            continue
-        if in_config:
-            if "=" in line:
-                k, v = line.split("=", 1)
-                config[k.strip()] = v.strip()
-            else:
-                errors.append(f"Line {line_num}: Invalid configuration entry: {line}")
-            continue
-        if line.startswith("//"):
-            deps.extend(line[2:].strip().split())
-        elif line.startswith("#"):
-            lib_name = line[1:].strip()
-            if lib_name:
-                lib_path = LIBS_DIR / lib_name / "main.hacker"
-                if lib_path.exists():
-                    includes.append(lib_name)
-                else:
-                    libs.append(lib_name)
-        elif line.startswith("@"):
-            var_def = line[1:].strip()
-            if "=" in var_def:
-                k, v = var_def.split("=", 1)
-                vars_dict[k.strip()] = v.strip()
-            else:
-                errors.append(f"Line {line_num}: Invalid variable definition: {line}")
-        elif line.startswith("="):
-            parts = line[1:].strip().split(">", 1)
-            if len(parts) == 2:
-                try:
-                    n = int(parts[0].strip())
-                    cmd = parts[1].strip()
-                    loop_cmd = f"for i in $(seq 1 {n}); do {cmd}; done"
-                    cmds.append(loop_cmd)
-                except ValueError:
-                    errors.append(f"Line {line_num}: Invalid loop count in: {line}")
-            else:
-                errors.append(f"Line {line_num}: Invalid loop syntax: {line}")
-        elif line.startswith("?"):
-            parts = line[1:].strip().split(">", 1)
-            if len(parts) == 2:
-                cond = parts[0].strip()
-                cmd = parts[1].strip()
-                if_cmd = f"if {cond}; then {cmd}; fi"
-                cmds.append(if_cmd)
-            else:
-                errors.append(f"Line {line_num}: Invalid conditional syntax: {line}")
-        elif line.startswith("&"):
-            plugin = line[1:].strip()
-            plugins.append(plugin)
-        elif line.startswith(">"):
-            cmd = line[1:].strip()
-            cmds.append(cmd)
-        elif line.startswith("%"):
-            # New: Binary inclusion prefix
-            binary = line[1:].strip()
-            binaries.append(binary)
-        else:
-            # Assume plain command
-            cmds.append(line)
-    return {
-        "deps": list(set(deps)),
-        "libs": libs,
-        "vars": vars_dict,
-        "cmds": cmds,
-        "includes": includes,
-        "binaries": binaries,
-        "plugins": plugins,
-        "errors": errors,
-        "config": config
-    }
+func displayWelcome() {
+	fmt.Printf("%s%sWelcome to Hacker Lang CLI v%s%s\n", colorBold, colorPurple, VERSION, colorReset)
+	fmt.Printf("%sAdvanced scripting for Debian-based Linux systems%s\n", colorGray, colorReset)
+	fmt.Printf("%sType 'hackerc help' for commands or 'hackerc repl' to start interactive mode.%s\n", colorWhite, colorReset)
+	helpCommand(false)
+}
 
-def run_command(file: str, verbose: bool) -> bool:
-    try:
-        with open(file, "r") as f:
-            lines = f.readlines()
-        parsed = parse_lines(lines, verbose)
-        if parsed["errors"]:
-            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style, border_style="red"))
-            return False
-        if parsed["libs"]:
-            console.print(Text(f"Warning: Missing custom libraries: {', '.join(parsed['libs'])}", style=warning_style))
-            console.print(Text("Install them using: bytes install <lib>", style=warning_style))
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".sh", delete=False) as temp_sh:
-            temp_sh.write("#!/bin/bash\n")
-            temp_sh.write("set -e\n")  # Expanded: Added set -u for undefined variables
-            temp_sh.write("set -u\n")
-            for k, v in parsed["vars"].items():
-                temp_sh.write(f'export {k}="{v}"\n')
-            for dep in parsed["deps"]:
-                if dep != "sudo":
-                    temp_sh.write(f'command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})\n')
-            for inc in parsed["includes"]:
-                lib_path = LIBS_DIR / inc / "main.hacker"
-                with open(lib_path, "r") as lib_f:
-                    temp_sh.write(f"# Included from library: {inc}\n")
-                    temp_sh.write(lib_f.read())
-                    temp_sh.write("\n")
-            for cmd in parsed["cmds"]:
-                temp_sh.write(f"{cmd}\n")
-            for bin in parsed["binaries"]:
-                temp_sh.write(f"{bin}\n")
-            for plugin in parsed["plugins"]:
-                temp_sh.write(f"{plugin} &\n")
-            temp_path = temp_sh.name
-        os.chmod(temp_path, 0o755)
-        console.print(Text(f"Executing script file: {file}", style=info_style))
-        console.print(Text(f"Configuration: {parsed['config']}", style=info_style))
-        console.print(Text("Starting execution...", style=success_style))
+func runCommand(file string, verbose bool) bool {
+	parserPath := expandHome(BIN_DIR + "/hacker-parser")
+	cmd := exec.Command(parserPath, file)
+	if verbose {
+		cmd.Args = append(cmd.Args, "--verbose")
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error parsing file: %v", err)))
+		return false
+	}
+	var parsed struct {
+		Deps     []string          `json:"deps"`
+		Libs     []string          `json:"libs"`
+		Vars     map[string]string `json:"vars"`
+		Cmds     []string          `json:"cmds"`
+		Includes []string          `json:"includes"`
+		Binaries []string          `json:"binaries"`
+		Errors   []string          `json:"errors"`
+		Config   map[string]string `json:"config"`
+		Plugins  []string          `json:"plugins"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error unmarshaling parse output: %v", err)))
+		return false
+	}
+	if len(parsed.Errors) > 0 {
+		fmt.Println(errorStyle.Render("Syntax Errors:"))
+		for _, e := range parsed.Errors {
+			fmt.Println(" - " + e)
+		}
+		return false
+	}
+	if len(parsed.Libs) > 0 {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Warning: Missing custom libs: %v", parsed.Libs)))
+		fmt.Println(warningStyle.Render("Please install them using bytes install <lib>"))
+	}
+	tempSh, err := os.CreateTemp("", "*.sh")
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating temp file: %v", err)))
+		return false
+	}
+	defer os.Remove(tempSh.Name())
+	tempSh.WriteString("#!/bin/bash\n")
+	tempSh.WriteString("set -e\n")
+	for k, v := range parsed.Vars {
+		tempSh.WriteString(fmt.Sprintf("export %s=\"%s\"\n", k, v))
+	}
+	for _, dep := range parsed.Deps {
+		if dep != "sudo" {
+			tempSh.WriteString(fmt.Sprintf("command -v %s &> /dev/null || (sudo apt update && sudo apt install -y %s)\n", dep, dep))
+		}
+	}
+	for _, inc := range parsed.Includes {
+		libPath := expandHome(HACKER_DIR + "/libs/" + inc + "/main.hacker")
+		tempSh.WriteString(fmt.Sprintf("# Included from %s\n", inc))
+		libContent, err := os.ReadFile(libPath)
+		if err != nil {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("Error reading include: %v", err)))
+			return false
+		}
+		tempSh.Write(libContent)
+		tempSh.WriteString("\n")
+	}
+	for _, cmd := range parsed.Cmds {
+		tempSh.WriteString(cmd + "\n")
+	}
+	for _, bin := range parsed.Binaries {
+		tempSh.WriteString(bin + "\n")
+	}
+	for _, plugin := range parsed.Plugins {
+		tempSh.WriteString(plugin + " &\n")
+	}
+	tempSh.Close()
+	os.Chmod(tempSh.Name(), 0755)
+	fmt.Println(infoStyle.Render(fmt.Sprintf("Executing script: %s", file)))
+	fmt.Println(infoStyle.Render(fmt.Sprintf("Config: %v", parsed.Config)))
+	fmt.Println(successStyle.Render("Running..."))
+	runCmd := exec.Command("bash", tempSh.Name())
+	runCmd.Env = os.Environ()
+	for k, v := range parsed.Vars {
+		runCmd.Env = append(runCmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+	err = runCmd.Run()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Execution failed: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render("Execution completed successfully!"))
+	return true
+}
 
-        # Enhanced progress indicator
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-            task = progress.add_task(description="Running script commands...", total=None)
-            env = os.environ.copy()
-            env.update(parsed["vars"])
-            result = subprocess.run(["bash", temp_path], env=env, capture_output=False)
-            progress.update(task, completed=True)
+func compileCommand(file, output string, verbose bool) bool {
+	binPath := expandHome(BIN_DIR + "/hacker-compiler")
+	cmd := exec.Command(binPath, file, output)
+	if verbose {
+		cmd.Args = append(cmd.Args, "--verbose")
+	}
+	fmt.Println(infoStyle.Render(fmt.Sprintf("Compiling %s to %s", file, output)))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Compilation failed: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render("Compilation successful!"))
+	return true
+}
 
-        os.remove(temp_path)
-        if result.returncode != 0:
-            console.print(Text("Execution encountered an error", style=error_style))
-            return False
-        console.print(Text("Execution completed successfully", style=success_style))
-        return True
-    except Exception as e:
-        console.print(Text(f"Error during execution: {e}", style=error_style))
-        return False
+func checkCommand(file string, verbose bool) bool {
+	parserPath := expandHome(BIN_DIR + "/hacker-parser")
+	cmd := exec.Command(parserPath, file)
+	if verbose {
+		cmd.Args = append(cmd.Args, "--verbose")
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error parsing file: %v", err)))
+		return false
+	}
+	var parsed struct {
+		Errors []string `json:"errors"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error unmarshaling: %v", err)))
+		return false
+	}
+	if len(parsed.Errors) > 0 {
+		fmt.Println(errorStyle.Render("Syntax Errors:"))
+		for _, e := range parsed.Errors {
+			fmt.Println(" - " + e)
+		}
+		return false
+	}
+	fmt.Println(successStyle.Render("Syntax validation passed!"))
+	return true
+}
 
-def compile_command(file: str, output: str, verbose: bool) -> bool:
-    console.print(Text(f"Compiling file {file} to output {output} (bash executable)", style=info_style))
-    try:
-        with open(file, "r") as f:
-            lines = f.readlines()
-        parsed = parse_lines(lines, verbose)
-        if parsed["errors"]:
-            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style, border_style="red"))
-            return False
-        with open(output, "w") as out_sh:
-            out_sh.write("#!/bin/bash\n")
-            out_sh.write("set -e\n")
-            out_sh.write("set -u\n")  # Added for safety
-            for k, v in parsed["vars"].items():
-                out_sh.write(f'export {k}="{v}"\n')
-            for dep in parsed["deps"]:
-                if dep != "sudo":
-                    out_sh.write(f'command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})\n')
-            for inc in parsed["includes"]:
-                lib_path = LIBS_DIR / inc / "main.hacker"
-                with open(lib_path, "r") as lib_f:
-                    out_sh.write(f"# Included from library: {inc}\n")
-                    out_sh.write(lib_f.read())
-                    out_sh.write("\n")
-            for cmd in parsed["cmds"]:
-                out_sh.write(f"{cmd}\n")
-            for bin in parsed["binaries"]:
-                out_sh.write(f"{bin}\n")
-            for plugin in parsed["plugins"]:
-                out_sh.write(f"{plugin} &\n")
-        os.chmod(output, 0o755)
-        console.print(Text("Compilation process completed successfully", style=success_style))
-        return True
-    except Exception as e:
-        console.print(Text(f"Compilation error: {e}", style=error_style))
-        return False
+func initCommand(file string, verbose bool) bool {
+	if _, err := os.Stat(file); err == nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("File %s already exists!", file)))
+		return false
+	}
+	template := `! Hacker Lang advanced template
+	// sudo ! Privileged operations
+	// curl ! For downloads
+	# network-utils ! Custom library example
+	@APP_NAME=HackerApp ! Application name
+	@LOG_LEVEL=debug
+	=3 > echo "Iteration: $APP_NAME" ! Loop example
+	? [ -f /etc/os-release ] > cat /etc/os-release | grep PRETTY_NAME ! Conditional
+	& ping -c 1 google.com ! Background task
+	# logging ! Include logging library
+	> echo "Starting update..."
+	> sudo apt update && sudo apt upgrade -y ! System update
+	[
+	Author=Advanced User
+	Version=1.0
+	Description=System maintenance script
+	]
+	`
+	err := os.WriteFile(file, []byte(template), 0644)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Initialization failed: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render(fmt.Sprintf("Initialized template at %s", file)))
+	if verbose {
+		fmt.Println(warningStyle.Render(template))
+	}
+	return true
+}
 
-def check_command(file: str, verbose: bool) -> bool:
-    try:
-        with open(file, "r") as f:
-            lines = f.readlines()
-        parsed = parse_lines(lines, verbose)
-        if parsed["errors"]:
-            console.print(Panel("\n".join(parsed["errors"]), title="Syntax Errors", style=error_style, border_style="red"))
-            return False
-        console.print(Text("Syntax check passed without issues", style=success_style))
-        return True
-    except Exception as e:
-        console.print(Text(f"Error during check: {e}", style=error_style))
-        return False
+func cleanCommand(verbose bool) bool {
+	tempDir := os.TempDir()
+	count := 0
+	files, _ := os.ReadDir(tempDir)
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), "tmp") && strings.HasSuffix(f.Name(), ".sh") {
+			path := filepath.Join(tempDir, f.Name())
+			os.Remove(path)
+			count++
+			if verbose {
+				fmt.Println(warningStyle.Render(fmt.Sprintf("Removed: %s", path)))
+			}
+		}
+	}
+	fmt.Println(successStyle.Render(fmt.Sprintf("Removed %d temporary files", count)))
+	return true
+}
 
-def init_command(file: str, verbose: bool) -> bool:
-    if Path(file).exists():
-        console.print(Text(f"File {file} already exists", style=error_style))
-        return False
-    template = """! Hacker Lang advanced template
-// sudo ! Privileged operations
-// curl ! For downloads
-# network-utils ! Custom library example
-@APP_NAME=HackerApp ! Application name
-@LOG_LEVEL=debug
-=3 > echo "Iteration: $APP_NAME" ! Loop example
-? [ -f /etc/os-release ] > cat /etc/os-release | grep PRETTY_NAME ! Conditional
-& ping -c 1 google.com ! Background task
-# logging ! Include logging library
-> echo "Starting update..."
-> sudo apt update && sudo apt upgrade -y ! System update
-% some_binary_command ! Example binary inclusion
-[
-Author=Advanced User
-Version=1.0
-Description=System maintenance script
-]
-"""
-    try:
-        with open(file, "w") as f:
-            f.write(template)
-        console.print(Text(f"Template initialized at {file}", style=success_style))
-        if verbose:
-            console.print(Panel(template, title="Template Content", style=example_style, border_style="cyan"))
-        return True
-    except Exception as e:
-        console.print(Text(f"Initialization error: {e}", style=error_style))
-        return False
+func unpackBytes(verbose bool) bool {
+	bytesPath1 := expandHome("~/hackeros/hacker-lang/bin/bytes")
+	bytesPath2 := "/usr/bin/bytes"
+	if _, err := os.Stat(bytesPath1); err == nil {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Bytes already installed at %s.", bytesPath1)))
+		return true
+	}
+	if _, err := os.Stat(bytesPath2); err == nil {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Bytes already installed at %s.", bytesPath2)))
+		return true
+	}
+	dir := filepath.Dir(bytesPath1)
+	err := os.MkdirAll(dir, os.ModePerm)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating directory: %v", err)))
+		return false
+	}
+	url := "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.3/bytes"
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error downloading bytes: %v", err)))
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error: status code %d", resp.StatusCode)))
+		return false
+	}
+	f, err := os.Create(bytesPath1)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating file: %v", err)))
+		return false
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error writing file: %v", err)))
+		return false
+	}
+	err = os.Chmod(bytesPath1, 0755)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error setting permissions: %v", err)))
+		return false
+	}
+	if verbose {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Downloaded and installed bytes from %s to %s", url, bytesPath1)))
+	}
+	fmt.Println(successStyle.Render("Bytes installed successfully!"))
+	return true
+}
 
-def clean_command(verbose: bool) -> bool:
-    temp_dir = Path(tempfile.gettempdir())
-    count = 0
-    for f in temp_dir.glob("*.sh"):
-        if f.name.startswith("tmp"):
-            f.unlink()
-            count += 1
-            if verbose:
-                console.print(Text(f"Removed temporary file: {f}", style=warning_style))
-    console.print(Text(f"Cleaned {count} temporary files", style=success_style))
-    return True
+func editorCommand(file string) bool {
+	editorPath := expandHome(BIN_DIR + "/hacker-editor")
+	args := []string{}
+	if file != "" {
+		args = append(args, file)
+	}
+	cmd := exec.Command(editorPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	fmt.Println(infoStyle.Render(fmt.Sprintf("Launching editor: %s %s", editorPath, file)))
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Editor failed: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render("Editor session completed."))
+	return true
+}
 
-def unpack_bytes(verbose: bool) -> bool:
-    bytes_path1 = HACKER_DIR / "bin" / "bytes"
-    bytes_path2 = Path("/usr/bin/bytes")
-    if bytes_path1.exists():
-        console.print(Text(f"Bytes tool already installed at {bytes_path1}", style=success_style))
-        return True
-    if bytes_path2.exists():
-        console.print(Text(f"Bytes tool already installed at {bytes_path2}", style=success_style))
-        return True
-    url = "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.4/bytes"
-    try:
-        with urllib.request.urlopen(url) as resp:
-            if resp.status != 200:
-                console.print(Text(f"Download error: status code {resp.status}", style=error_style))
-                return False
-            bytes_path1.parent.mkdir(parents=True, exist_ok=True)
-            with open(bytes_path1, "wb") as f:
-                f.write(resp.read())
-        bytes_path1.chmod(0o755)
-        if verbose:
-            console.print(Text(f"Downloaded and installed bytes from {url} to {bytes_path1}", style=success_style))
-        console.print(Text("Bytes installation completed successfully", style=success_style))
-        return True
-    except Exception as e:
-        console.print(Text(f"Error installing bytes: {e}", style=error_style))
-        return False
+func runRepl(verbose bool) bool {
+	replPath := expandHome(BIN_DIR + "/hacker-repl")
+	cmd := exec.Command(replPath)
+	if verbose {
+		cmd.Args = append(cmd.Args, "--verbose")
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("REPL failed: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render("REPL session ended."))
+	return true
+}
 
-def editor_command(file: Optional[str] = None) -> bool:
-    editor_path = HACKER_DIR / "bin" / "hacker-editor.AppImage"
-    if not editor_path.exists():
-        console.print(Text(f"Editor not found at {editor_path}. Please ensure it is installed.", style=error_style))
-        return False
-    args = [str(editor_path)]
-    if file:
-        args.append(file)
-    console.print(Text(f"Launching editor with arguments: {' '.join(args)}", style=info_style))
-    try:
-        subprocess.run(args, check=True)
-        console.print(Text("Editor session has completed", style=success_style))
-        return True
-    except Exception as e:
-        console.print(Text(f"Editor launch failed: {e}", style=error_style))
-        return False
+func versionCommand() bool {
+	fmt.Println(infoStyle.Render(fmt.Sprintf("Hacker Lang v%s", VERSION)))
+	return true
+}
 
-def run_repl(verbose: bool) -> bool:
-    repl_path = BIN_DIR / "hackerc" / "repl"
-    args = [str(repl_path)]
-    if verbose:
-        args.append("--verbose")
-    console.print(Text("Starting REPL session...", style=info_style))
-    try:
-        result = subprocess.run(args, check=True)
-        console.print(Text("REPL session has ended", style=success_style))
-        return result.returncode == 0
-    except Exception as e:
-        console.print(Text(f"REPL error: {e}", style=error_style))
-        return False
+func syntaxCommand() bool {
+	fmt.Println(headerStyle.Render("Hacker Lang Syntax Example:"))
+	exampleCode := `// sudo
+	# obsidian
+	@USER=admin
+	=2 > echo $USER
+	? [ -d /tmp ] > echo OK
+	& sleep 10
+	# logging
+	> sudo apt update
+	[
+	Config=Example
+	]`
+	fmt.Println(exampleStyle.Render(exampleCode))
+	return true
+}
 
-def run_help_ui() -> bool:
-    help_ui_path = BIN_DIR / "hackerc" / "help-ui"
-    console.print(Text("Launching Help UI interface...", style=info_style))
-    try:
-        result = subprocess.run([str(help_ui_path)], check=True)
-        return result.returncode == 0
-    except Exception as e:
-        console.print(Text(f"Help UI error: {e}", style=error_style))
-        return False
+func helpCommand(showBanner bool) bool {
+	if showBanner {
+		fmt.Println(titleStyle.Render("Hacker Lang CLI - Advanced Scripting Tool"))
+	}
+	fmt.Println(headerStyle.Render("Commands Overview:"))
+	tableStyle := lipgloss.NewStyle().Padding(0, 1)
+	rows := []string{
+		lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%-15s %-40s %-40s", "Command", "Description", "Arguments")),
+	}
+	commands := [][]string{
+		{"run", "Execute a .hacker script", "file [--verbose] or . for bytes project"},
+		{"compile", "Compile to native executable", "file [-o output] [--verbose] [--bytes]"},
+		{"check", "Validate syntax", "file [--verbose]"},
+		{"init", "Generate template script", "file [--verbose]"},
+		{"clean", "Remove temporary files", "[--verbose]"},
+		{"repl", "Launch interactive REPL", "[--verbose]"},
+		{"editor", "Launch hacker-editor", "[file]"},
+		{"unpack", "Unpack and install bytes", "bytes [--verbose]"},
+		{"version", "Display version", ""},
+		{"help", "Show this help menu", ""},
+		{"syntax", "Show syntax examples", ""},
+		{"help-ui", "Show special commands list", ""},
+	}
+	for _, cmd := range commands {
+		rows = append(rows, fmt.Sprintf("%-15s %-40s %-40s", cmd[0], cmd[1], cmd[2]))
+	}
+	fmt.Println(tableStyle.Render(lipgloss.JoinVertical(lipgloss.Left, rows...)))
+	return true
+}
 
-def version_command() -> bool:
-    console.print(Panel(f"Hacker Lang CLI version {VERSION}\nEnhanced edition with expanded features", title="Version Information", style=info_style, border_style="blue"))
-    return True
+func runBytesProject(verbose bool) bool {
+	bytesFile := "hacker.bytes"
+	data, err := os.ReadFile(bytesFile)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error reading %s: %v", bytesFile, err)))
+		return false
+	}
+	var project struct {
+		Package struct {
+			Name        string `yaml:"name"`
+			Version     string `yaml:"version"`
+			Author      string `yaml:"author"`
+			Description string `yaml:"description"`
+		} `yaml:"package"`
+		Entry   string   `yaml:"entry"`
+		Libs    []string `yaml:"libs"`
+		Scripts struct {
+			Build   string `yaml:"build"`
+			Run     string `yaml:"run"`
+			Release string `yaml:"release"`
+		} `yaml:"scripts"`
+		Meta struct {
+			License string `yaml:"license"`
+			Repo    string `yaml:"repo"`
+		} `yaml:"meta"`
+	}
+	if err := yaml.Unmarshal(data, &project); err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error parsing YAML: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render(fmt.Sprintf("Running project %s v%s by %s", project.Package.Name, project.Package.Version, project.Package.Author)))
+	return runCommand(project.Entry, verbose)
+}
 
-def help_command(show_banner: bool = True) -> bool:
-    if show_banner:
-        console.print(Panel("Hacker Lang CLI - Advanced Scripting Tool", title="Help Menu", style=title_style, border_style="yellow"))
-    table = Table(title="Commands Overview", style=header_style, show_header=True, header_style="bold magenta")
-    table.add_column("Command", style="bold green")
-    table.add_column("Description", style="bold cyan")
-    table.add_column("Arguments", style="bold yellow")
-    commands = [
-        ("run", "Execute a .hacker script", "file [--verbose] or . for bytes project"),
-        ("compile", "Compile to native executable", "file [-o output] [--verbose] [--bytes]"),
-        ("check", "Validate syntax", "file [--verbose]"),
-        ("init", "Generate template script", "file [--verbose]"),
-        ("clean", "Remove temporary files", "[--verbose]"),
-        ("repl", "Launch interactive REPL", "[--verbose]"),
-        ("editor", "Launch hacker-editor", "[file]"),
-        ("unpack", "Unpack and install bytes", "bytes [--verbose]"),
-        ("version", "Display version", ""),
-        ("help", "Show this help menu", ""),
-        ("help-ui", "Show special commands list", ""),
-    ]
-    for cmd, desc, args in commands:
-        table.add_row(cmd, desc, args)
-    console.print(table)
-    console.print("\nSyntax Example:", style=header_style)
-    example_code = """// sudo
-# obsidian
-@USER=admin
-=2 > echo $USER
-? [ -d /tmp ] > echo OK
-& sleep 10
-# logging
-> sudo apt update
-[
-Config=Example
-]"""
-    console.print(Panel(example_code, title="Example Script", style=example_style, border_style="cyan"))
-    return True
+func compileBytesProject(output string, verbose bool) bool {
+	bytesFile := "hacker.bytes"
+	data, err := os.ReadFile(bytesFile)
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error reading %s: %v", bytesFile, err)))
+		return false
+	}
+	var project struct {
+		Package struct {
+			Name        string `yaml:"name"`
+			Version     string `yaml:"version"`
+			Author      string `yaml:"author"`
+			Description string `yaml:"description"`
+		} `yaml:"package"`
+		Entry   string   `yaml:"entry"`
+		Libs    []string `yaml:"libs"`
+		Scripts struct {
+			Build   string `yaml:"build"`
+			Run     string `yaml:"run"`
+			Release string `yaml:"release"`
+		} `yaml:"scripts"`
+		Meta struct {
+			License string `yaml:"license"`
+			Repo    string `yaml:"repo"`
+		} `yaml:"meta"`
+	}
+	if err := yaml.Unmarshal(data, &project); err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error parsing YAML: %v", err)))
+		return false
+	}
+	if output == "" {
+		output = project.Package.Name
+	}
+	binPath := expandHome(BIN_DIR + "/hacker-compiler")
+	cmd := exec.Command(binPath, project.Entry, output, "--bytes")
+	if verbose {
+		cmd.Args = append(cmd.Args, "--verbose")
+	}
+	fmt.Println(infoStyle.Render(fmt.Sprintf("Compiling project %s to %s with --bytes", project.Package.Name, output)))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Compilation failed: %v", err)))
+		return false
+	}
+	fmt.Println(successStyle.Render("Compilation successful!"))
+	return true
+}
 
-def run_bytes_project(verbose: bool) -> bool:
-    bytes_file = "hacker.bytes"
-    try:
-        with open(bytes_file, "r") as f:
-            project = yaml.safe_load(f)
-        console.print(Text(f"Running project {project['package']['name']} version {project['package']['version']} by {project['package']['author']}", style=success_style))
-        return run_command(project["entry"], verbose)
-    except Exception as e:
-        console.print(Text(f"Project error: {e}", style=error_style))
-        return False
-
-def compile_bytes_project(output: str, verbose: bool) -> bool:
-    bytes_file = "hacker.bytes"
-    try:
-        with open(bytes_file, "r") as f:
-            project = yaml.safe_load(f)
-        if not output:
-            output = project['package']['name']
-        return compile_command(project["entry"], output, verbose)
-    except Exception as e:
-        console.print(Text(f"Project compilation error: {e}", style=error_style))
-        return False
-
-app = typer.Typer()
-
-@app.command()
-def run(file: str, verbose: bool = typer.Option(False, "--verbose")):
-    ensure_hacker_dir()
-    success = run_bytes_project(verbose) if file == "." else run_command(file, verbose)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def compile(file: str, output: Optional[str] = typer.Option(None, "-o"), verbose: bool = typer.Option(False, "--verbose"), bytes_mode: bool = typer.Option(False, "--bytes")):
-    ensure_hacker_dir()
-    if not output:
-        output = Path(file).stem
-    success = compile_bytes_project(output, verbose) if bytes_mode else compile_command(file, output, verbose)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def check(file: str, verbose: bool = typer.Option(False, "--verbose")):
-    ensure_hacker_dir()
-    success = check_command(file, verbose)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def init(file: str, verbose: bool = typer.Option(False, "--verbose")):
-    ensure_hacker_dir()
-    success = init_command(file, verbose)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def clean(verbose: bool = typer.Option(False, "--verbose")):
-    ensure_hacker_dir()
-    success = clean_command(verbose)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def repl(verbose: bool = typer.Option(False, "--verbose")):
-    ensure_hacker_dir()
-    success = run_repl(verbose)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def editor(file: Optional[str] = typer.Argument(None)):
-    ensure_hacker_dir()
-    success = editor_command(file)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def unpack(target: str, verbose: bool = typer.Option(False, "--verbose")):
-    ensure_hacker_dir()
-    if target == "bytes":
-        success = unpack_bytes(verbose)
-    else:
-        console.print(Text(f"Unknown unpack target: {target}", style=error_style))
-        success = False
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command()
-def version():
-    ensure_hacker_dir()
-    success = version_command()
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command(name="help")
-def help_cmd():
-    ensure_hacker_dir()
-    success = help_command(True)
-    raise typer.Exit(code=0 if success else 1)
-
-@app.command(name="help-ui")
-def help_ui():
-    ensure_hacker_dir()
-    success = run_help_ui()
-    raise typer.Exit(code=0 if success else 1)
-
-if __name__ == "__main__":
-    ensure_hacker_dir()
-    if len(sys.argv) == 1:
-        display_welcome()
-        sys.exit(0)
-    app()
+func main() {
+	ensureHackerDir()
+	args := os.Args[1:]
+	if len(args) == 0 {
+		displayWelcome()
+		os.Exit(0)
+	}
+	command := args[0]
+	args = args[1:]
+	verbose := false
+	var file, output string
+	if command == "--verbose" {
+		verbose = true
+		if len(args) == 0 {
+			displayWelcome()
+			os.Exit(0)
+		}
+		command = args[0]
+		args = args[1:]
+	}
+	success := true
+	switch command {
+		case "run":
+			if len(args) < 1 {
+				fmt.Println(errorStyle.Render("Usage: hackerc run <file> [--verbose]"))
+				os.Exit(1)
+			}
+			file = args[0]
+			if file == "." {
+				success = runBytesProject(verbose)
+			} else {
+				if len(args) > 1 && args[1] == "--verbose" {
+					verbose = true
+				}
+				success = runCommand(file, verbose)
+			}
+		case "compile":
+			if len(args) < 1 {
+				fmt.Println(errorStyle.Render("Usage: hackerc compile <file> [-o <output>] [--verbose] [--bytes]"))
+				os.Exit(1)
+			}
+			file = args[0]
+			output = strings.TrimSuffix(file, filepath.Ext(file))
+			bytes_mode := false
+			i := 1
+			for ; i < len(args); i++ {
+				if args[i] == "--bytes" {
+					bytes_mode = true
+				} else if args[i] == "-o" {
+					if i+1 >= len(args) {
+						fmt.Println(errorStyle.Render("Missing output after -o"))
+						os.Exit(1)
+					}
+					output = args[i+1]
+					i++
+				} else if args[i] == "--verbose" {
+					verbose = true
+				}
+			}
+			if bytes_mode {
+				success = compileBytesProject(output, verbose)
+			} else {
+				success = compileCommand(file, output, verbose)
+			}
+		case "check":
+			if len(args) < 1 {
+				fmt.Println(errorStyle.Render("Usage: hackerc check <file> [--verbose]"))
+				os.Exit(1)
+			}
+			file = args[0]
+			if len(args) > 1 && args[1] == "--verbose" {
+				verbose = true
+			}
+			success = checkCommand(file, verbose)
+		case "init":
+			if len(args) < 1 {
+				fmt.Println(errorStyle.Render("Usage: hackerc init <file> [--verbose]"))
+				os.Exit(1)
+			}
+			file = args[0]
+			if len(args) > 1 && args[1] == "--verbose" {
+				verbose = true
+			}
+			success = initCommand(file, verbose)
+		case "clean":
+			if len(args) > 0 && args[0] == "--verbose" {
+				verbose = true
+			}
+			success = cleanCommand(verbose)
+		case "repl":
+			if len(args) > 0 && args[0] == "--verbose" {
+				verbose = true
+			}
+			success = runRepl(verbose)
+		case "editor":
+			file = ""
+			if len(args) > 0 {
+				file = args[0]
+			}
+			success = editorCommand(file)
+		case "unpack":
+			if len(args) < 1 {
+				fmt.Println(errorStyle.Render("Usage: hackerc unpack bytes [--verbose]"))
+				success = false
+			} else if args[0] == "bytes" {
+				if len(args) > 1 && args[1] == "--verbose" {
+					verbose = true
+				}
+				success = unpackBytes(verbose)
+			} else {
+				fmt.Println(errorStyle.Render(fmt.Sprintf("Unknown unpack target: %s", args[0])))
+				success = false
+			}
+		case "version":
+			success = versionCommand()
+		case "help":
+			success = helpCommand(true)
+		case "syntax":
+			success = syntaxCommand()
+		case "help-ui":
+			success = runHelpUI()
+		case "install", "update", "remove":
+			fmt.Println(warningStyle.Render(fmt.Sprintf("Please use bytes %s", command)))
+			success = true
+		default:
+			fmt.Println(errorStyle.Render(fmt.Sprintf("Unknown command: %s", command)))
+			helpCommand(false)
+			success = false
+	}
+	if success {
+		os.Exit(0)
+	} else {
+		os.Exit(1)
+	}
+}
