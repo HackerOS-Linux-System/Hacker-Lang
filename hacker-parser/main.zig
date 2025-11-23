@@ -6,8 +6,10 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
     var verbose = false;
     var file_path: ?[]const u8 = null;
+
     for (std.os.argv[1..]) |arg_ptr| {
         const arg = std.mem.span(arg_ptr);
         if (std.mem.eql(u8, arg, "--verbose")) {
@@ -19,12 +21,15 @@ pub fn main() !void {
             std.process.exit(1);
         }
     }
+
     if (file_path == null) {
         try std.io.getStdErr().writer().print("Usage: hacker-parser [--verbose] <file>\n", .{});
         std.process.exit(1);
     }
+
     var res = try parse.parse_hacker_file(allocator, file_path.?, verbose);
     defer utils.deinitParseResult(&res, allocator);
+
     try outputJson(res);
 }
 
@@ -74,6 +79,22 @@ fn outputJson(res: parse.ParseResult) !void {
     try stdout.print("\"cmds\":[", .{});
     first = true;
     for (res.cmds.items) |c| {
+        if (!first) try stdout.print(",", .{});
+        first = false;
+        try std.json.encodeJsonString(c, .{}, stdout);
+    }
+    try stdout.print("],", .{});
+    try stdout.print("\"cmds_with_vars\":[", .{});
+    first = true;
+    for (res.cmds_with_vars.items) |c| {
+        if (!first) try stdout.print(",", .{});
+        first = false;
+        try std.json.encodeJsonString(c, .{}, stdout);
+    }
+    try stdout.print("],", .{});
+    try stdout.print("\"cmds_separate\":[", .{});
+    first = true;
+    for (res.cmds_separate.items) |c| {
         if (!first) try stdout.print(",", .{});
         first = false;
         try std.json.encodeJsonString(c, .{}, stdout);
