@@ -1,9 +1,11 @@
 const std = @import("std");
 const utils = @import("utils.zig");
+
 pub const Plugin = struct {
     path: []const u8,
     is_super: bool,
 };
+
 pub const ParseResult = struct {
     deps: std.StringHashMap(void),
     libs: std.StringHashMap(void),
@@ -17,6 +19,7 @@ pub const ParseResult = struct {
     errors: std.ArrayList([]const u8),
     config_data: std.StringHashMap([]const u8),
 };
+
 pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, verbose: bool) !ParseResult {
     var deps = std.StringHashMap(void).init(allocator);
     var libs = std.StringHashMap(void).init(allocator);
@@ -138,7 +141,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             continue;
         }
         if (in_function != null) {
-            if (!std.mem.startsWith(u8, line, ">") and !std.mem.startsWith(u8, line, ">>") and !std.mem.startsWith(u8, line, ">>>") and !std.mem.startsWith(u8, line, "=") and !std.mem.startsWith(u8, line, "?") and !std.mem.startsWith(u8, line, "&") and !std.mem.startsWith(u8, line, "!") and !std.mem.startsWith(u8, line, "@") and !std.mem.startsWith(u8, line, "$") and !std.mem.startsWith(u8, line, "\\")) {
+            if (!std.mem.startsWith(u8, line, ">") and !std.mem.startsWith(u8, line, "=") and !std.mem.startsWith(u8, line, "?") and !std.mem.startsWith(u8, line, "&") and !std.mem.startsWith(u8, line, "!") and !std.mem.startsWith(u8, line, "@") and !std.mem.startsWith(u8, line, "$") and !std.mem.startsWith(u8, line, "\\")) {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid in function", .{line_num}));
                 continue;
             }
@@ -167,7 +170,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                 defer allocator.free(lib_hacker_path);
                 const lib_bin_path = try std.fs.path.join(allocator, &.{ hacker_dir, "libs", lib });
                 defer allocator.free(lib_bin_path);
-                if (std.fs.cwd().access(lib_hacker_path, .{}) catch null != null) {
+                if (std.fs.cwd().access(lib_hacker_path, .{})) |_| {
                     try includes.append(try allocator.dupe(u8, lib));
                     var sub = try parse_hacker_file(allocator, lib_hacker_path, verbose);
                     try utils.mergeHashMaps(void, &deps, sub.deps, allocator);
@@ -183,54 +186,24 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                         try errors.append(try std.fmt.allocPrint(allocator, "In {s}: {s}", .{ lib, sub_err }));
                     }
                     utils.deinitParseResult(&sub, allocator);
-                }
-                if (std.posix.access(lib_bin_path, std.posix.X_OK) catch null != null) {
+                } else |_| {}
+                if (std.posix.access(lib_bin_path, std.posix.X_OK)) |_| {
                     try binaries.append(try allocator.dupe(u8, lib_bin_path));
-                } else {
+                } else |_| {
                     _ = try libs.put(try allocator.dupe(u8, lib), {});
                 }
             } else {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty library/include", .{line_num}));
             }
-        } else if (std.mem.startsWith(u8, line, ">>>")) {
-            if (in_function != null) {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Natural command in function", .{line_num}));
-                continue;
-            }
-            const desc_part_str = if (std.mem.indexOfScalar(u8, line[3..], '!')) |pos| line[3 .. 3 + pos] else line[3..];
-            const desc_part = std.mem.trim(u8, desc_part_str, " \t");
-            if (desc_part.len > 0) {
-                const prefix = if (is_super) "SUDO_NATURAL:" else "NATURAL:";
-                const cmd = try std.fmt.allocPrint(allocator, "{s}{s}", .{prefix, desc_part});
-                try cmds.append(cmd);
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty natural command", .{line_num}));
-            }
-        } else if (std.mem.startsWith(u8, line, ">>")) {
-            const cmd_part_str = if (std.mem.indexOfScalar(u8, line[2..], '!')) |pos| line[2 .. 2 + pos] else line[2..];
-            const cmd_part = std.mem.trim(u8, cmd_part_str, " \t");
-            var cmd = try std.fmt.allocPrint(allocator, "SUB:{s}", .{cmd_part});
-            if (is_super) {
-                const sudo_cmd = try std.fmt.allocPrint(allocator, "SUB:sudo {s}", .{cmd_part});
-                allocator.free(cmd);
-                cmd = sudo_cmd;
-            }
-            if (cmd_part.len > 0) {
-                var target = if (in_function) |f| functions.getPtr(f).? else &cmds;
-                try target.append(cmd);
-            } else {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty command", .{line_num}));
-            }
         } else if (std.mem.startsWith(u8, line, ">")) {
-            const cmd_part_str = if (std.mem.indexOfScalar(u8, line[1..], '!')) |pos| line[1 .. 1 + pos] else line[1..];
-            const cmd_part = std.mem.trim(u8, cmd_part_str, " \t");
-            var cmd = try std.fmt.allocPrint(allocator, "RAW:{s}", .{cmd_part});
+            const cmd_part = std.mem.trim(u8, if (std.mem.indexOfScalar(u8, line[1..], '!')) |pos| line[1 .. 1 + pos] else line[1..], " \t");
+            var cmd = try allocator.dupe(u8, cmd_part);
             if (is_super) {
-                const sudo_cmd = try std.fmt.allocPrint(allocator, "RAW:sudo {s}", .{cmd_part});
+                const sudo_cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd});
                 allocator.free(cmd);
                 cmd = sudo_cmd;
             }
-            if (cmd_part.len > 0) {
+            if (cmd.len > 0) {
                 var target = if (in_function) |f| functions.getPtr(f).? else &cmds;
                 try target.append(cmd);
             } else {
@@ -264,9 +237,9 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
             const plugin_name = std.mem.trim(u8, line[1..], " \t");
             if (plugin_name.len > 0) {
                 const plugin_dir = try std.fs.path.join(allocator, &.{ hacker_dir, "plugins", plugin_name });
-                if (std.posix.access(plugin_dir, std.posix.X_OK) catch null != null) {
+                if (std.posix.access(plugin_dir, std.posix.X_OK)) |_| {
                     try plugins.append(Plugin{ .path = plugin_dir, .is_super = is_super });
-                } else {
+                } else |_| {
                     allocator.free(plugin_dir);
                     try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Plugin {s} not found or not executable", .{line_num, plugin_name}));
                 }
@@ -276,16 +249,8 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
         } else if (std.mem.startsWith(u8, line, "=")) {
             if (std.mem.indexOfScalar(u8, line[1..], '>')) |gt_pos| {
                 const num_str = std.mem.trim(u8, line[1 .. 1 + gt_pos], " \t");
-                const rest = line[1 + gt_pos ..];
-                const is_natural = std.mem.startsWith(u8, rest, ">>>");
-                if (is_natural) {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Natural command not supported in loop", .{line_num}));
-                    continue;
-                }
-                const is_sub = std.mem.startsWith(u8, rest, ">>");
-                const cmd_part_str = if (is_sub) rest[2..] else rest[1..];
-                const cmd_part_full = if (std.mem.indexOfScalar(u8, cmd_part_str, '!')) |pos| cmd_part_str[0..pos] else cmd_part_str;
-                const cmd_part = std.mem.trim(u8, cmd_part_full, " \t");
+                const cmd_part_str = if (std.mem.indexOfScalar(u8, line[1 + gt_pos + 1 ..], '!')) |pos| line[1 + gt_pos + 1 .. 1 + gt_pos + 1 + pos] else line[1 + gt_pos + 1 ..];
+                const cmd_part = std.mem.trim(u8, cmd_part_str, " \t");
                 const num = std.fmt.parseInt(i32, num_str, 10) catch {
                     try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid loop count", .{line_num}));
                     continue;
@@ -294,17 +259,17 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                     try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Negative loop count", .{line_num}));
                     continue;
                 }
-                var cmd_base = cmd_part;
-                if (is_super) cmd_base = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd_part});
-                defer if (is_super) allocator.free(cmd_base);
-                const prefix = if (is_sub) "SUB:" else "RAW:";
-                const loop_cmd = try std.fmt.allocPrint(allocator, "{s}{s}", .{prefix, cmd_base});
-                defer allocator.free(loop_cmd);
+                var target = if (in_function) |f| functions.getPtr(f).? else &cmds;
                 if (cmd_part.len > 0) {
-                    var target = if (in_function) |f| functions.getPtr(f).? else &cmds;
                     var i: i32 = 0;
                     while (i < num) : (i += 1) {
-                        try target.append(try allocator.dupe(u8, loop_cmd));
+                        var cmd = try allocator.dupe(u8, cmd_part);
+                        if (is_super) {
+                            const sudo_cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd});
+                            allocator.free(cmd);
+                            cmd = sudo_cmd;
+                        }
+                        try target.append(cmd);
                     }
                 } else {
                     try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty loop command", .{line_num}));
@@ -315,22 +280,15 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
         } else if (std.mem.startsWith(u8, line, "?")) {
             if (std.mem.indexOfScalar(u8, line[1..], '>')) |gt_pos| {
                 const condition = std.mem.trim(u8, line[1 .. 1 + gt_pos], " \t");
-                const rest = line[1 + gt_pos ..];
-                const is_natural = std.mem.startsWith(u8, rest, ">>>");
-                if (is_natural) {
-                    try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Natural command not supported in conditional", .{line_num}));
-                    continue;
+                const cmd_part_str = if (std.mem.indexOfScalar(u8, line[1 + gt_pos + 1 ..], '!')) |pos| line[1 + gt_pos + 1 .. 1 + gt_pos + 1 + pos] else line[1 + gt_pos + 1 ..];
+                const cmd_part = std.mem.trim(u8, cmd_part_str, " \t");
+                var cmd = cmd_part;
+                if (is_super) {
+                    cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd_part});
+                    defer allocator.free(cmd);
                 }
-                const is_sub = std.mem.startsWith(u8, rest, ">>");
-                const cmd_part_str = if (is_sub) rest[2..] else rest[1..];
-                const cmd_part_full = if (std.mem.indexOfScalar(u8, cmd_part_str, '!')) |pos| cmd_part_str[0..pos] else cmd_part_str;
-                const cmd_part = std.mem.trim(u8, cmd_part_full, " \t");
-                var cmd_base = cmd_part;
-                if (is_super) cmd_base = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd_part});
-                defer if (is_super) allocator.free(cmd_base);
-                const prefix = if (is_sub) "SUB:" else "RAW:";
                 if (condition.len > 0 and cmd_part.len > 0) {
-                    const if_cmd = try std.fmt.allocPrint(allocator, "{s}if {s}; then {s}; fi", .{prefix, condition, cmd_base});
+                    const if_cmd = try std.fmt.allocPrint(allocator, "if {s}; then {s}; fi", .{ condition, cmd });
                     var target = if (in_function) |f| functions.getPtr(f).? else &cmds;
                     try target.append(if_cmd);
                 } else {
@@ -340,30 +298,17 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Invalid conditional syntax", .{line_num}));
             }
         } else if (std.mem.startsWith(u8, line, "&")) {
-            const rest = line[1..];
-            const is_natural = std.mem.startsWith(u8, rest, ">>>");
-            if (is_natural) {
-                try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Natural command not supported in background", .{line_num}));
-                continue;
-            }
-            const is_sub = std.mem.startsWith(u8, rest, ">>");
-            const is_raw = std.mem.startsWith(u8, rest, ">");
-            const offset: usize = if (is_sub) 2 else if (is_raw) 1 else 0;
-            const cmd_part_str = rest[offset..];
-            const cmd_part_full = if (std.mem.indexOfScalar(u8, cmd_part_str, '!')) |pos| cmd_part_str[0..pos] else cmd_part_str;
-            const cmd_part = std.mem.trim(u8, cmd_part_full, " \t");
-            var cmd_base = try std.fmt.allocPrint(allocator, "{s} &", .{cmd_part});
-            defer allocator.free(cmd_base);
+            const cmd_part_str = if (std.mem.indexOfScalar(u8, line[1..], '!')) |pos| line[1 .. 1 + pos] else line[1..];
+            const cmd_part = std.mem.trim(u8, cmd_part_str, " \t");
+            var cmd = try std.fmt.allocPrint(allocator, "{s} &", .{ cmd_part });
             if (is_super) {
-                const sudo_cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd_base});
-                allocator.free(cmd_base);
-                cmd_base = sudo_cmd;
+                const sudo_cmd = try std.fmt.allocPrint(allocator, "sudo {s}", .{cmd});
+                allocator.free(cmd);
+                cmd = sudo_cmd;
             }
-            const prefix = if (is_sub or (!is_sub and !is_raw)) "SUB:" else "RAW:";
-            const full_cmd = try std.fmt.allocPrint(allocator, "{s}{s}", .{prefix, cmd_base});
             if (cmd_part.len > 0) {
                 var target = if (in_function) |f| functions.getPtr(f).? else &cmds;
-                try target.append(full_cmd);
+                try target.append(cmd);
             } else {
                 try errors.append(try std.fmt.allocPrint(allocator, "Line {d}: Empty background command", .{line_num}));
             }
@@ -427,4 +372,3 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
         .config_data = config_data,
     };
 }
-
