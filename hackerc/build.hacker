@@ -1,3 +1,12 @@
-// crystal
+// go
+// python3
+
 > cd src
-> crystal build main.cr --release
+> go build
+> cd ..
+> cd others
+> cd hacker-help
+> go build
+> cd ..
+> cd repl
+> python3 -m nuitka --onefile main.py
