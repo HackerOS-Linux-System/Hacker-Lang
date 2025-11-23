@@ -1,6 +1,7 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const utils = @import("utils.zig");
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -26,6 +27,7 @@ pub fn main() !void {
     defer utils.deinitParseResult(&res, allocator);
     try outputJson(res);
 }
+
 fn outputJson(res: parse.ParseResult) !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{{", .{});
