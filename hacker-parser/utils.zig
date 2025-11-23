@@ -41,6 +41,18 @@ pub fn deinitParseResult(res: *parse.ParseResult, allocator: std.mem.Allocator) 
         res.cmds.deinit();
     }
     {
+        for (res.cmds_with_vars.items) |item| {
+            allocator.free(item);
+        }
+        res.cmds_with_vars.deinit();
+    }
+    {
+        for (res.cmds_separate.items) |item| {
+            allocator.free(item);
+        }
+        res.cmds_separate.deinit();
+    }
+    {
         for (res.includes.items) |item| {
             allocator.free(item);
         }
