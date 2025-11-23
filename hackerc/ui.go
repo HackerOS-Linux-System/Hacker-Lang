@@ -79,4 +79,3 @@ func runHelpUI() bool {
 	}
 	return true
 }
-
