@@ -385,7 +385,7 @@ pub fn parse_hacker_file(allocator: std.mem.Allocator, file_path: []const u8, ve
         if (errors.items.len > 0) {
             try console.print("\n\x1b[31m\x1b[1mErrors:\x1b[0m\n", .{});
             for (errors.items) |e| {
-                try console.print("  \x1b[31m✖ \x1b[0m{s}\n", .{e});
+                try console.print(" \x1b[31m✖ \x1b[0m{s}\n", .{e});
             }
             try console.print("\n", .{});
         } else {
