@@ -1,0 +1,80 @@
+[hackerfile: 1.0]
+
+[vars]
+    project_name: "myproject"
+    python: "python3"
+    venv: ".venv"
+
+[tasks]
+
+    setup: [
+        description: "Instaluje podstawowe pakiety dla systemu Debian/HackerOS"
+        run: [
+            "sudo apt update",
+            "sudo apt install -y git curl build-essential {{python}} {{python}}-venv {{python}}-pip"
+        ]
+    ]
+
+    create-venv: [
+        description: "Tworzy środowisko Python"
+        run: [
+            "test -d {{venv}} || {{python}} -m venv {{venv}}",
+            ". {{venv}}/bin/activate && pip install --upgrade pip setuptools"
+        ]
+    ]
+
+    install: [
+        description: "Instaluje zależności Pythona"
+        requires: ["create-venv"]
+        run: [
+            ". {{venv}}/bin/activate && if [ -f requirements.txt ]; then pip install -r requirements.txt; fi"
+        ]
+    ]
+
+    fmt: [
+        description: "Formatowanie kodu"
+        run: [
+            ". {{venv}}/bin/activate && if command -v black >/dev/null; then black .; fi"
+        ]
+    ]
+
+    lint: [
+        description: "Lintowanie kodu"
+        run: [
+            ". {{venv}}/bin/activate && if command -v ruff >/dev/null; then ruff .; elif command -v flake8 >/dev/null; then flake8 .; fi"
+        ]
+    ]
+
+    test: [
+        description: "Uruchamia testy"
+        run: [
+            ". {{venv}}/bin/activate && if command -v pytest >/dev/null; then pytest -q; fi"
+        ]
+    ]
+
+    run: [
+        description: "Uruchamia aplikację"
+        run: [
+            ". {{venv}}/bin/activate && {{python}} -m {{project_name}}"
+        ]
+    ]
+
+    build: [
+        description: "Buduje projekt Python"
+        run: [
+            ". {{venv}}/bin/activate && python3 -m build"
+        ]
+    ]
+
+    clean: [
+        description: "Czyści pliki tymczasowe"
+        run: [
+            "rm -rf build dist *.egg-info __pycache__ .pytest_cache .mypy_cache"
+        ]
+    ]
+
+[aliases]
+    b: "run build"
+    t: "run test"
+    i: "run install"
+    c: "run clean"
