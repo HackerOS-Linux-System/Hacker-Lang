@@ -5,7 +5,8 @@ require "json"
 require "option_parser"
 require "process"
 require "yaml"
-VERSION = "1.1"
+
+VERSION = "1.2"
 HACKER_DIR = File.expand_path("~/.hackeros/hacker-lang")
 BIN_DIR = File.join(HACKER_DIR, "bin")
 HISTORY_FILE = File.expand_path("~/.hackeros/history/hacker_repl_history")
@@ -24,17 +25,32 @@ COLOR_CYAN = "\033[36m"
 COLOR_WHITE = "\033[37m"
 COLOR_BOLD = "\033[1m"
 COLOR_GRAY = "\033[90m"
+
 def ensure_hacker_dir
   Dir.mkdir_p(BIN_DIR)
   Dir.mkdir_p(File.join(HACKER_DIR, "libs"))
+  Dir.mkdir_p(File.join(HACKER_DIR, "plugins"))
   Dir.mkdir_p(File.dirname(HISTORY_FILE))
 end
+
 def display_welcome
-  puts "#{COLOR_BOLD}#{COLOR_PURPLE}Welcome to Hacker Lang CLI v#{VERSION}#{COLOR_RESET}"
-  puts "#{COLOR_GRAY}Advanced scripting for HackerOS Linux system#{COLOR_RESET}"
-  puts "#{COLOR_WHITE}Type 'hackerc help' for commands or 'hackerc repl' to start interactive mode.#{COLOR_RESET}\n"
+  puts "#{COLOR_BOLD}#{COLOR_PURPLE}Welcome to Hacker Lang Interface (HLI) v#{VERSION}#{COLOR_RESET}"
+  puts "#{COLOR_GRAY}Advanced scripting interface for HackerOS Linux system, inspired by Cargo#{COLOR_RESET}"
+  puts "#{COLOR_WHITE}Type 'hli help' for commands or 'hli repl' to start interactive mode.#{COLOR_RESET}\n"
   help_command(false)
 end
+
+def load_project_entry : String?
+  bytes_file = "bytes.yaml"
+  if File.exists?(bytes_file)
+    data = YAML.parse(File.read(bytes_file))
+    project = data.as_h
+    entry = project["entry"]?.try(&.as_s)
+    return entry if entry
+  end
+  nil
+end
+
 def run_command(file : String, verbose : Bool) : Bool
   if !File.exists?(RUNTIME_PATH)
     puts "#{COLOR_RED}Hacker runtime not found at #{RUNTIME_PATH}. Please install the Hacker Lang tools.#{COLOR_RESET}"
@@ -45,6 +61,7 @@ def run_command(file : String, verbose : Bool) : Bool
   status = Process.run(RUNTIME_PATH, args, output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
   status.success?
 end
+
 def compile_command(file : String, output : String, verbose : Bool, bytes_mode : Bool) : Bool
   if !File.exists?(COMPILER_PATH)
     puts "#{COLOR_RED}Hacker compiler not found at #{COMPILER_PATH}. Please install the Hacker Lang tools.#{COLOR_RESET}"
@@ -56,6 +73,7 @@ def compile_command(file : String, output : String, verbose : Bool, bytes_mode :
   status = Process.run(COMPILER_PATH, args, output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
   status.success?
 end
+
 def check_command(file : String, verbose : Bool) : Bool
   if !File.exists?(PARSER_PATH)
     puts "#{COLOR_RED}Hacker parser not found at #{PARSER_PATH}. Please install the Hacker Lang tools.#{COLOR_RESET}"
@@ -90,9 +108,11 @@ def check_command(file : String, verbose : Bool) : Bool
     false
   end
 end
-def init_command(file : String, verbose : Bool) : Bool
-  if File.exists?(file)
-    puts "#{COLOR_RED}File #{file} already exists!#{COLOR_RESET}"
+
+def init_command(file : String?, verbose : Bool) : Bool
+  target_file = file || "main.hacker"
+  if File.exists?(target_file)
+    puts "#{COLOR_RED}File #{target_file} already exists!#{COLOR_RESET}"
     return false
   end
   template = <<-TEMPLATE
@@ -116,14 +136,28 @@ Version=1.0
 Description=System maintenance script
 ]
 TEMPLATE
-  File.write(file, template)
-  puts "#{COLOR_GREEN}Initialized template at #{file}#{COLOR_RESET}"
+  File.write(target_file, template)
+  puts "#{COLOR_GREEN}Initialized template at #{target_file}#{COLOR_RESET}"
   if verbose
     puts "\n#{COLOR_YELLOW}Template content:#{COLOR_RESET}"
     puts template.colorize(:yellow)
   end
+  # Also create bytes.yaml if not exists
+  bytes_file = "bytes.yaml"
+  if !File.exists?(bytes_file)
+    bytes_template = <<-YAML
+package:
+  name: my-hacker-project
+  version: 0.1.0
+  author: User
+entry: #{target_file}
+YAML
+    File.write(bytes_file, bytes_template)
+    puts "#{COLOR_GREEN}Initialized bytes.yaml for project#{COLOR_RESET}"
+  end
   true
 end
+
 def clean_command(verbose : Bool) : Bool
   count = 0
   Dir.glob("/tmp/*.sh") do |path|
@@ -136,6 +170,7 @@ def clean_command(verbose : Bool) : Bool
   puts "#{COLOR_GREEN}Removed #{count} temporary files#{COLOR_RESET}"
   true
 end
+
 def unpack_bytes(verbose : Bool) : Bool
   bytes_path1 = File.join(HACKER_DIR, "bin/bytes")
   bytes_path2 = "/usr/bin/bytes"
@@ -165,6 +200,7 @@ def unpack_bytes(verbose : Bool) : Bool
   puts "#{COLOR_GREEN}Bytes installed successfully!#{COLOR_RESET}"
   true
 end
+
 def editor_command(file : String?) : Bool
   if !File.exists?(EDITOR_PATH)
     puts "#{COLOR_RED}Hacker editor not found at #{EDITOR_PATH}. Please install the Hacker Lang tools.#{COLOR_RESET}"
@@ -181,6 +217,7 @@ def editor_command(file : String?) : Bool
     false
   end
 end
+
 def run_repl(verbose : Bool) : Bool
   if !File.exists?(REPL_PATH)
     puts "#{COLOR_RED}Hacker REPL not found at #{REPL_PATH}. Please install the Hacker Lang tools.#{COLOR_RESET}"
@@ -196,10 +233,12 @@ def run_repl(verbose : Bool) : Bool
     false
   end
 end
+
 def version_command : Bool
-  puts "#{COLOR_CYAN}Hacker Lang CLI v#{VERSION}#{COLOR_RESET}"
+  puts "#{COLOR_CYAN}Hacker Lang Interface (HLI) v#{VERSION}#{COLOR_RESET}"
   true
 end
+
 def syntax_command : Bool
   puts "#{COLOR_BOLD}Hacker Lang Syntax Example:#{COLOR_RESET}\n"
   example_code = <<-EXAMPLE
@@ -220,21 +259,55 @@ EXAMPLE
   puts example_code.colorize(:white)
   true
 end
+
+def docs_command : Bool
+  puts "#{COLOR_BOLD}Hacker Lang Documentation:#{COLOR_RESET}\n"
+  puts "Hacker Lang is an advanced scripting language for HackerOS."
+  puts "Key features:"
+  puts "- Privileged operations with // sudo"
+  puts "- Library includes with # lib-name"
+  puts "- Variables with @VAR=value"
+  puts "- Loops with =N > command"
+  puts "- Conditionals with ? condition > command"
+  puts "- Background tasks with & command"
+  puts "- Multi-line commands with >> and >>>"
+  puts "- Metadata blocks with [ key=value ]"
+  puts "\nFor more details, visit the official documentation or use 'hli tutorials' for examples."
+  true
+end
+
+def tutorials_command : Bool
+  puts "#{COLOR_BOLD}Hacker Lang Tutorials:#{COLOR_RESET}\n"
+  puts "Tutorial 1: Basic Script"
+  puts "Create a file main.hacker with:"
+  puts "> echo 'Hello, Hacker Lang!'"
+  puts "Run with: hli run"
+  puts "\nTutorial 2: Using Libraries"
+  puts "Add # logging to your script."
+  puts "HLI will automatically install if missing."
+  puts "\nTutorial 3: Projects"
+  puts "Use 'hli init' to create a project with bytes.yaml."
+  puts "Then 'hli run' to execute."
+  true
+end
+
 def help_command(show_banner : Bool) : Bool
   if show_banner
-    puts "#{COLOR_BOLD}#{COLOR_PURPLE}Hacker Lang CLI - Advanced Scripting Tool v#{VERSION}#{COLOR_RESET}\n"
+    puts "#{COLOR_BOLD}#{COLOR_PURPLE}Hacker Lang Interface (HLI) - Advanced Scripting Tool v#{VERSION}#{COLOR_RESET}\n"
   end
   puts "#{COLOR_BOLD}Commands Overview:#{COLOR_RESET}"
   puts "#{"Command".ljust(15).colorize(:light_gray)} #{"Description".ljust(40).colorize(:light_gray)} #{"Arguments".ljust(40).colorize(:light_gray)}"
   commands = [
-    ["run", "Execute a .hacker script", "file [--verbose] or . for bytes project"],
-    ["compile", "Compile to native executable", "file [-o output] [--verbose] [--bytes]"],
-    ["check", "Validate syntax", "file [--verbose]"],
-    ["init", "Generate template script", "file [--verbose]"],
+    ["run", "Execute a .hacker script or project", "[file] [--verbose]"],
+    ["compile", "Compile to native executable or project", "[file] [-o output] [--verbose] [--bytes]"],
+    ["check", "Validate syntax", "[file] [--verbose]"],
+    ["init", "Generate template script/project", "[file] [--verbose]"],
     ["clean", "Remove temporary files", "[--verbose]"],
     ["repl", "Launch interactive REPL", "[--verbose]"],
     ["editor", "Launch hacker-editor", "[file]"],
     ["unpack", "Unpack and install bytes", "bytes [--verbose]"],
+    ["docs", "Show documentation", ""],
+    ["tutorials", "Show tutorials", ""],
     ["version", "Display version", ""],
     ["help", "Show this help menu", ""],
     ["syntax", "Show syntax examples", ""],
@@ -245,26 +318,30 @@ def help_command(show_banner : Bool) : Bool
   end
   true
 end
+
 def run_help_ui : Bool
   puts "#{COLOR_BOLD}#{COLOR_PURPLE}Hacker Lang Commands List#{COLOR_RESET}"
-  puts "run: Execute script - Usage: hackerc run <file> [--verbose] or run . for bytes project"
-  puts "compile: Compile to executable - Usage: hackerc compile <file> [-o output] [--verbose] [--bytes]"
-  puts "check: Validate syntax - Usage: hackerc check <file> [--verbose]"
-  puts "init: Generate template - Usage: hackerc init <file> [--verbose]"
-  puts "clean: Remove temps - Usage: hackerc clean [--verbose]"
-  puts "repl: Interactive REPL - Usage: hackerc repl [--verbose]"
-  puts "editor: Launch editor - Usage: hackerc editor [file]"
-  puts "unpack: Unpack and install bytes - Usage: hackerc unpack bytes [--verbose]"
-  puts "version: Show version - Usage: hackerc version"
-  puts "help: Show help - Usage: hackerc help"
-  puts "syntax: Show syntax examples - Usage: hackerc syntax"
+  puts "run: Execute script/project - Usage: hli run [file] [--verbose]"
+  puts "compile: Compile to executable/project - Usage: hli compile [file] [-o output] [--verbose] [--bytes]"
+  puts "check: Validate syntax - Usage: hli check [file] [--verbose]"
+  puts "init: Generate template - Usage: hli init [file] [--verbose]"
+  puts "clean: Remove temps - Usage: hli clean [--verbose]"
+  puts "repl: Interactive REPL - Usage: hli repl [--verbose]"
+  puts "editor: Launch editor - Usage: hli editor [file]"
+  puts "unpack: Unpack and install bytes - Usage: hli unpack bytes [--verbose]"
+  puts "docs: Show documentation - Usage: hli docs"
+  puts "tutorials: Show tutorials - Usage: hli tutorials"
+  puts "version: Show version - Usage: hli version"
+  puts "help: Show help - Usage: hli help"
+  puts "syntax: Show syntax examples - Usage: hli syntax"
   puts "help-ui: Interactive help UI - This UI"
   true
 end
+
 def run_bytes_project(verbose : Bool) : Bool
   bytes_file = "bytes.yaml"
   if !File.exists?(bytes_file)
-    puts "#{COLOR_RED}Error: #{bytes_file} not found#{COLOR_RESET}"
+    puts "#{COLOR_RED}Error: #{bytes_file} not found. Use 'hli init' to create a project.#{COLOR_RESET}"
     return false
   end
   data = YAML.parse(File.read(bytes_file))
@@ -275,12 +352,14 @@ def run_bytes_project(verbose : Bool) : Bool
   author = package["author"].as_s
   entry = project["entry"].as_s
   puts "#{COLOR_GREEN}Running project #{name} v#{version} by #{author}#{COLOR_RESET}"
+  check_dependencies(entry, verbose)
   run_command(entry, verbose)
 end
+
 def compile_bytes_project(output : String, verbose : Bool) : Bool
   bytes_file = "bytes.yaml"
   if !File.exists?(bytes_file)
-    puts "#{COLOR_RED}Error: #{bytes_file} not found#{COLOR_RESET}"
+    puts "#{COLOR_RED}Error: #{bytes_file} not found. Use 'hli init' to create a project.#{COLOR_RESET}"
     return false
   end
   data = YAML.parse(File.read(bytes_file))
@@ -290,8 +369,66 @@ def compile_bytes_project(output : String, verbose : Bool) : Bool
   entry = project["entry"].as_s
   output = output.empty? ? name : output
   puts "#{COLOR_CYAN}Compiling project #{name} to #{output} with --bytes#{COLOR_RESET}"
+  check_dependencies(entry, verbose)
   compile_command(entry, output, verbose, true)
 end
+
+def check_bytes_project(verbose : Bool) : Bool
+  bytes_file = "bytes.yaml"
+  if !File.exists?(bytes_file)
+    puts "#{COLOR_RED}Error: #{bytes_file} not found. Use 'hli init' to create a project.#{COLOR_RESET}"
+    return false
+  end
+  data = YAML.parse(File.read(bytes_file))
+  project = data.as_h
+  entry = project["entry"].as_s
+  check_dependencies(entry, verbose)
+  check_command(entry, verbose)
+end
+
+def check_dependencies(file : String, verbose : Bool) : Bool
+  if !File.exists?(file)
+    puts "#{COLOR_RED}File #{file} not found for dependency check.#{COLOR_RESET}"
+    return false
+  end
+  content = File.read(file)
+  libs_dir = File.join(HACKER_DIR, "libs")
+  plugins_dir = File.join(HACKER_DIR, "plugins")
+  missing_libs = [] of String
+  missing_plugins = [] of String
+  content.lines.each do |line|
+    stripped = line.strip
+    if stripped.starts_with?("//")
+      plugin_name = stripped[2..].strip.split(" ").first?.try(&.gsub(/[^a-zA-Z0-9_-]/, ""))
+      if plugin_name && plugin_name.size > 0 && !Dir.glob(File.join(plugins_dir, "#{plugin_name}*")).any?
+        missing_plugins << plugin_name unless missing_plugins.includes?(plugin_name)
+      end
+    elsif stripped.starts_with?("#")
+      lib_name = stripped[1..].strip.split(" ").first?.try(&.gsub(/[^a-zA-Z0-9_-]/, ""))
+      if lib_name && lib_name.size > 0 && !Dir.glob(File.join(libs_dir, "#{lib_name}*")).any?
+        missing_libs << lib_name unless missing_libs.includes?(lib_name)
+      end
+    end
+  end
+  if !missing_plugins.empty?
+    puts "#{COLOR_YELLOW}Missing plugins: #{missing_plugins.join(", ")}#{COLOR_RESET}" if verbose
+    missing_plugins.each do |p|
+      puts "#{COLOR_YELLOW}Installing plugin #{p} via bytes...#{COLOR_RESET}"
+      status = Process.run("bytes", ["plugin", "install", p], output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
+      return false unless status.success?
+    end
+  end
+  if !missing_libs.empty?
+    puts "#{COLOR_YELLOW}Missing libs: #{missing_libs.join(", ")}#{COLOR_RESET}" if verbose
+    missing_libs.each do |l|
+      puts "#{COLOR_YELLOW}Installing lib #{l} via bytes...#{COLOR_RESET}"
+      status = Process.run("bytes", ["install", l], output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
+      return false unless status.success?
+    end
+  end
+  true
+end
+
 def execute_task(task_name : String, yaml : YAML::Any, executed = Set(String).new) : Nil
   if executed.includes?(task_name)
     raise "Cycle detected in tasks involving #{task_name}"
@@ -313,6 +450,7 @@ def execute_task(task_name : String, yaml : YAML::Any, executed = Set(String).ne
     end
   end
 end
+
 def main
   ensure_hacker_dir
   if ARGV.empty?
@@ -337,7 +475,7 @@ def main
   case command
   when "run"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc run <file> [options]\n\nExecute a .hacker script. Use '.' for bytes project."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli run [file] [options]\n\nExecute a .hacker script. No file assumes project from bytes.yaml."
       p.on("--verbose", "Enable verbose output") { verbose = true }
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
@@ -347,20 +485,31 @@ def main
       end
     end
     parser.parse(ARGV)
-    if ARGV.size != 1
-      puts "#{COLOR_RED}Error: Expected exactly one argument: <file>#{COLOR_RESET}"
+    if ARGV.size > 1
+      puts "#{COLOR_RED}Error: Expected at most one argument: [file]#{COLOR_RESET}"
       puts parser
       exit(1)
+    elsif ARGV.size == 1
+      file = ARGV.shift
     end
-    file = ARGV.shift
-    if file == "."
+    if file.nil?
+      entry = load_project_entry
+      if entry.nil?
+        puts "#{COLOR_RED}No project found. Use 'hli init' or specify a file.#{COLOR_RESET}"
+        success = false
+      else
+        check_dependencies(entry, verbose)
+        success = run_command(entry, verbose)
+      end
+    elsif file == "."
       success = run_bytes_project(verbose)
     else
+      check_dependencies(file.not_nil!, verbose)
       success = run_command(file.not_nil!, verbose)
     end
   when "compile"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc compile <file> [options]\n\nCompile to native executable. Use '.' for bytes project."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli compile [file] [options]\n\nCompile to native executable. No file assumes project from bytes.yaml."
       p.on("-o OUTPUT", "--output OUTPUT", "Specify output file") { |o| output = o }
       p.on("--bytes", "Enable bytes mode") { bytes_mode = true }
       p.on("--verbose", "Enable verbose output") { verbose = true }
@@ -372,21 +521,33 @@ def main
       end
     end
     parser.parse(ARGV)
-    if ARGV.size != 1
-      puts "#{COLOR_RED}Error: Expected exactly one argument: <file>#{COLOR_RESET}"
+    if ARGV.size > 1
+      puts "#{COLOR_RED}Error: Expected at most one argument: [file]#{COLOR_RESET}"
       puts parser
       exit(1)
+    elsif ARGV.size == 1
+      file = ARGV.shift
     end
-    file = ARGV.shift
-    if file == "."
+    if file.nil?
+      entry = load_project_entry
+      if entry.nil?
+        puts "#{COLOR_RED}No project found. Use 'hli init' or specify a file.#{COLOR_RESET}"
+        success = false
+      else
+        output = output.empty? ? File.basename(entry, File.extname(entry)) : output
+        check_dependencies(entry, verbose)
+        success = compile_command(entry, output, verbose, bytes_mode)
+      end
+    elsif file == "."
       success = compile_bytes_project(output, verbose)
     else
       output = output.empty? ? File.basename(file.not_nil!, File.extname(file.not_nil!)) : output
+      check_dependencies(file.not_nil!, verbose)
       success = compile_command(file.not_nil!, output, verbose, bytes_mode)
     end
   when "check"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc check <file> [options]\n\nValidate syntax of a .hacker file."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli check [file] [options]\n\nValidate syntax of a .hacker file. No file assumes project from bytes.yaml."
       p.on("--verbose", "Enable verbose output") { verbose = true }
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
@@ -396,16 +557,31 @@ def main
       end
     end
     parser.parse(ARGV)
-    if ARGV.size != 1
-      puts "#{COLOR_RED}Error: Expected exactly one argument: <file>#{COLOR_RESET}"
+    if ARGV.size > 1
+      puts "#{COLOR_RED}Error: Expected at most one argument: [file]#{COLOR_RESET}"
       puts parser
       exit(1)
+    elsif ARGV.size == 1
+      file = ARGV.shift
     end
-    file = ARGV.shift
-    success = check_command(file.not_nil!, verbose)
+    if file.nil?
+      entry = load_project_entry
+      if entry.nil?
+        puts "#{COLOR_RED}No project found. Use 'hli init' or specify a file.#{COLOR_RESET}"
+        success = false
+      else
+        check_dependencies(entry, verbose)
+        success = check_command(entry, verbose)
+      end
+    elsif file == "."
+      success = check_bytes_project(verbose)
+    else
+      check_dependencies(file.not_nil!, verbose)
+      success = check_command(file.not_nil!, verbose)
+    end
   when "init"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc init <file> [options]\n\nGenerate a template .hacker script."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli init [file] [options]\n\nGenerate a template .hacker script/project."
       p.on("--verbose", "Enable verbose output (show template content)") { verbose = true }
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
@@ -415,16 +591,17 @@ def main
       end
     end
     parser.parse(ARGV)
-    if ARGV.size != 1
-      puts "#{COLOR_RED}Error: Expected exactly one argument: <file>#{COLOR_RESET}"
+    if ARGV.size > 1
+      puts "#{COLOR_RED}Error: Expected at most one argument: [file]#{COLOR_RESET}"
       puts parser
       exit(1)
+    elsif ARGV.size == 1
+      file = ARGV.shift
     end
-    file = ARGV.shift
-    success = init_command(file.not_nil!, verbose)
+    success = init_command(file, verbose)
   when "clean"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc clean [options]\n\nRemove temporary files."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli clean [options]\n\nRemove temporary files."
       p.on("--verbose", "Show removed files") { verbose = true }
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
@@ -442,7 +619,7 @@ def main
     success = clean_command(verbose)
   when "repl"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc repl [options]\n\nLaunch interactive REPL."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli repl [options]\n\nLaunch interactive REPL."
       p.on("--verbose", "Enable verbose output") { verbose = true }
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
@@ -460,7 +637,7 @@ def main
     success = run_repl(verbose)
   when "editor"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc editor [file] [options]\n\nLaunch hacker-editor."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli editor [file] [options]\n\nLaunch hacker-editor."
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
         puts "#{COLOR_RED}Unknown option: #{opt}#{COLOR_RESET}"
@@ -479,7 +656,7 @@ def main
     success = editor_command(file)
   when "unpack"
     parser = OptionParser.new do |p|
-      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hackerc unpack bytes [options]\n\nUnpack and install bytes tool."
+      p.banner = "#{COLOR_BOLD}Usage:#{COLOR_RESET} hli unpack bytes [options]\n\nUnpack and install bytes tool."
       p.on("--verbose", "Enable verbose output") { verbose = true }
       p.on("-h", "--help", "Show this help") { puts p; exit(0) }
       p.invalid_option do |opt|
@@ -501,6 +678,10 @@ def main
       puts "#{COLOR_RED}Unknown unpack target: #{target} (only 'bytes' supported)#{COLOR_RESET}"
       success = false
     end
+  when "docs"
+    success = docs_command
+  when "tutorials"
+    success = tutorials_command
   when "version"
     success = version_command
   when "help"
@@ -539,4 +720,5 @@ def main
   end
   exit(success ? 0 : 1)
 end
+
 main
