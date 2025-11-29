@@ -25,26 +25,30 @@ Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium 
 === Wymagania
 
 * Dystrybucja HackerOS.
-* `hackerc` — narzędzie CLI dla Hacker Lang (dostępne w repo projektu).
+* `hackerc` — narzedzie cli do uruchamaia i kompilacji samych plików .hacker (służy do drobnych skryptów, programów, projektów).
+* `hli` — skrót od hacker lang interface narzędzie ma większe zastosowanie niz hackerc wymaga pliku bytes.yaml (służy do dużych projektów, programów, skryptów).
+* `bytes` — narzędzie do instalacji bibliotek, pluginów dla hacker lang.
+* `hlh` — skrót od hacker lang help - narzedzie pokazuje szczegółowe informacje o narzędziach hackerc, bytes, hli.
 
 == Komendy `hackerc`
 
 Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
 
-* `hackerc run {plik.hacker}`:: Uruchamia plik `.hacker` bez kompilacji.
-* `hackerc run .`:: Uruchamia hacker.bytes.
-* `hackerc compile --bytes`:: Uruchamia proces kompilacji na podstawie pliku hacker.bytes.
-* `hackerc compiler {plik.hacker} {lokalizacja}`:: Kompiluje plik `.hacker` do binarki i zapisuje wynik w podanej lokalizacji.
-* `hackerc check {plik.hacker}`:: Sprawdza poprawność składni i podstawowe błędy logiczne w pliku.
-* `hackerc init`:: Tworzy przykładowy plik `.hacker` w bieżącym katalogu.
-* `hackerc clean`:: Czyści cache oraz pliki tymczasowe `hackerc`.
-* `hackerc repl`:: Uruchamia interaktywny REPL Hacker Lang.
-* `hackerc version`:: Wyświetla wersję `hackerc`.
-* `hackerc help`:: Pokazuje listę dostępnych komend i krótkie opisy.
-* `hackerc unpack bytes`:: Sprawdza czy manager zależności bytes jeżeli nie instaluje go.
-* `bytes install`:: Instaluje wybrana biblioteke.
-* `bytes remove`:: Usuwa wybrana biblioteke wybrana biblioteke.
-* `bytes search`:: Szuka wybranej biblioteki.
+* `hackerc run {plik.hacker}` Uruchamia plik `.hacker` bez kompilacji.
+* `hackerc compile {plik.hacker}` Kompiluje plik `.hacker` do binarki.
+* `hackerc check {plik.hacker}` Szuka błedów w `.hacker`.
+* `hackerc repl` Uruchamia interaktywny REPL Hacker Lang.
+* `hackerc version` Wyświetla wersję `hackerc`.
+* `hli run ` Uruchamia bytes.yaml.
+* `hli compile` Kompiluje kod na podstawie bytes.yaml.
+* `hli check` Sprawdza poprawność kodu na podstawie bytes.yaml.
+* `hli init` Tworzy przykładowy projekt z `bytes.yaml`, `.hacker` w bieżącym katalogu.
+* `hli clean` Czyści cache oraz pliki tymczasowe.
+* `hli version` Wyświetla wersję `hli`.
+* `hlh` Wyświetla informacje o wszystkich narzędziach cli od hacker lang.
+* `bytes install` Instaluje wybrana biblioteke.
+* `bytes remove` Usuwa wybrana biblioteke wybrana biblioteke.
+* `bytes search` Szuka wybranej biblioteki.
 
 == Składnia i przykład prostego skryptu `.hacker`
 
@@ -81,6 +85,14 @@ Poniżej przykład prostego pliku `.hacker`.
 | `>`
 | **Komenda do wykonania**
 | `> echo "Hello"`
+
+| `>>`
+| **Komenda do wykonania + funkcje**
+| `>> echo "Hello"`
+
+| `>>>`
+| **Każda komenda jest wykonywana osobno**
+| `>>> echo "Hello"`
 
 | `=`
 | **Pętla** (`liczba > komenda`)
