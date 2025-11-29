@@ -30,7 +30,7 @@ Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium 
 * `bytes` — narzędzie do instalacji bibliotek, pluginów dla hacker lang.
 * `hlh` — skrót od hacker lang help - narzedzie pokazuje szczegółowe informacje o narzędziach hackerc, bytes, hli.
 
-== Komendy `hackerc`
+== Komendy `hackerc, hli, hlh i bytes`
 
 Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
 
