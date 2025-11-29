@@ -1,6 +1,6 @@
 name: bytes
 version: 0.5.0
 
-dependencies:
-  # No external dependencies needed, as colorize, yaml, http/client are stdlib
+crystal: '>= 1.0.0'
 
+license: MIT
