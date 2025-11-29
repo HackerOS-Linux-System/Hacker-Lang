@@ -1,0 +1,30 @@
+// go
+// crystal
+// rust
+// cargo
+// zig
+
+> cd CORE
+> cd hacker-compiler
+> cargo build --release
+> cd ..
+> cd hacker-parser
+> zig build
+> cd ..
+> cd hacker-runtime
+> go get hacker-runtime
+> go build
+> cd ..
+> cd ..
+> cd CLI
+> cd hackerc
+> crystal build src/main.cr --release
+> sudo mv main hackerc
+> cd ..
+> cd hli
+> crystal build src/main.cr --release
+> sudo mv main hli
+> cd ..
+> cd bytes
+> crystal build src/main.cr --release
+> sudo mv main bytes
