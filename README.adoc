@@ -39,7 +39,7 @@ Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
 * `hackerc check {plik.hacker}` Szuka błedów w `.hacker`.
 * `hackerc repl` Uruchamia interaktywny REPL Hacker Lang.
 * `hackerc version` Wyświetla wersję `hackerc`.
-* `hli run ` Uruchamia bytes.yaml.
+* `hli run` Uruchamia bytes.yaml.
 * `hli compile` Kompiluje kod na podstawie bytes.yaml.
 * `hli check` Sprawdza poprawność kodu na podstawie bytes.yaml.
 * `hli init` Tworzy przykładowy projekt z `bytes.yaml`, `.hacker` w bieżącym katalogu.
