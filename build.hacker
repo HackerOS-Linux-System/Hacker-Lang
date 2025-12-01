@@ -28,3 +28,7 @@
 > cd bytes
 > crystal build src/main.cr --release
 > sudo mv main bytes
+> cd ..
+> cd hlh
+> crystal build src/main.cr --release
+> sudo mv main hlh
