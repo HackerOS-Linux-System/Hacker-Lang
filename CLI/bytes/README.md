@@ -1,6 +1,6 @@
 # Bytes.io CLI Tool
 
-![https://github.com/Bytes-Repository/website/blob/main/images/bytes.png) <!-- Replace with actual logo if available -->
+[https://github.com/Bytes-Repository/website/blob/main/images/bytes.png) <!-- Replace with actual logo if available -->
 
 ## Overview
 
