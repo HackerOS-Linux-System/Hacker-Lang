@@ -49,6 +49,7 @@ Poniżej lista podstawowych komend dostępnych w narzędziu `hackerc`:
 * `bytes install` Instaluje wybrana biblioteke.
 * `bytes remove` Usuwa wybrana biblioteke wybrana biblioteke.
 * `bytes search` Szuka wybranej biblioteki.
+* `hlh` Informacje o narzędziach hli, hackerc, bytes.
 
 == Składnia i przykład prostego skryptu `.hacker`
 
@@ -136,25 +137,17 @@ Poniżej przykład prostego pliku `.hacker`.
 
 |===
 
-== Przykładowy workflow
-
-1. Napisz `script.hacker`.
-2. Sprawdź składnię: `hackerc check script.hacker`.
-3. Uruchom testowo bez kompilacji: `hackerc run script.hacker`.
-4. Skompiluj do binarki: `hackerc compiler script.hacker /usr/local/bin/myscript`.
-5. Uruchamiaj bezpośrednio jako binarkę.
-
 == Integracja z bytes.io
 
 Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `bytes install <nazwa>` aby pobrać paczkę; `bytes update` aby ją zaktualizować. Jeżeli nie masz zainstalowanego narzędzia cli bytes użyj komendy hackerc unpack bytes.
 
 == FAQ (krótkie)
 
-* Jak debugować?:: Użyj `hackerc check` oraz `hackerc run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hackerc` znajdują się w domyślnym katalogu cache.
-* Czy `.hacker` może wywoływać polecenia systemowe?:: Tak — użyj `>` aby wykonać komendę shellową.
-* Gdzie znaleźć dokumentację?:: Pełna dokumentacja i wiki: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki[Wiki na GitHubie].
-* Gdzie znajde repozytorium bytes.io ?:: link:https://github.com/Bytes-Repository[Repozytorium bytes.io]
-* Zgłoś błąd:: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/issues[Issues na GitHubie]
+* Jak debugować? Użyj `hackerc check` oraz `hackerc run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hackerc` znajdują się w domyślnym katalogu cache.
+* Czy `.hacker` może wywoływać polecenia systemowe? Tak — użyj `>` aby wykonać komendę shellową.
+* Gdzie znaleźć dokumentację? Pełna dokumentacja i wiki: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki[Wiki na GitHubie].
+* Gdzie znajde repozytorium bytes.io ? link:https://github.com/Bytes-Repository[Repozytorium bytes.io]
+* Zgłoś błąd link:https://github.com/HackerOS-Linux-System/Hacker-Lang/issues[Issues na GitHubie]
 
 == Licencja
 
