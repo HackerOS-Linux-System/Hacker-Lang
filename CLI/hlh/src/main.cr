@@ -1,5 +1,3 @@
-# src/main.cr
-
 require "option_parser"
 require "colorize"
 
