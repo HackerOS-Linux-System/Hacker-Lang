@@ -1,1 +1,16 @@
+name: hlh
+version: 0.1.0
 
+authors:
+  - HackerOS Team <hackeros068@gmail.com>
+
+description: |
+  Hacker Lang Help - a simple CLI tool to display information about Hacker Lang.
+
+crystal: ">= 1.0.0"
+
+license: MIT
+
+targets:
+  hlh:
+    main: src/main.cr
