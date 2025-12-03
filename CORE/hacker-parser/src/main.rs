@@ -1,168 +1,217 @@
-const std = @import("std");
-const parse = @import("parse.zig");
-const utils = @import("utils.zig");
+use std::env;
+use std::io::{self, Write};
+use std::process;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+mod parse;
+mod utils;
 
-    var verbose = false;
-    var file_path: ?[]const u8 = null;
+use parse::parse_hacker_file;
+use parse::ParseResult;
 
-    for (std.os.argv[1..]) |arg_ptr| {
-        const arg = std.mem.span(arg_ptr);
-        if (std.mem.eql(u8, arg, "--verbose")) {
+fn main() -> io::Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let mut verbose = false;
+    let mut file_path = None;
+    for arg in args {
+        if arg == "--verbose" {
             verbose = true;
-        } else if (file_path == null) {
-            file_path = arg;
+        } else if file_path.is_none() {
+            file_path = Some(arg);
         } else {
-            try std.io.getStdErr().writer().print("Usage: hacker-parser [--verbose] <file>\n", .{});
-            std.process.exit(1);
+            let mut stderr = io::stderr().lock();
+            writeln!(stderr, "Usage: hacker-parser [--verbose] <file>")?;
+            process::exit(1);
         }
     }
-
-    if (file_path == null) {
-        try std.io.getStdErr().writer().print("Usage: hacker-parser [--verbose] <file>\n", .{});
-        std.process.exit(1);
-    }
-
-    var res = try parse.parse_hacker_file(allocator, file_path.?, verbose);
-    defer utils.deinitParseResult(&res, allocator);
-
-    try outputJson(res);
+    let file_path = match file_path {
+        Some(p) => p,
+        None => {
+            let mut stderr = io::stderr().lock();
+            writeln!(stderr, "Usage: hacker-parser [--verbose] <file>")?;
+            process::exit(1);
+        }
+    };
+    let res = parse_hacker_file(&file_path, verbose).unwrap_or_else(|e| {
+        let mut stderr = io::stderr().lock();
+        writeln!(stderr, "Error: {}", e).unwrap();
+        process::exit(1);
+    });
+    output_json(&res)?;
+    Ok(())
 }
 
-fn outputJson(res: parse.ParseResult) !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("{{", .{});
-    try stdout.print("\"deps\":[", .{});
-    var first = true;
-    var dep_it = res.deps.keyIterator();
-    while (dep_it.next()) |key| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(key.*, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"libs\":[", .{});
-    first = true;
-    var lib_it = res.libs.keyIterator();
-    while (lib_it.next()) |key| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(key.*, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"vars\":{{", .{});
-    first = true;
-    var vars_it = res.vars_dict.iterator();
-    while (vars_it.next()) |entry| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
-        try stdout.print(":", .{});
-        try std.json.encodeJsonString(entry.value_ptr.*, .{}, stdout);
-    }
-    try stdout.print("}},", .{});
-    try stdout.print("\"local_vars\":{{", .{});
-    first = true;
-    var local_vars_it = res.local_vars.iterator();
-    while (local_vars_it.next()) |entry| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
-        try stdout.print(":", .{});
-        try std.json.encodeJsonString(entry.value_ptr.*, .{}, stdout);
-    }
-    try stdout.print("}},", .{});
-    try stdout.print("\"cmds\":[", .{});
-    first = true;
-    for (res.cmds.items) |c| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(c, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"cmds_with_vars\":[", .{});
-    first = true;
-    for (res.cmds_with_vars.items) |c| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(c, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"cmds_separate\":[", .{});
-    first = true;
-    for (res.cmds_separate.items) |c| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(c, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"includes\":[", .{});
-    first = true;
-    for (res.includes.items) |i| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(i, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"binaries\":[", .{});
-    first = true;
-    for (res.binaries.items) |b| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(b, .{}, stdout);
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"plugins\":[", .{});
-    first = true;
-    for (res.plugins.items) |p| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try stdout.print("{{", .{});
-        try stdout.print("\"path\":", .{});
-        try std.json.encodeJsonString(p.path, .{}, stdout);
-        try stdout.print(",\"super\":{}", .{p.is_super});
-        try stdout.print("}}", .{});
-    }
-    try stdout.print("],", .{});
-    try stdout.print("\"functions\":{{", .{});
-    first = true;
-    var func_it = res.functions.iterator();
-    while (func_it.next()) |entry| {
-        if (!first) try stdout.print(",", .{});
-        first = false;
-        try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
-        try stdout.print(":[", .{});
-        var first2 = true;
-        for (entry.value_ptr.items) |c| {
-            if (!first2) try stdout.print(",", .{});
-            first2 = false;
-            try std.json.encodeJsonString(c, .{}, stdout);
+fn output_json(res: &ParseResult) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{{")?;
+    write!(stdout, "\"deps\":[")?;
+    let mut first = true;
+    for key in res.deps.keys() {
+        if !first {
+            write!(stdout, ",")?;
         }
-        try stdout.print("]", .{});
-    }
-    try stdout.print("}},", .{});
-    try stdout.print("\"errors\":[", .{});
-    first = true;
-    for (res.errors.items) |e| {
-        if (!first) try stdout.print(",", .{});
         first = false;
-        try std.json.encodeJsonString(e, .{}, stdout);
+        write_json_string(&mut stdout, key)?;
     }
-    try stdout.print("],", .{});
-    try stdout.print("\"config\":{{", .{});
+    write!(stdout, "],")?;
+    write!(stdout, "\"libs\":[")?;
     first = true;
-    var config_it = res.config_data.iterator();
-    while (config_it.next()) |entry| {
-        if (!first) try stdout.print(",", .{});
+    for key in res.libs.keys() {
+        if !first {
+            write!(stdout, ",")?;
+        }
         first = false;
-        try std.json.encodeJsonString(entry.key_ptr.*, .{}, stdout);
-        try stdout.print(":", .{});
-        try std.json.encodeJsonString(entry.value_ptr.*, .{}, stdout);
+        write_json_string(&mut stdout, key)?;
     }
-    try stdout.print("}}", .{});
-    try stdout.print("}}\n", .{});
+    write!(stdout, "],")?;
+    write!(stdout, "\"vars\":{{")?;
+    first = true;
+    for (key, value) in &res.vars_dict {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, key)?;
+        write!(stdout, ":")?;
+        write_json_string(&mut stdout, value)?;
+    }
+    write!(stdout, "}},")?;
+    write!(stdout, "\"local_vars\":{{")?;
+    first = true;
+    for (key, value) in &res.local_vars {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, key)?;
+        write!(stdout, ":")?;
+        write_json_string(&mut stdout, value)?;
+    }
+    write!(stdout, "}},")?;
+    write!(stdout, "\"cmds\":[")?;
+    first = true;
+    for c in &res.cmds {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, c)?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"cmds_with_vars\":[")?;
+    first = true;
+    for c in &res.cmds_with_vars {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, c)?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"cmds_separate\":[")?;
+    first = true;
+    for c in &res.cmds_separate {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, c)?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"includes\":[")?;
+    first = true;
+    for i in &res.includes {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, i)?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"binaries\":[")?;
+    first = true;
+    for b in &res.binaries {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, b)?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"plugins\":[")?;
+    first = true;
+    for p in &res.plugins {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write!(stdout, "{{")?;
+        write!(stdout, "\"path\":")?;
+        write_json_string(&mut stdout, &p.path)?;
+        write!(stdout, ",\"super\":{}", if p.is_super { "true" } else { "false" })?;
+        write!(stdout, "}}")?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"functions\":{{")?;
+    first = true;
+    for (key, vec) in &res.functions {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, key)?;
+        write!(stdout, ":[")?;
+        let mut first2 = true;
+        for c in vec {
+            if !first2 {
+                write!(stdout, ",")?;
+            }
+            first2 = false;
+            write_json_string(&mut stdout, c)?;
+        }
+        write!(stdout, "]")?;
+    }
+    write!(stdout, "}},")?;
+    write!(stdout, "\"errors\":[")?;
+    first = true;
+    for e in &res.errors {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, e)?;
+    }
+    write!(stdout, "],")?;
+    write!(stdout, "\"config\":{{")?;
+    first = true;
+    for (key, value) in &res.config_data {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write_json_string(&mut stdout, key)?;
+        write!(stdout, ":")?;
+        write_json_string(&mut stdout, value)?;
+    }
+    write!(stdout, "}}")?;
+    writeln!(stdout, "}}")?;
+    Ok(())
+}
+
+fn write_json_string<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
+    write!(w, "\"")?;
+    for c in s.chars() {
+        match c {
+            '\"' => write!(w, "\\\"")?,
+            '\\' => write!(w, "\\\\")?,
+            '\x08' => write!(w, "\\b")?,
+            '\x0c' => write!(w, "\\f")?,
+            '\n' => write!(w, "\\n")?,
+            '\r' => write!(w, "\\r")?,
+            '\t' => write!(w, "\\t")?,
+            c if c.is_control() => write!(w, "\\u{:04x}", c as u32)?,
+            _ => write!(w, "{}", c)?,
+        }
+    }
+    write!(w, "\"")?;
+    Ok(())
 }
