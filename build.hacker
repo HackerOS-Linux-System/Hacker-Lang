@@ -2,14 +2,13 @@
 // crystal
 // rust
 // cargo
-// zig
 
 > cd CORE
 > cd hacker-compiler
 > cargo build --release
 > cd ..
 > cd hacker-parser
-> zig build
+> cargo build --release
 > cd ..
 > cd hacker-runtime
 > go get hacker-runtime
