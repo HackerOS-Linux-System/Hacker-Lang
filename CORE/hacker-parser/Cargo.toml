@@ -1,7 +1,0 @@
-[package]
-name = "hacker-parser"
-version = "1.2.0"
-edition = "2021"
-
-[dependencies]
-nom = "7.1.3"
