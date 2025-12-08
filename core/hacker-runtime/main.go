@@ -1,256 +1,372 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
-
-const VERSION = "1.1" // Zaktualizowana wersja po zmianach
-const HACKER_DIR = "~/.hackeros/hacker-lang"
-const BIN_DIR = HACKER_DIR + "/bin"
 
 const (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorBlue   = "\033[34m"
-	colorPurple = "\033[35m"
-	colorCyan   = "\033[36m"
-	colorWhite  = "\033[37m"
-	colorBold   = "\033[1m"
-	colorGray   = "\033[90m"
+	reset  = "\x1b[0m"
+	red    = "\x1b[31m"
+	green  = "\x1b[32m"
+	yellow = "\x1b[33m"
+	blue   = "\x1b[34m"
+	purple = "\x1b[35m"
+	cyan   = "\x1b[36m"
+	white  = "\x1b[37m"
+	bold   = "\x1b[1m"
+	gray   = "\x1b[90m"
+	VERSION = "1.2"
+	HACKER_DIR = "~/.hackeros/hacker-lang"
+	BIN_DIR    = HACKER_DIR + "/bin"
 )
 
-var (
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	infoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
-)
-
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~") {
-		home, _ := os.UserHomeDir()
-		return strings.Replace(path, "~", home, 1)
-	}
-	return path
+type Plugin struct {
+	Path    string
+	IsSuper bool
 }
 
-func ensureHackerDir() {
-	os.MkdirAll(expandHome(BIN_DIR), os.ModePerm)
-	os.MkdirAll(expandHome(HACKER_DIR+"/libs"), os.ModePerm)
+type ParseResult struct {
+	Deps         []string
+	Libs         []string
+	Vars         map[string]string
+	LocalVars    map[string]string
+	Cmds         []string
+	CmdsWithVars []string
+	CmdsSeparate []string
+	Includes     []string
+	Binaries     []string
+	Plugins      []Plugin
+	Errors       []string
+	Config       map[string]string
 }
 
-func runCommand(file string, verbose bool) bool {
-	parserPath := expandHome(BIN_DIR + "/hacker-parser")
-	cmd := exec.Command(parserPath, file)
-	if verbose {
-		cmd.Args = append(cmd.Args, "--verbose")
+func expandHome(path string) (string, error) {
+	if !strings.HasPrefix(path, "~") {
+		return path, nil
 	}
-	output, err := cmd.Output()
+	home := os.Getenv("HOME")
+	if home == "" {
+		return "", fmt.Errorf("home not found")
+	}
+	return home + path[1:], nil
+}
+
+func ensureHackerDir() error {
+	hackerDir, err := expandHome(HACKER_DIR)
 	if err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error parsing file: %v", err)))
-		return false
+		return err
 	}
-
-	var parsed struct {
-		Deps          []string                  `json:"deps"`
-		Libs          []string                  `json:"libs"`
-		Vars          map[string]string         `json:"vars"`
-		LocalVars     map[string]string         `json:"local_vars"`
-		Cmds          []string                  `json:"cmds"`
-		CmdsWithVars  []string                  `json:"cmds_with_vars"`
-		CmdsSeparate  []string                  `json:"cmds_separate"`
-		Includes      []string                  `json:"includes"`
-		Binaries      []string                  `json:"binaries"`
-		Errors        []string                  `json:"errors"`
-		Config        map[string]string         `json:"config"`
-		Plugins       []map[string]interface{}  `json:"plugins"` // Adjusted for JSON structure
+	binDir := filepath.Join(hackerDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return err
 	}
-
-	if err := json.Unmarshal(output, &parsed); err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error unmarshaling parse output: %v", err)))
-		return false
+	libsDir := filepath.Join(hackerDir, "libs")
+	if err := os.MkdirAll(libsDir, 0755); err != nil {
+		return err
 	}
+	return nil
+}
 
-	if len(parsed.Config) == 0 {
-		configFile := ".hacker-config"
-		if _, err := os.Stat(configFile); err == nil {
-			content, err := os.ReadFile(configFile)
-			if err == nil {
-				lines := strings.Split(string(content), "\n")
-				for _, line := range lines {
-					line = strings.TrimSpace(line)
-					if line == "" || strings.HasPrefix(line, "!") {
-						continue
+func printColored(color, format string, args ...interface{}) {
+	fmt.Printf(color+format+reset, args...)
+}
+
+func runParser(file string, verbose bool) (*ParseResult, error) {
+	binDir, err := expandHome(BIN_DIR)
+	if err != nil {
+		return nil, err
+	}
+	parserPath := filepath.Join(binDir, "hacker-parser")
+	args := []string{parserPath, file}
+	if verbose {
+		args = append(args, "--verbose")
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	output, err := io.ReadAll(stdout)
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Wait(); err != nil {
+		printColored(red, "Parser failed or exited with error\n")
+		return nil, fmt.Errorf("parser failed")
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(output, &root); err != nil {
+		return nil, err
+	}
+	result := &ParseResult{
+		Deps:         []string{},
+		Libs:         []string{},
+		Vars:         make(map[string]string),
+		LocalVars:    make(map[string]string),
+		Cmds:         []string{},
+		CmdsWithVars: []string{},
+		CmdsSeparate: []string{},
+		Includes:     []string{},
+		Binaries:     []string{},
+		Plugins:      []Plugin{},
+		Errors:       []string{},
+		Config:       make(map[string]string),
+	}
+	// Errors
+	if errs, ok := root["errors"].([]interface{}); ok {
+		for _, e := range errs {
+			if s, ok := e.(string); ok {
+				result.Errors = append(result.Errors, s)
+			}
+		}
+	}
+	if len(result.Errors) > 0 {
+		printColored(red, "\nErrors:\n")
+		for _, e := range result.Errors {
+			printColored(red, " ✖ %s\n", e)
+		}
+		return nil, fmt.Errorf("errors found")
+	}
+	// Simple arrays
+	arrayKeys := []string{"deps", "libs", "cmds", "cmds_with_vars", "cmds_separate", "includes", "binaries"}
+	arrayPtrs := []*[]string{&result.Deps, &result.Libs, &result.Cmds, &result.CmdsWithVars, &result.CmdsSeparate, &result.Includes, &result.Binaries}
+	for i, k := range arrayKeys {
+		if arr, ok := root[k].([]interface{}); ok {
+			for _, v := range arr {
+				if s, ok := v.(string); ok {
+					*arrayPtrs[i] = append(*arrayPtrs[i], s)
+				}
+			}
+		}
+	}
+	// HashMaps
+	hashKeys := []string{"vars", "local_vars", "config"}
+	hashPtrs := []map[string]string{result.Vars, result.LocalVars, result.Config}
+	for i, k := range hashKeys {
+		if obj, ok := root[k].(map[string]interface{}); ok {
+			for key, val := range obj {
+				if s, ok := val.(string); ok {
+					hashPtrs[i][key] = s
+				}
+			}
+		}
+	}
+	// Plugins
+	if plugs, ok := root["plugins"].([]interface{}); ok {
+		for _, p := range plugs {
+			if po, ok := p.(map[string]interface{}); ok {
+				if path, ok := po["path"].(string); ok {
+					isSuper := false
+					if s, ok := po["is_super"].(bool); ok {
+						isSuper = s
 					}
-					parts := strings.SplitN(line, "=", 2)
-					if len(parts) == 2 {
-						key := strings.TrimSpace(parts[0])
-						value := strings.TrimSpace(parts[1])
-						parsed.Config[key] = value
+					result.Plugins = append(result.Plugins, Plugin{Path: path, IsSuper: isSuper})
+				}
+			}
+		}
+	}
+	// Fallback to .hacker-config if config empty
+	if len(result.Config) == 0 {
+		configPath := ".hacker-config"
+		f, err := os.Open(configPath)
+		if err == nil {
+			defer f.Close()
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if len(line) == 0 || line[0] == '#' || line[0] == '!' {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					key := strings.TrimSpace(parts[0])
+					val := strings.TrimSpace(parts[1])
+					if key != "" && val != "" {
+						result.Config[key] = val
 					}
 				}
 			}
 		}
 	}
-
-	if len(parsed.Errors) > 0 {
-		fmt.Println("\n" + errorStyle.Render("Errors:"))
-		for _, e := range parsed.Errors {
-			fmt.Println(" " + colorRed + "✖ " + colorReset + e)
+	// Warning for libs
+	if len(result.Libs) > 0 {
+		printColored(yellow, "Warning: Missing custom libs: ")
+		for _, lib := range result.Libs {
+			printColored(yellow, "%s ", lib)
 		}
-		fmt.Println()
-		return false
+		printColored(yellow, "\nPlease install them using `bytes install <lib>`\n")
 	}
+	return result, nil
+}
 
-	if len(parsed.Libs) > 0 {
-		fmt.Println(warningStyle.Render(fmt.Sprintf("Warning: Missing custom libs: %v", parsed.Libs)))
-		fmt.Println(warningStyle.Render("Please install them using bytes install <lib>"))
-	}
-
-	// Main temp script
-	tempSh, err := os.CreateTemp("", "*.sh")
+func createTempScript(content string) (string, error) {
+	var b [12]byte
+	_, err := rand.Read(b[:])
 	if err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating temp file: %v", err)))
-		return false
+		return "", err
 	}
-	defer os.Remove(tempSh.Name())
+	urlEncoder := base64.RawURLEncoding
+	namePart := urlEncoder.EncodeToString(b[:])
+	path := "/tmp/hacker_" + namePart + ".sh"
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0755)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if _, err := file.WriteString("#!/bin/bash\nset -e\n"); err != nil {
+		return "", err
+	}
+	if _, err := file.WriteString(content); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 
-	tempSh.WriteString("#!/bin/bash\n")
-	tempSh.WriteString("set -e\n")
-
+func appendEnv(content *bytes.Buffer, parsed *ParseResult) {
 	for k, v := range parsed.Vars {
-		tempSh.WriteString(fmt.Sprintf("export %s=\"%s\"\n", k, v))
+		content.WriteString(fmt.Sprintf("export %s=\"%s\"\n", k, v))
 	}
 	for k, v := range parsed.LocalVars {
-		tempSh.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, v))
+		content.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, v))
 	}
+}
 
-	for _, dep := range parsed.Deps {
-		if dep != "sudo" {
-			tempSh.WriteString(fmt.Sprintf("command -v %s &> /dev/null || (sudo apt update && sudo apt install -y %s)\n", dep, dep))
+func getEnvMap() map[string]string {
+	m := make(map[string]string)
+	for _, e := range os.Environ() {
+		if i := strings.Index(e, "="); i >= 0 {
+			m[e[:i]] = e[i+1:]
 		}
 	}
+	return m
+}
 
-	for _, inc := range parsed.Includes {
-		libPath := expandHome(HACKER_DIR + "/libs/" + inc + "/main.hacker")
-		tempSh.WriteString(fmt.Sprintf("# Included from %s\n", inc))
-		libContent, err := os.ReadFile(libPath)
-		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Error reading include: %v", err)))
-			return false
-		}
-		tempSh.Write(libContent)
-		tempSh.WriteString("\n")
-	}
-
-	for _, cmd := range parsed.Cmds {
-		tempSh.WriteString(cmd + "\n")
-	}
-	for _, cmd := range parsed.CmdsWithVars {
-		tempSh.WriteString(cmd + "\n")
-	}
-	for _, bin := range parsed.Binaries {
-		tempSh.WriteString(bin + "\n")
-	}
-	for _, plugin := range parsed.Plugins {
-		path := plugin["path"].(string)
-		isSuper := plugin["super"].(bool)
-		cmdStr := path + " &"
-		if isSuper {
-			cmdStr = "sudo " + cmdStr
-		}
-		tempSh.WriteString(cmdStr + "\n")
-	}
-
-	tempSh.Close()
-	os.Chmod(tempSh.Name(), 0755)
-
-	// Separate scripts for cmds_separate
-	var separateTemps []string
-	for i, sepCmd := range parsed.CmdsSeparate {
-		sepTemp, err := os.CreateTemp("", fmt.Sprintf("sep_%d_*.sh", i))
-		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating separate temp file: %v", err)))
-			return false
-		}
-		defer os.Remove(sepTemp.Name())
-
-		sepTemp.WriteString("#!/bin/bash\n")
-		sepTemp.WriteString("set -e\n")
-
-		for k, v := range parsed.Vars {
-			sepTemp.WriteString(fmt.Sprintf("export %s=\"%s\"\n", k, v))
-		}
-		for k, v := range parsed.LocalVars {
-			sepTemp.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, v))
-		}
-
-		sepTemp.WriteString(sepCmd + "\n")
-		sepTemp.Close()
-		os.Chmod(sepTemp.Name(), 0755)
-		separateTemps = append(separateTemps, sepTemp.Name())
-	}
-
-	fmt.Println(infoStyle.Render(fmt.Sprintf("Executing script: %s", file)))
-	fmt.Println(infoStyle.Render(fmt.Sprintf("Config: %v", parsed.Config)))
-	fmt.Println(successStyle.Render("Running..."))
-
-	// Run separate scripts
-	for _, sepPath := range separateTemps {
-		runSep := exec.Command("bash", sepPath)
-		runSep.Env = os.Environ()
-		for k, v := range parsed.Vars {
-			runSep.Env = append(runSep.Env, fmt.Sprintf("%s=%s", k, v))
-		}
-		runSep.Stdout = os.Stdout
-		runSep.Stderr = os.Stderr
-		err = runSep.Run()
-		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Separate command execution failed: %v", err)))
-			return false
-		}
-	}
-
-	// Run main script
-	runCmd := exec.Command("bash", tempSh.Name())
-	runCmd.Env = os.Environ()
-	for k, v := range parsed.Vars {
-		runCmd.Env = append(runCmd.Env, fmt.Sprintf("%s=%s", k, v))
-	}
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stderr
-	err = runCmd.Run()
+func runCommand(file string, verbose bool) bool {
+	parsed, err := runParser(file, verbose)
 	if err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Execution failed: %v", err)))
 		return false
 	}
-
-	fmt.Println(successStyle.Render("Execution completed successfully!"))
+	var mainContent bytes.Buffer
+	mainContent.WriteString("#!/bin/bash\nset -e\n")
+	appendEnv(&mainContent, parsed)
+	for _, dep := range parsed.Deps {
+		if dep != "sudo" {
+			line := fmt.Sprintf("command -v %s >/dev/null 2>&1 || (sudo apt update && sudo apt install -y %s)\n", dep, dep)
+			mainContent.WriteString(line)
+		}
+	}
+	for _, inc := range parsed.Includes {
+		line := fmt.Sprintf("# Included from %s\n", inc)
+		mainContent.WriteString(line)
+	}
+	for _, cmd := range parsed.Cmds {
+		mainContent.WriteString(cmd + "\n")
+	}
+	for _, cmd := range parsed.CmdsWithVars {
+		mainContent.WriteString(cmd + "\n")
+	}
+	for _, bin := range parsed.Binaries {
+		mainContent.WriteString(bin + "\n")
+	}
+	for _, p := range parsed.Plugins {
+		if p.IsSuper {
+			mainContent.WriteString("sudo ")
+		}
+		mainContent.WriteString(p.Path + " &\n")
+	}
+	mainScriptPath, err := createTempScript(mainContent.String())
+	if err != nil {
+		printColored(red, "Failed to create main temp script\n")
+		return false
+	}
+	defer os.Remove(mainScriptPath)
+	separatePaths := []string{}
+	for _, cmdStr := range parsed.CmdsSeparate {
+		var sepContent bytes.Buffer
+		sepContent.WriteString("#!/bin/bash\nset -e\n")
+		appendEnv(&sepContent, parsed)
+		sepContent.WriteString(cmdStr + "\n")
+		path, err := createTempScript(sepContent.String())
+		if err != nil {
+			printColored(red, "Failed to create separate temp script\n")
+			return false
+		}
+		separatePaths = append(separatePaths, path)
+		defer os.Remove(path)
+	}
+	var envList []string
+	if len(parsed.Vars) > 0 {
+		envMap := getEnvMap()
+		for k, v := range parsed.Vars {
+			envMap[k] = v
+		}
+		for k, v := range envMap {
+			envList = append(envList, k+"="+v)
+		}
+	}
+	printColored(cyan, "Executing script: %s\n", file)
+	printColored(cyan, "Config: ")
+	for k, v := range parsed.Config {
+		printColored(cyan, "%s=%s ", k, v)
+	}
+	printColored(cyan, "\n")
+	printColored(green, "Running...\n")
+	for _, path := range separatePaths {
+		cmd := exec.Command("bash", path)
+		cmd.Env = envList
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run() // Ignore exit code to match Zig behavior
+	}
+	mainCmd := exec.Command("bash", mainScriptPath)
+	mainCmd.Env = envList
+	mainCmd.Stdin = os.Stdin
+	mainCmd.Stdout = os.Stdout
+	mainCmd.Stderr = os.Stderr
+	if err := mainCmd.Run(); err != nil {
+		printColored(red, "Execution failed\n")
+		return false
+	}
+	printColored(green, "Execution completed successfully!\n")
 	return true
 }
 
 func main() {
-	ensureHackerDir()
-	args := os.Args[1:]
-	if len(args) == 0 {
-		fmt.Println(errorStyle.Render("Usage: hacker-runtime <file> [--verbose]"))
+	if err := ensureHackerDir(); err != nil {
+		printColored(red, "Failed to ensure hacker dir: %v\n", err)
 		os.Exit(1)
 	}
-
-	verbose := false
-	file := args[0]
-	if len(args) > 1 && args[1] == "--verbose" {
-		verbose = true
+	args := os.Args[1:]
+	if len(args) == 0 {
+		printColored(red, "Usage: hacker-runtime <file.hacker> [--verbose]\n")
+		os.Exit(1)
 	}
-
+	file := args[0]
+	verbose := false
+	if len(args) > 1 {
+		if args[1] == "--verbose" {
+			verbose = true
+		} else {
+			printColored(red, "Unknown argument: %s\n", args[1])
+			os.Exit(1)
+		}
+	}
 	success := runCommand(file, verbose)
 	if success {
 		os.Exit(0)
