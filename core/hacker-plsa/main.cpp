@@ -1,27 +1,19 @@
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <vector>
-#include <map>
-#include <set>
+#include <unordered_map>
 #include <string>
+#include <optional>
 #include <algorithm>
 #include <filesystem>
-#include <regex>
-#include <optional>
-#include <json/json.h> // Assume jsoncpp library
-#include <unistd.h> // For getuid
 #include <sys/stat.h>
-#include <cstdlib>   // For std::getenv, std::stoi
+#include <cstdlib>
+#include <cctype>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
-const std::string HACKER_DIR = []() -> std::string {
-    const char* home = std::getenv("HOME");
-    return home ? std::string(home) + "/.hackeros/hacker-lang" : "~/.hackeros/hacker-lang";
-}();
-
-const std::string LIBS_DIR = HACKER_DIR + "/libs";
+const std::string HACKER_DIR_SUFFIX = "/.hackeros/hacker-lang";
 
 struct Plugin {
     std::string path;
@@ -29,530 +21,671 @@ struct Plugin {
 };
 
 struct ParseResult {
-    std::set<std::string> deps;
-    std::set<std::string> libs;
-    std::map<std::string, std::string> vars;
-    std::map<std::string, std::string> local_vars;
+    std::unordered_map<std::string, int> deps;
+    std::unordered_map<std::string, int> libs;
+    std::unordered_map<std::string, std::string> vars_dict;
+    std::unordered_map<std::string, std::string> local_vars;
     std::vector<std::string> cmds;
     std::vector<std::string> cmds_with_vars;
     std::vector<std::string> cmds_separate;
     std::vector<std::string> includes;
     std::vector<std::string> binaries;
     std::vector<Plugin> plugins;
-    std::map<std::string, std::vector<std::string>> functions;
+    std::unordered_map<std::string, std::vector<std::string>> functions;
     std::vector<std::string> errors;
-    std::map<std::string, std::string> config;
+    std::unordered_map<std::string, std::string> config_data;
 };
 
-std::string expand_home(const std::string& path) {
-    if (path.rfind("~", 0) == 0) {
-        const char* home = std::getenv("HOME");
-        if (home) {
-            return std::string(home) + path.substr(1);
-        }
+void merge_maps(std::unordered_map<std::string, int>& dest, const std::unordered_map<std::string, int>& src) {
+    for (const auto& p : src) {
+        dest[p.first] = p.second;
     }
-    return path;
+}
+
+void merge_string_maps(std::unordered_map<std::string, std::string>& dest, const std::unordered_map<std::string, std::string>& src) {
+    for (const auto& p : src) {
+        dest[p.first] = p.second;
+    }
+}
+
+void merge_function_maps(std::unordered_map<std::string, std::vector<std::string>>& dest, const std::unordered_map<std::string, std::vector<std::string>>& src) {
+    for (const auto& p : src) {
+        dest[p.first] = p.second;
+    }
 }
 
 std::string trim(const std::string& str) {
-    size_t first = str.find_first_not_of(" \t\n\r\f\v");
+    size_t first = str.find_first_not_of(" \t");
     if (first == std::string::npos) return "";
-    size_t last = str.find_last_not_of(" \t\n\r\f\v");
-    return str.substr(first, (last - first + 1));
+    size_t last = str.find_last_not_of(" \t");
+    return str.substr(first, last - first + 1);
 }
 
-std::pair<std::string, std::string> split_once(const std::string& s, char delim) {
-    size_t pos = s.find(delim);
-    if (pos == std::string::npos) {
-        return {s, ""};
-    }
-    return {s.substr(0, pos), s.substr(pos + 1)};
+bool starts_with(const std::string& s, const std::string& prefix) {
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
-enum LineType {
-    DEP, LIB, CMD, CMD_VARS, CMD_SEPARATE, VAR, LOCAL_VAR, PLUGIN,
-    LOOP, CONDITIONAL, BACKGROUND, IGNORE, FUNCTION_START, FUNCTION_END,
-    FUNCTION_CALL, CONFIG_START, CONFIG_END, COMMENT_TOGGLE
-};
-
-LineType classify_line(const std::string& l) {
-    if (l.empty()) return IGNORE;
-    if (l == "!!") return COMMENT_TOGGLE;
-    if (l == "[") return CONFIG_START;
-    if (l == "]") return CONFIG_END;
-    if (l == ":") return FUNCTION_END;
-    if (l.rfind(":", 0) == 0) return FUNCTION_START;
-    if (l.rfind(".", 0) == 0) return FUNCTION_CALL;
-    if (l.rfind("//", 0) == 0) return DEP;
-        if (l[0] == '#') return LIB;
-        if (l.rfind(">>>", 0) == 0) return CMD_SEPARATE;
-        if (l.rfind(">>", 0) == 0) return CMD_VARS;
-        if (l.rfind(">", 0) == 0) return CMD;
-        if (l.rfind("@", 0) == 0) return VAR;
-        if (l.rfind("$", 0) == 0) return LOCAL_VAR;
-        if (l.rfind("\\", 0) == 0) return PLUGIN;
-        if (l.rfind("=", 0) == 0) return LOOP;
-        if (l.rfind("?", 0) == 0) return CONDITIONAL;
-        if (l.rfind("&", 0) == 0) return BACKGROUND;
-        if (l.rfind("!", 0) == 0) return IGNORE;
-        return IGNORE; // unknown → will be reported as invalid syntax
+void write_json_string(std::ostream& w, const std::string& s) {
+    w << "\"";
+    for (char c : s) {
+        switch (c) {
+            case '\"': w << "\\\""; break;
+            case '\\': w << "\\\\"; break;
+            case '\b': w << "\\b"; break;
+            case '\f': w << "\\f"; break;
+            case '\n': w << "\\n"; break;
+            case '\r': w << "\\r"; break;
+            case '\t': w << "\\t"; break;
+            default:
+                if (std::iscntrl(static_cast<unsigned char>(c))) {
+                    w << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(static_cast<unsigned char>(c));
+                } else {
+                    w << c;
+                }
+                break;
+        }
+    }
+    w << "\"";
 }
 
-std::string parse_cmd_part(const std::string& line) {
-    size_t excl_pos = line.find('!');
-    if (excl_pos != std::string::npos) {
-        return trim(line.substr(0, excl_pos));
+void output_json(const ParseResult& res) {
+    std::ostream& out = std::cout;
+    out << "{";
+    out << "\"deps\":[";
+    bool first = true;
+    for (const auto& p : res.deps) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        first = false;
     }
-    return trim(line);
+    out << "],";
+    out << "\"libs\":[";
+    first = true;
+    for (const auto& p : res.libs) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        first = false;
+    }
+    out << "],";
+    out << "\"vars\":{";
+    first = true;
+    for (const auto& p : res.vars_dict) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        out << ":";
+        write_json_string(out, p.second);
+        first = false;
+    }
+    out << "},";
+    out << "\"local_vars\":{";
+    first = true;
+    for (const auto& p : res.local_vars) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        out << ":";
+        write_json_string(out, p.second);
+        first = false;
+    }
+    out << "},";
+    out << "\"cmds\":[";
+    first = true;
+    for (const auto& c : res.cmds) {
+        if (!first) out << ",";
+        write_json_string(out, c);
+        first = false;
+    }
+    out << "],";
+    out << "\"cmds_with_vars\":[";
+    first = true;
+    for (const auto& c : res.cmds_with_vars) {
+        if (!first) out << ",";
+        write_json_string(out, c);
+        first = false;
+    }
+    out << "],";
+    out << "\"cmds_separate\":[";
+    first = true;
+    for (const auto& c : res.cmds_separate) {
+        if (!first) out << ",";
+        write_json_string(out, c);
+        first = false;
+    }
+    out << "],";
+    out << "\"includes\":[";
+    first = true;
+    for (const auto& i : res.includes) {
+        if (!first) out << ",";
+        write_json_string(out, i);
+        first = false;
+    }
+    out << "],";
+    out << "\"binaries\":[";
+    first = true;
+    for (const auto& b : res.binaries) {
+        if (!first) out << ",";
+        write_json_string(out, b);
+        first = false;
+    }
+    out << "],";
+    out << "\"plugins\":[";
+    first = true;
+    for (const auto& p : res.plugins) {
+        if (!first) out << ",";
+        out << "{";
+        out << "\"path\":";
+        write_json_string(out, p.path);
+        out << ",\"super\":" << (p.is_super ? "true" : "false");
+        out << "}";
+        first = false;
+    }
+    out << "],";
+    out << "\"functions\":{";
+    first = true;
+    for (const auto& f : res.functions) {
+        if (!first) out << ",";
+        write_json_string(out, f.first);
+        out << ":[";
+        bool first2 = true;
+        for (const auto& c : f.second) {
+            if (!first2) out << ",";
+            write_json_string(out, c);
+            first2 = false;
+        }
+        out << "]";
+        first = false;
+    }
+    out << "},";
+    out << "\"errors\":[";
+    first = true;
+    for (const auto& e : res.errors) {
+        if (!first) out << ",";
+        write_json_string(out, e);
+        first = false;
+    }
+    out << "],";
+    out << "\"config\":{";
+    first = true;
+    for (const auto& p : res.config_data) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        out << ":";
+        write_json_string(out, p.second);
+        first = false;
+    }
+    out << "}";
+    out << "}" << std::endl;
 }
 
-bool parse_foreign_lib(const std::string& line, std::string& lib_name) {
-    if (line.rfind("#>", 0) == 0) {
-        lib_name = trim(line.substr(2));
-        return true; // foreign
-    }
-    if (line.rfind("#", 0) == 0) {
-        lib_name = trim(line.substr(1));
-        return false;
-    }
-    lib_name = "";
-    return false;
-}
-
-void handle_foreign_lib(const std::string& lib_name, const std::string& mode, ParseResult& res) {
-    std::string cache_dir = (mode == "hli") ? "./.cache" : "/tmp/hacker_cache_" + std::to_string(getuid());
-    fs::create_directories(cache_dir);
-    std::string lib_path = cache_dir + "/" + lib_name;
-
-    if (!fs::exists(lib_path)) {
-        std::cout << "Downloading foreign lib: " << lib_name << " to " << lib_path << std::endl;
-        // Real implementation would use curl/libcurl here
-    }
-    res.includes.push_back(lib_path);
-    res.libs.insert(lib_name);
-}
-
-void merge_results(ParseResult& target, const ParseResult& src, const std::string& lib_name) {
-    for (const auto& d : src.deps) target.deps.insert(d);
-    for (const auto& l : src.libs) target.libs.insert(l);
-    for (const auto& [k, v] : src.vars) target.vars[k] = v;
-    for (const auto& [k, v] : src.local_vars) target.local_vars[k] = v;
-    target.cmds.insert(target.cmds.end(), src.cmds.begin(), src.cmds.end());
-    target.cmds_with_vars.insert(target.cmds_with_vars.end(), src.cmds_with_vars.begin(), src.cmds_with_vars.end());
-    target.cmds_separate.insert(target.cmds_separate.end(), src.cmds_separate.begin(), src.cmds_separate.end());
-    target.includes.insert(target.includes.end(), src.includes.begin(), src.includes.end());
-    target.binaries.insert(target.binaries.end(), src.binaries.begin(), src.binaries.end());
-    target.plugins.insert(target.plugins.end(), src.plugins.begin(), src.plugins.end());
-    for (const auto& [k, vec] : src.functions) {
-        target.functions[k].insert(target.functions[k].end(), vec.begin(), vec.end());
-    }
-    for (const auto& e : src.errors) {
-        target.errors.push_back("In " + lib_name + ": " + e);
-    }
-    for (const auto& [k, v] : src.config) target.config[k] = v;
-}
-
-ParseResult parse_hacker_file(const std::string& file_path, bool verbose, bool bytes_mode, const std::string& mode = "hli") {
+ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
     ParseResult res;
     bool in_config = false;
     bool in_comment = false;
     std::optional<std::string> in_function = std::nullopt;
-    size_t line_num = 0;
-
+    uint32_t line_num = 0;
+    char* home_env = std::getenv("HOME");
+    std::string home = home_env ? home_env : "";
+    fs::path hacker_dir = fs::path(home) / HACKER_DIR_SUFFIX;
     std::ifstream file(file_path);
     if (!file.is_open()) {
+        if (verbose) {
+            std::cout << "File " << file_path << " not found" << std::endl;
+        }
         res.errors.push_back("File " + file_path + " not found");
         return res;
     }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        ++line_num;
-        std::string raw_line = line;
-        line = trim(line);
-        if (line.empty()) continue;
-
-        // Handle super user prefix ^
-        bool is_super = false;
-        std::string content = line;
-        if (content.rfind("^", 0) == 0) {
-            is_super = true;
-            content = trim(content.substr(1));
-            if (content.empty()) {
-                res.errors.push_back("Line " + std::to_string(line_num) + ": Lone ^ is invalid");
-                continue;
-            }
-        }
-
-        LineType lt = classify_line(content);
-        std::string clean_line = content;
-
-        if (lt == COMMENT_TOGGLE) {
+    std::string line_slice;
+    while (std::getline(file, line_slice)) {
+        line_num++;
+        std::string line_trimmed = trim(line_slice);
+        if (line_trimmed.empty()) continue;
+        std::string line = line_trimmed;
+        if (line == "!!") {
             in_comment = !in_comment;
             continue;
         }
         if (in_comment) continue;
-
-        if (lt == CONFIG_START) {
-            if (in_config || in_function.has_value()) {
-                res.errors.push_back("Line " + std::to_string(line_num) + ": Config block cannot be nested");
-            }
+        bool is_super = false;
+        if (line[0] == '^') {
+            is_super = true;
+            line = line.substr(1);
+            line = trim(line);
+        }
+        if (line == "[") {
+            if (in_config) res.errors.push_back("Line " + std::to_string(line_num) + ": Nested config section");
+            if (in_function.has_value()) res.errors.push_back("Line " + std::to_string(line_num) + ": Config in function");
             in_config = true;
             continue;
-        }
-        if (lt == CONFIG_END) {
-            if (!in_config) {
-                res.errors.push_back("Line " + std::to_string(line_num) + ": Unmatched ]");
-            }
+        } else if (line == "]") {
+            if (!in_config) res.errors.push_back("Line " + std::to_string(line_num) + ": Closing ] without [");
             in_config = false;
             continue;
         }
-
         if (in_config) {
-            auto [key, value] = split_once(clean_line, '=');
-            key = trim(key);
-            value = trim(value);
-            if (!key.empty()) {
-                res.config[key] = value;
+            size_t eq_pos = line.find('=');
+            if (eq_pos != std::string::npos) {
+                std::string key = trim(line.substr(0, eq_pos));
+                std::string value = trim(line.substr(eq_pos + 1));
+                res.config_data[key] = value;
             }
             continue;
         }
-
-        // Function handling
-        if (lt == FUNCTION_END) {
+        if (line == ":") {
             if (in_function.has_value()) {
                 in_function = std::nullopt;
             } else {
-                res.errors.push_back("Line " + std::to_string(line_num) + ": Unmatched function end ':'");
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Ending function without start");
             }
             continue;
-        }
-
-        if (lt == FUNCTION_START) {
-            std::string func_name = trim(clean_line.substr(1));
-            if (func_name.empty() || in_function.has_value()) {
-                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid function definition");
+        } else if (line[0] == ':') {
+            std::string func_name = trim(line.substr(1));
+            if (func_name.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty function name");
                 continue;
+            }
+            if (in_function.has_value()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Nested function");
             }
             res.functions[func_name] = {};
             in_function = func_name;
             continue;
-        }
-
-        if (lt == FUNCTION_CALL) {
-            std::string func_name = trim(clean_line.substr(1));
+        } else if (line[0] == '.') {
+            std::string func_name = trim(line.substr(1));
             if (func_name.empty()) {
                 res.errors.push_back("Line " + std::to_string(line_num) + ": Empty function call");
                 continue;
             }
             auto it = res.functions.find(func_name);
             if (it != res.functions.end()) {
-                auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds;
-                target.insert(target.end(), it->second.begin(), it->second.end());
+                const auto& func_cmds = it->second;
+                if (in_function.has_value()) {
+                    auto& target = res.functions[in_function.value()];
+                    target.insert(target.end(), func_cmds.begin(), func_cmds.end());
+                } else {
+                    res.cmds.insert(res.cmds.end(), func_cmds.begin(), func_cmds.end());
+                }
             } else {
-                res.errors.push_back("Line " + std::to_string(line_num) + ": Unknown function '" + func_name + "'");
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Unknown function " + func_name);
             }
             continue;
         }
-
-        // Restrict certain lines inside functions
-        if (in_function.has_value() && lt != CMD && lt != CMD_VARS && lt != CMD_SEPARATE &&
-            lt != LOOP && lt != CONDITIONAL && lt != BACKGROUND && lt != VAR && lt != LOCAL_VAR && lt != PLUGIN) {
-            res.errors.push_back("Line " + std::to_string(line_num) + ": This line type is not allowed inside a function");
-        continue;
+        if (in_function.has_value()) {
+            if (! (line[0] == '>' || line[0] == '=' || line[0] == '?' || line[0] == '&' || line[0] == '!' || line[0] == '@' || line[0] == '$' || line[0] == '\\' || starts_with(line, ">>") || starts_with(line, ">>>"))) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid in function");
+                continue;
             }
-
-            switch (lt) {
-                case DEP: {
-                    std::string dep = trim(clean_line.substr(2));
-                    if (dep.empty()) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty dependency");
-                    } else if (in_function.has_value()) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Dependencies cannot be inside functions");
-                    } else {
-                        res.deps.insert(dep);
-                    }
-                    break;
-                }
-                case LIB: {
-                    std::string lib_name;
-                    bool is_foreign = parse_foreign_lib(clean_line, lib_name);
-                    if (lib_name.empty() || in_function.has_value()) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid or misplaced library declaration");
-                        break;
-                    }
-
-                    std::string lib_dir = expand_home(LIBS_DIR + "/" + lib_name);
-                    std::string lib_hacker = lib_dir + "/main.hacker";
-
-                    if (fs::exists(lib_hacker)) {
-                        res.includes.push_back(lib_name);
-                        ParseResult sub = parse_hacker_file(lib_hacker, verbose, bytes_mode, mode);
-                        merge_results(res, sub, lib_name);
-                    }
-
-                    struct stat st;
-                    std::string lib_bin_path = lib_dir;
-                    if (stat(lib_bin_path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR)) {
-                        if (bytes_mode) {
-                            std::cout << "Embedding binary lib: " << lib_bin_path << std::endl;
-                        }
-                        res.binaries.push_back(lib_bin_path);
-                    } else {
-                        res.libs.insert(lib_name);
-                    }
-
-                    if (is_foreign) {
-                        handle_foreign_lib(lib_name, mode, res);
-                    }
-                    break;
-                }
-                case CMD: {
-                    std::string cmd = parse_cmd_part(clean_line.substr(1));
-                    if (is_super) cmd = "sudo " + cmd;
-                    if (!cmd.empty()) {
-                        auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds;
-                        target.push_back(cmd);
-                    } else {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty command");
-                    }
-                    break;
-                }
-                case CMD_VARS: {
-                    std::string cmd = parse_cmd_part(clean_line.substr(2));
-                    if (is_super) cmd = "sudo " + cmd;
-                    if (!cmd.empty()) {
-                        auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds_with_vars;
-                        target.push_back(cmd);
-                    } else {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty >> command");
-                    }
-                    break;
-                }
-                case CMD_SEPARATE: {
-                    std::string cmd = parse_cmd_part(clean_line.substr(3));
-                    if (is_super) cmd = "sudo " + cmd;
-                    if (!cmd.empty()) {
-                        auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds_separate;
-                        target.push_back(cmd);
-                    } else {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty >>> command");
-                    }
-                    break;
-                }
-                case VAR: {
-                    size_t eq = clean_line.find('=', 1);
-                    if (eq != std::string::npos) {
-                        std::string key = trim(clean_line.substr(1, eq - 1));
-                        std::string value = trim(clean_line.substr(eq + 1));
-                        if (!key.empty()) {
-                            res.vars[key] = value;
-                        } else {
-                            res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid global variable syntax");
-                        }
-                    } else {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Missing = in global variable");
-                    }
-                    break;
-                }
-                case LOCAL_VAR: {
-                    size_t eq = clean_line.find('=', 1);
-                    if (eq != std::string::npos) {
-                        std::string key = trim(clean_line.substr(1, eq - 1));
-                        std::string value = trim(clean_line.substr(eq + 1));
-                        if (!key.empty()) {
-                            res.local_vars[key] = value;
-                        } else {
-                            res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid local variable syntax");
-                        }
-                    } else {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Missing = in local variable");
-                    }
-                    break;
-                }
-                case PLUGIN: {
-                    std::string plugin_name = trim(clean_line.substr(1));
-                    if (plugin_name.empty()) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty plugin name");
-                        break;
-                    }
-                    std::string plugin_path = expand_home(HACKER_DIR + "/plugins/" + plugin_name);
-                    struct stat st;
-                    if (stat(plugin_path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR)) {
-                        res.plugins.push_back({plugin_path, is_super});
-                        if (verbose) std::cout << "Loaded plugin: " << plugin_name << std::endl;
-                    } else {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Plugin '" + plugin_name + "' not found or not executable");
-                    }
-                    break;
-                }
-                case LOOP: {
-                    size_t gt = clean_line.find('>', 1);
-                    if (gt == std::string::npos) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid loop syntax (missing >)");
-                        break;
-                    }
-                    std::string num_str = trim(clean_line.substr(1, gt - 1));
-                    std::string cmd_part = parse_cmd_part(clean_line.substr(gt + 1));
-                    try {
-                        int num = std::stoi(num_str);
-                        if (num > 0 && !cmd_part.empty()) {
-                            std::string cmd = is_super ? "sudo " + cmd_part : cmd_part;
-                            auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds;
-                            for (int i = 0; i < num; ++i) {
-                                target.push_back(cmd);
-                            }
-                        } else {
-                            res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid loop parameters");
-                        }
-                    } catch (...) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid loop count");
-                    }
-                    break;
-                }
-                case CONDITIONAL: {
-                    size_t gt = clean_line.find('>', 1);
-                    if (gt == std::string::npos) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid conditional syntax (missing >)");
-                        break;
-                    }
-                    std::string condition = trim(clean_line.substr(1, gt - 1));
-                    std::string cmd_part = parse_cmd_part(clean_line.substr(gt + 1));
-                    if (condition.empty() || cmd_part.empty()) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty condition or command in conditional");
-                        break;
-                    }
-                    std::string cmd = is_super ? "sudo " + cmd_part : cmd_part;
-                    std::string if_cmd = "if " + condition + "; then " + cmd + "; fi";
-                    auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds;
-                    target.push_back(if_cmd);
-                    break;
-                }
-                case BACKGROUND: {
-                    std::string cmd_part = parse_cmd_part(clean_line.substr(1));
-                    if (cmd_part.empty()) {
-                        res.errors.push_back("Line " + std::to_string(line_num) + ": Empty background command");
-                        break;
-                    }
-                    std::string cmd = (is_super ? "sudo " : "") + cmd_part + " &";
-                    auto& target = in_function.has_value() ? res.functions.at(*in_function) : res.cmds;
-                    target.push_back(cmd);
-                    break;
-                }
-                case IGNORE:
-                    break;
-                default:
-                    res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid syntax");
-                    break;
+        }
+        bool parsed = false;
+        if (starts_with(line, "//")) {
+            parsed = true;
+            if (in_function.has_value()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Deps not allowed in function");
+                continue;
             }
+            std::string dep = trim(line.substr(2));
+            if (!dep.empty()) {
+                res.deps[dep] = 1;
+            } else {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty system dependency");
+            }
+        } else if (starts_with(line, "#")) {
+            parsed = true;
+            if (in_function.has_value()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Libs not allowed in function");
+                continue;
+            }
+            std::string lib = trim(line.substr(1));
+            if (lib.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty library/include");
+                continue;
+            }
+            fs::path lib_dir = hacker_dir / "libs" / lib;
+            fs::path lib_hacker_path = lib_dir / "main.hacker";
+            fs::path lib_bin_path = hacker_dir / "libs" / lib;
+            if (fs::exists(lib_hacker_path)) {
+                res.includes.push_back(lib);
+                ParseResult sub = parse_hacker_file(lib_hacker_path.string(), verbose);
+                merge_maps(res.deps, sub.deps);
+                merge_maps(res.libs, sub.libs);
+                merge_string_maps(res.vars_dict, sub.vars_dict);
+                merge_string_maps(res.local_vars, sub.local_vars);
+                res.cmds.insert(res.cmds.end(), sub.cmds.begin(), sub.cmds.end());
+                res.cmds_with_vars.insert(res.cmds_with_vars.end(), sub.cmds_with_vars.begin(), sub.cmds_with_vars.end());
+                res.cmds_separate.insert(res.cmds_separate.end(), sub.cmds_separate.begin(), sub.cmds_separate.end());
+                res.includes.insert(res.includes.end(), sub.includes.begin(), sub.includes.end());
+                res.binaries.insert(res.binaries.end(), sub.binaries.begin(), sub.binaries.end());
+                res.plugins.insert(res.plugins.end(), sub.plugins.begin(), sub.plugins.end());
+                merge_function_maps(res.functions, sub.functions);
+                for (const auto& sub_err : sub.errors) {
+                    res.errors.push_back("In " + lib + ": " + sub_err);
+                }
+            }
+            struct stat st;
+            if (stat(lib_bin_path.c_str(), &st) == 0) {
+                if (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) {
+                    res.binaries.push_back(lib_bin_path.string());
+                } else {
+                    res.libs[lib] = 1;
+                }
+            } else {
+                res.libs[lib] = 1;
+            }
+        } else if (starts_with(line, ">>>")) {
+            parsed = true;
+            std::string cmd = trim(line.substr(3));
+            size_t excl = cmd.find('!');
+            if (excl != std::string::npos) {
+                cmd = trim(cmd.substr(0, excl));
+            }
+            std::string mut_cmd = cmd;
+            if (is_super) mut_cmd = "sudo " + mut_cmd;
+            if (!mut_cmd.empty()) {
+                auto& target = in_function.has_value() ? res.functions[in_function.value()] : res.cmds_separate;
+                target.push_back(mut_cmd);
+            } else {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty separate file command");
+            }
+        } else if (starts_with(line, ">>")) {
+            parsed = true;
+            std::string cmd = trim(line.substr(2));
+            size_t excl = cmd.find('!');
+            if (excl != std::string::npos) {
+                cmd = trim(cmd.substr(0, excl));
+            }
+            std::string mut_cmd = cmd;
+            if (is_super) mut_cmd = "sudo " + mut_cmd;
+            if (!mut_cmd.empty()) {
+                auto& target = in_function.has_value() ? res.functions[in_function.value()] : res.cmds_with_vars;
+                target.push_back(mut_cmd);
+            } else {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty command with vars");
+            }
+        } else if (starts_with(line, ">")) {
+            parsed = true;
+            std::string cmd = trim(line.substr(1));
+            size_t excl = cmd.find('!');
+            if (excl != std::string::npos) {
+                cmd = trim(cmd.substr(0, excl));
+            }
+            std::string mut_cmd = cmd;
+            if (is_super) mut_cmd = "sudo " + mut_cmd;
+            if (!mut_cmd.empty()) {
+                auto& target = in_function.has_value() ? res.functions[in_function.value()] : res.cmds;
+                target.push_back(mut_cmd);
+            } else {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty command");
+            }
+        } else if (starts_with(line, "@")) {
+            parsed = true;
+            size_t pos = 1;
+            while (pos < line.size() && (std::isalnum(line[pos]) || line[pos] == '_')) ++pos;
+            std::string key = line.substr(1, pos - 1);
+            if (key.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid variable");
+                continue;
+            }
+            std::string after = trim(line.substr(pos));
+            if (!starts_with(after, "=")) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid variable");
+                continue;
+            }
+            std::string value = trim(after.substr(1));
+            if (value.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid variable");
+                continue;
+            }
+            res.vars_dict[key] = value;
+        } else if (starts_with(line, "$")) {
+            parsed = true;
+            size_t pos = 1;
+            while (pos < line.size() && (std::isalnum(line[pos]) || line[pos] == '_')) ++pos;
+            std::string key = line.substr(1, pos - 1);
+            if (key.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid local variable");
+                continue;
+            }
+            std::string after = trim(line.substr(pos));
+            if (!starts_with(after, "=")) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid local variable");
+                continue;
+            }
+            std::string value = trim(after.substr(1));
+            if (value.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid local variable");
+                continue;
+            }
+            res.local_vars[key] = value;
+        } else if (starts_with(line, "\\")) {
+            parsed = true;
+            std::string plugin_name = trim(line.substr(1));
+            if (plugin_name.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty plugin name");
+                continue;
+            }
+            fs::path plugin_dir = hacker_dir / "plugins" / plugin_name;
+            struct stat st;
+            if (stat(plugin_dir.c_str(), &st) == 0 && (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+                res.plugins.push_back({plugin_dir.string(), is_super});
+            } else {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Plugin " + plugin_name + " not found or not executable");
+            }
+        } else if (starts_with(line, "=")) {
+            parsed = true;
+            size_t gt_pos = line.find('>');
+            if (gt_pos == std::string::npos) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid loop syntax");
+                continue;
+            }
+            std::string num_str = trim(line.substr(1, gt_pos - 1));
+            std::string cmd_part = trim(line.substr(gt_pos + 1));
+            size_t excl = cmd_part.find('!');
+            if (excl != std::string::npos) {
+                cmd_part = trim(cmd_part.substr(0, excl));
+            }
+            int num;
+            try {
+                num = std::stoi(num_str);
+            } catch (...) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid loop count");
+                continue;
+            }
+            if (num < 0) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Negative loop count");
+                continue;
+            }
+            if (cmd_part.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty loop command");
+                continue;
+            }
+            std::string cmd_base = cmd_part;
+            if (is_super) cmd_base = "sudo " + cmd_base;
+            auto& target = in_function.has_value() ? res.functions[in_function.value()] : res.cmds;
+            for (int i = 0; i < num; ++i) {
+                target.push_back(cmd_base);
+            }
+        } else if (starts_with(line, "?")) {
+            parsed = true;
+            size_t gt_pos = line.find('>');
+            if (gt_pos == std::string::npos) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid conditional");
+                continue;
+            }
+            std::string condition = trim(line.substr(1, gt_pos - 1));
+            std::string cmd_part = trim(line.substr(gt_pos + 1));
+            size_t excl = cmd_part.find('!');
+            if (excl != std::string::npos) {
+                cmd_part = trim(cmd_part.substr(0, excl));
+            }
+            if (condition.empty() || cmd_part.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid conditional");
+                continue;
+            }
+            std::string cmd = cmd_part;
+            if (is_super) cmd = "sudo " + cmd;
+            std::string if_cmd = "if " + condition + "; then " + cmd + "; fi";
+            auto& target = in_function.has_value() ? res.functions[in_function.value()] : res.cmds;
+            target.push_back(if_cmd);
+        } else if (starts_with(line, "&")) {
+            parsed = true;
+            std::string cmd_part = trim(line.substr(1));
+            size_t excl = cmd_part.find('!');
+            if (excl != std::string::npos) {
+                cmd_part = trim(cmd_part.substr(0, excl));
+            }
+            if (cmd_part.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty background command");
+                continue;
+            }
+            std::string cmd = cmd_part + " &";
+            if (is_super) cmd = "sudo " + cmd;
+            auto& target = in_function.has_value() ? res.functions[in_function.value()] : res.cmds;
+            target.push_back(cmd);
+        } else if (starts_with(line, "!")) {
+            parsed = true;
+            // ignore
+        }
+        if (!parsed) {
+            res.errors.push_back("Line " + std::to_string(line_num) + ": Invalid syntax");
+        }
     }
-
-    if (in_config) res.errors.push_back("Unclosed config block");
+    if (in_config) res.errors.push_back("Unclosed config section");
     if (in_comment) res.errors.push_back("Unclosed comment block");
-    if (in_function.has_value()) res.errors.push_back("Unclosed function '" + *in_function + "'");
-
-    if (verbose && !res.errors.empty()) {
-        std::cout << "Errors:\n";
-        for (const auto& e : res.errors) std::cout << "  " << e << "\n";
+    if (in_function.has_value()) res.errors.push_back("Unclosed function block");
+    if (verbose) {
+        if (!res.errors.empty()) {
+            std::cout << "\n\033[31m\033[1mErrors:\033[0m" << std::endl;
+            for (const auto& e : res.errors) {
+                std::cout << " \033[31m✖ \033[0m" << e << std::endl;
+            }
+            std::cout << "" << std::endl;
+        } else {
+            std::cout << "\033[32mNo errors found.\033[0m" << std::endl;
+        }
+        std::cout << "System Deps: [";
+        bool first = true;
+        for (const auto& p : res.deps) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Custom Libs: [";
+        first = true;
+        for (const auto& p : res.libs) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Vars: {";
+        first = true;
+        for (const auto& p : res.vars_dict) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first << ": " << p.second;
+            first = false;
+        }
+        std::cout << "}" << std::endl;
+        std::cout << "Local Vars: {";
+        first = true;
+        for (const auto& p : res.local_vars) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first << ": " << p.second;
+            first = false;
+        }
+        std::cout << "}" << std::endl;
+        std::cout << "Cmds: [";
+        first = true;
+        for (const auto& c : res.cmds) {
+            if (!first) std::cout << ", ";
+            std::cout << c;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Cmds with Vars: [";
+        first = true;
+        for (const auto& c : res.cmds_with_vars) {
+            if (!first) std::cout << ", ";
+            std::cout << c;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Separate Cmds: [";
+        first = true;
+        for (const auto& c : res.cmds_separate) {
+            if (!first) std::cout << ", ";
+            std::cout << c;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Includes: [";
+        first = true;
+        for (const auto& i : res.includes) {
+            if (!first) std::cout << ", ";
+            std::cout << i;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Binaries: [";
+        first = true;
+        for (const auto& b : res.binaries) {
+            if (!first) std::cout << ", ";
+            std::cout << b;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Plugins: [";
+        first = true;
+        for (const auto& p : res.plugins) {
+            if (!first) std::cout << ", ";
+            std::cout << "{path: " << p.path << ", super: " << (p.is_super ? "true" : "false") << "}";
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Functions: {";
+        first = true;
+        for (const auto& f : res.functions) {
+            if (!first) std::cout << ", ";
+            std::cout << f.first << ": [";
+            bool first2 = true;
+            for (const auto& c : f.second) {
+                if (!first2) std::cout << ", ";
+                std::cout << c;
+                first2 = false;
+            }
+            std::cout << "]";
+            first = false;
+        }
+        std::cout << "}" << std::endl;
+        std::cout << "Config: {";
+        first = true;
+        for (const auto& p : res.config_data) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first << ": " << p.second;
+            first = false;
+        }
+        std::cout << "}" << std::endl;
     }
-
     return res;
-}
-
-Json::Value to_json(const ParseResult& res) {
-    Json::Value root(Json::objectValue);
-
-    Json::Value deps(Json::arrayValue);
-    for (const auto& d : res.deps) deps.append(d);
-    root["deps"] = deps;
-
-    Json::Value libs(Json::arrayValue);
-    for (const auto& l : res.libs) libs.append(l);
-    root["libs"] = libs;
-
-    Json::Value vars(Json::objectValue);
-    for (const auto& [k, v] : res.vars) vars[k] = v;
-    root["vars"] = vars;
-
-    Json::Value local_vars(Json::objectValue);
-    for (const auto& [k, v] : res.local_vars) local_vars[k] = v;
-    root["local_vars"] = local_vars;
-
-    Json::Value cmds(Json::arrayValue);
-    for (const auto& c : res.cmds) cmds.append(c);
-    root["cmds"] = cmds;
-
-    Json::Value cmds_wv(Json::arrayValue);
-    for (const auto& c : res.cmds_with_vars) cmds_wv.append(c);
-    root["cmds_with_vars"] = cmds_wv;
-
-    Json::Value cmds_sep(Json::arrayValue);
-    for (const auto& c : res.cmds_separate) cmds_sep.append(c);
-    root["cmds_separate"] = cmds_sep;
-
-    Json::Value includes(Json::arrayValue);
-    for (const auto& i : res.includes) includes.append(i);
-    root["includes"] = includes;
-
-    Json::Value binaries(Json::arrayValue);
-    for (const auto& b : res.binaries) binaries.append(b);
-    root["binaries"] = binaries;
-
-    Json::Value plugins(Json::arrayValue);
-    for (const auto& p : res.plugins) {
-        Json::Value pl(Json::objectValue);
-        pl["path"] = p.path;
-        pl["super"] = p.is_super;
-        plugins.append(pl);
-    }
-    root["plugins"] = plugins;
-
-    Json::Value functions(Json::objectValue);
-    for (const auto& [k, vec] : res.functions) {
-        Json::Value fvec(Json::arrayValue);
-        for (const auto& c : vec) fvec.append(c);
-        functions[k] = fvec;
-    }
-    root["functions"] = functions;
-
-    Json::Value errors(Json::arrayValue);
-    for (const auto& e : res.errors) errors.append(e);
-    root["errors"] = errors;
-
-    Json::Value config(Json::objectValue);
-    for (const auto& [k, v] : res.config) config[k] = v;
-    root["config"] = config;
-
-    return root;
 }
 
 int main(int argc, char* argv[]) {
     bool verbose = false;
     std::string file_path;
-    std::string mode = "hli";
-
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--verbose") {
             verbose = true;
-        } else if (arg == "--mode" && i + 1 < argc) {
-            mode = argv[++i];
         } else if (file_path.empty()) {
             file_path = arg;
+        } else {
+            std::cerr << "Usage: hacker-plsa [--verbose] <file>" << std::endl;
+            return 1;
         }
     }
-
     if (file_path.empty()) {
-        std::cerr << "Usage: hacker-parser [--verbose] [--mode hli|hackerc] <file.hacker>\n";
+        std::cerr << "Usage: hacker-plsa [--verbose] <file>" << std::endl;
         return 1;
     }
-
-    ParseResult res = parse_hacker_file(file_path, verbose, false, mode);
-    Json::Value json_res = to_json(res);
-
-    Json::StreamWriterBuilder builder;
-    builder["indentation"] = "  ";
-    std::cout << Json::writeString(builder, json_res) << std::endl;
-
-    return res.errors.empty() ? 0 : 1;
+    ParseResult res = parse_hacker_file(file_path, verbose);
+    output_json(res);
+    return 0;
 }
