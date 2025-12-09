@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <iomanip>
+#include <sstream>  // Added for stringstream
 
 namespace fs = std::filesystem;
 
@@ -22,7 +23,10 @@ struct Plugin {
 
 struct ParseResult {
     std::unordered_map<std::string, int> deps;
-    std::unordered_map<std::string, int> libs;
+    std::unordered_map<std::string, int> libs;  // Default/bytes libs
+    std::unordered_map<std::string, int> rust_libs;
+    std::unordered_map<std::string, int> python_libs;
+    std::unordered_map<std::string, int> java_libs;
     std::unordered_map<std::string, std::string> vars_dict;
     std::unordered_map<std::string, std::string> local_vars;
     std::vector<std::string> cmds;
@@ -102,6 +106,31 @@ void output_json(const ParseResult& res) {
     out << "\"libs\":[";
     first = true;
     for (const auto& p : res.libs) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        first = false;
+    }
+    out << "],";
+    // Added new fields
+    out << "\"rust_libs\":[";
+    first = true;
+    for (const auto& p : res.rust_libs) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        first = false;
+    }
+    out << "],";
+    out << "\"python_libs\":[";
+    first = true;
+    for (const auto& p : res.python_libs) {
+        if (!first) out << ",";
+        write_json_string(out, p.first);
+        first = false;
+    }
+    out << "],";
+    out << "\"java_libs\":[";
+    first = true;
+    for (const auto& p : res.java_libs) {
         if (!first) out << ",";
         write_json_string(out, p.first);
         first = false;
@@ -333,41 +362,71 @@ ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
                 res.errors.push_back("Line " + std::to_string(line_num) + ": Libs not allowed in function");
                 continue;
             }
-            std::string lib = trim(line.substr(1));
-            if (lib.empty()) {
+            std::string full_lib = trim(line.substr(1));
+            if (full_lib.empty()) {
                 res.errors.push_back("Line " + std::to_string(line_num) + ": Empty library/include");
                 continue;
             }
-            fs::path lib_dir = hacker_dir / "libs" / lib;
-            fs::path lib_hacker_path = lib_dir / "main.hacker";
-            fs::path lib_bin_path = hacker_dir / "libs" / lib;
-            if (fs::exists(lib_hacker_path)) {
-                res.includes.push_back(lib);
-                ParseResult sub = parse_hacker_file(lib_hacker_path.string(), verbose);
-                merge_maps(res.deps, sub.deps);
-                merge_maps(res.libs, sub.libs);
-                merge_string_maps(res.vars_dict, sub.vars_dict);
-                merge_string_maps(res.local_vars, sub.local_vars);
-                res.cmds.insert(res.cmds.end(), sub.cmds.begin(), sub.cmds.end());
-                res.cmds_with_vars.insert(res.cmds_with_vars.end(), sub.cmds_with_vars.begin(), sub.cmds_with_vars.end());
-                res.cmds_separate.insert(res.cmds_separate.end(), sub.cmds_separate.begin(), sub.cmds_separate.end());
-                res.includes.insert(res.includes.end(), sub.includes.begin(), sub.includes.end());
-                res.binaries.insert(res.binaries.end(), sub.binaries.begin(), sub.binaries.end());
-                res.plugins.insert(res.plugins.end(), sub.plugins.begin(), sub.plugins.end());
-                merge_function_maps(res.functions, sub.functions);
-                for (const auto& sub_err : sub.errors) {
-                    res.errors.push_back("In " + lib + ": " + sub_err);
-                }
+            // Parse prefix if any
+            std::string prefix = "";
+            std::string lib_name = full_lib;
+            size_t colon_pos = full_lib.find(':');
+            if (colon_pos != std::string::npos) {
+                prefix = trim(full_lib.substr(0, colon_pos));
+                lib_name = trim(full_lib.substr(colon_pos + 1));
+            } else {
+                // Default to "bytes" if no prefix (or assume hacker-lang/bytes)
+                prefix = "bytes";
             }
-            struct stat st;
-            if (stat(lib_bin_path.c_str(), &st) == 0) {
-                if (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) {
-                    res.binaries.push_back(lib_bin_path.string());
+            if (lib_name.empty()) {
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Empty library name after prefix");
+                continue;
+            }
+            // Handle based on prefix
+            if (prefix == "rust") {
+                res.rust_libs[lib_name] = 1;
+            } else if (prefix == "python") {
+                res.python_libs[lib_name] = 1;
+            } else if (prefix == "java") {
+                res.java_libs[lib_name] = 1;
+            } else if (prefix == "bytes" || prefix.empty()) {  // Handle default or explicit bytes
+                // Existing logic for bytes/hacker-lang libs
+                fs::path lib_dir = hacker_dir / "libs" / lib_name;
+                fs::path lib_hacker_path = lib_dir / "main.hacker";
+                fs::path lib_bin_path = hacker_dir / "libs" / lib_name;
+                if (fs::exists(lib_hacker_path)) {
+                    res.includes.push_back(lib_name);
+                    ParseResult sub = parse_hacker_file(lib_hacker_path.string(), verbose);
+                    merge_maps(res.deps, sub.deps);
+                    merge_maps(res.libs, sub.libs);
+                    merge_maps(res.rust_libs, sub.rust_libs);  // Merge new fields
+                    merge_maps(res.python_libs, sub.python_libs);
+                    merge_maps(res.java_libs, sub.java_libs);
+                    merge_string_maps(res.vars_dict, sub.vars_dict);
+                    merge_string_maps(res.local_vars, sub.local_vars);
+                    res.cmds.insert(res.cmds.end(), sub.cmds.begin(), sub.cmds.end());
+                    res.cmds_with_vars.insert(res.cmds_with_vars.end(), sub.cmds_with_vars.begin(), sub.cmds_with_vars.end());
+                    res.cmds_separate.insert(res.cmds_separate.end(), sub.cmds_separate.begin(), sub.cmds_separate.end());
+                    res.includes.insert(res.includes.end(), sub.includes.begin(), sub.includes.end());
+                    res.binaries.insert(res.binaries.end(), sub.binaries.begin(), sub.binaries.end());
+                    res.plugins.insert(res.plugins.end(), sub.plugins.begin(), sub.plugins.end());
+                    merge_function_maps(res.functions, sub.functions);
+                    for (const auto& sub_err : sub.errors) {
+                        res.errors.push_back("In " + lib_name + ": " + sub_err);
+                    }
+                }
+                struct stat st;
+                if (stat(lib_bin_path.c_str(), &st) == 0) {
+                    if (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) {
+                        res.binaries.push_back(lib_bin_path.string());
+                    } else {
+                        res.libs[lib_name] = 1;
+                    }
                 } else {
-                    res.libs[lib] = 1;
+                    res.libs[lib_name] = 1;
                 }
             } else {
-                res.libs[lib] = 1;
+                res.errors.push_back("Line " + std::to_string(line_num) + ": Unknown library prefix: " + prefix);
             }
         } else if (starts_with(line, ">>>")) {
             parsed = true;
@@ -568,9 +627,34 @@ ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
             first = false;
         }
         std::cout << "]" << std::endl;
-        std::cout << "Custom Libs: [";
+        std::cout << "Custom Libs (Bytes): [";
         first = true;
         for (const auto& p : res.libs) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        // Verbose for new libs
+        std::cout << "Rust Libs: [";
+        first = true;
+        for (const auto& p : res.rust_libs) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Python Libs: [";
+        first = true;
+        for (const auto& p : res.python_libs) {
+            if (!first) std::cout << ", ";
+            std::cout << p.first;
+            first = false;
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "Java Libs: [";
+        first = true;
+        for (const auto& p : res.java_libs) {
             if (!first) std::cout << ", ";
             std::cout << p.first;
             first = false;
