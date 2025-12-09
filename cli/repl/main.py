@@ -3,47 +3,41 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Dict, List
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
+from prompt_toolkit.formatted_text import FormattedText
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-
-VERSION = "0.0.9"
+VERSION = "1.3"
 HACKER_DIR = Path.home() / ".hackeros" / "hacker-lang"
 LIBS_DIR = HACKER_DIR / "libs"
 HISTORY_DIR = Path.home() / ".hackeros" / "history"
 HISTORY_FILE = HISTORY_DIR / "hacker_repl_history"
-
 console = Console()
-
 # Colorful styles
 success_style = "bold green"
 error_style = "bold red"
 warning_style = "yellow"
 info_style = "blue"
 prompt_style = "bold purple"
-
 def ensure_dirs():
     HACKER_DIR.mkdir(parents=True, exist_ok=True)
     LIBS_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-
 def parse_lines(lines: List[str], verbose: bool = False) -> Dict:
     deps = []
-    libs = []  # missing libs
+    libs = [] # missing libs
     vars_dict = {}
     cmds = []
-    includes = []  # existing libs to include
+    includes = [] # existing libs to include
     binaries = []
     plugins = []
     errors = []
     config = {}
     in_config = False
-
     for line_num, line in enumerate(lines, 1):
         line = line.strip()
         if not line or line.startswith("!"):
@@ -111,7 +105,6 @@ def parse_lines(lines: List[str], verbose: bool = False) -> Dict:
             cmds.append(cmd)
         else:
             cmds.append(line)
-
     return {
         "deps": list(set(deps)),
         "libs": libs,
@@ -123,7 +116,6 @@ def parse_lines(lines: List[str], verbose: bool = False) -> Dict:
         "errors": errors,
         "config": config
     }
-
 def run_repl(verbose: bool = False):
     ensure_dirs()
     history = FileHistory(str(HISTORY_FILE))
@@ -137,10 +129,10 @@ def run_repl(verbose: bool = False):
     console.print(Panel(f"Hacker Lang REPL v{VERSION} - Enhanced Interactive Mode", style=success_style))
     console.print(Text("Type 'exit' to quit, 'help' for commands, 'clear' to reset", style=info_style))
     console.print(Text("Supported: //deps, #libs, @vars, =loops, ?ifs, &bg, >cmds, [config], !comments", style=info_style))
-
     while True:
         try:
-            prompt = Text("CONFIG> ", style=prompt_style) if in_config else Text("hacker> ", style=prompt_style)
+            prompt_text = "CONFIG> " if in_config else "hacker> "
+            prompt = FormattedText([("class:prompt", prompt_text)])
             line = session.prompt(prompt)
             if not line.strip():
                 continue
@@ -158,9 +150,7 @@ def run_repl(verbose: bool = False):
                 verbose = not verbose
                 console.print(Text(f"Verbose mode: {verbose}", style=info_style))
                 continue
-
             lines.append(line)
-
             if line == "[":
                 in_config = True
                 continue
@@ -169,7 +159,6 @@ def run_repl(verbose: bool = False):
                     console.print(Text("Error: Unmatched ']'", style=error_style))
                 in_config = False
                 continue
-
             if not in_config and line and not line.startswith("!"):
                 parsed = parse_lines(lines, verbose)
                 if parsed["errors"]:
@@ -212,7 +201,6 @@ def run_repl(verbose: bool = False):
         except KeyboardInterrupt:
             break
     console.print(Text("REPL session ended.", style=success_style))
-
 if __name__ == "__main__":
     import sys
     verbose = "--verbose" in sys.argv
