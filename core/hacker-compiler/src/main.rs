@@ -15,7 +15,9 @@ use std::os::unix::fs::PermissionsExt;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
+
 const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
+
 fn expand_home(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = env::var_os("HOME") {
@@ -24,15 +26,20 @@ fn expand_home(path: &str) -> String {
     }
     path.to_string()
 }
+
 #[derive(Debug, Clone)]
 struct Plugin {
     name: String,
     is_super: bool,
 }
+
 #[derive(Debug)]
 struct ParseResult {
     deps: Vec<String>,
     libs: Vec<String>,
+    rust_libs: Vec<String>,
+    python_libs: Vec<String>,
+    java_libs: Vec<String>,
     vars: Vec<(String, String)>,
     local_vars: Vec<(String, String)>,
     cmds: Vec<String>,
@@ -45,11 +52,15 @@ struct ParseResult {
     errors: Vec<String>,
     config: HashMap<String, String>,
 }
+
 fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result<ParseResult> {
     let file = File::open(path)?;
     let reader = io::BufReader::new(file);
     let mut deps = Vec::new();
     let mut libs = Vec::new();
+    let mut rust_libs = Vec::new();
+    let mut python_libs = Vec::new();
+    let mut java_libs = Vec::new();
     let mut vars = Vec::new();
     let mut local_vars = Vec::new();
     let mut cmds = Vec::new();
@@ -172,46 +183,74 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
                 errors.push(format!("Line {line_num}: Libs not allowed in function"));
                 continue;
             }
-            let lib = line[1..].trim().to_string();
-            if lib.is_empty() {
+            let full_lib = line[1..].trim().to_string();
+            if full_lib.is_empty() {
                 errors.push(format!("Line {line_num}: Empty library/include"));
+                continue;
+            }
+            let (prefix, lib_name) = if let Some(colon_idx) = full_lib.find(':') {
+                (full_lib[..colon_idx].trim().to_string(), full_lib[colon_idx + 1..].trim().to_string())
             } else {
-                let lib_dir = expand_home(&format!("{HACKER_DIR}/libs/{lib}"));
-                let lib_hacker_path = format!("{lib_dir}/main.hacker");
-                let lib_bin_path = lib_dir.clone();
-                if Path::new(&lib_hacker_path).exists() {
-                    includes.push(lib.clone());
-                    let sub = parse_hacker_file(Path::new(&lib_hacker_path), verbose, bytes_mode)?;
-                    deps.extend(sub.deps);
-                    libs.extend(sub.libs);
-                    vars.extend(sub.vars);
-                    local_vars.extend(sub.local_vars);
-                    cmds.extend(sub.cmds);
-                    cmds_with_vars.extend(sub.cmds_with_vars);
-                    cmds_separate.extend(sub.cmds_separate);
-                    includes.extend(sub.includes);
-                    binaries.extend(sub.binaries);
-                    plugins.extend(sub.plugins);
-                    functions.extend(sub.functions);
-                    config.extend(sub.config);
-                    for err in sub.errors {
-                        errors.push(format!("In {lib}: {err}"));
+                ("bytes".to_string(), full_lib)
+            };
+            if lib_name.is_empty() {
+                errors.push(format!("Line {line_num}: Empty library name after prefix"));
+                continue;
+            }
+            match prefix.as_str() {
+                "rust" => {
+                    rust_libs.push(lib_name);
+                }
+                "python" => {
+                    python_libs.push(lib_name);
+                }
+                "java" => {
+                    java_libs.push(lib_name);
+                }
+                "bytes" => {
+                    let lib_dir = expand_home(&format!("{HACKER_DIR}/libs/{}", lib_name));
+                    let lib_hacker_path = format!("{}/main.hacker", lib_dir);
+                    let lib_bin_path = lib_dir.clone();
+                    if Path::new(&lib_hacker_path).exists() {
+                        includes.push(lib_name.clone());
+                        let sub = parse_hacker_file(Path::new(&lib_hacker_path), verbose, bytes_mode)?;
+                        deps.extend(sub.deps);
+                        libs.extend(sub.libs);
+                        rust_libs.extend(sub.rust_libs);
+                        python_libs.extend(sub.python_libs);
+                        java_libs.extend(sub.java_libs);
+                        vars.extend(sub.vars);
+                        local_vars.extend(sub.local_vars);
+                        cmds.extend(sub.cmds);
+                        cmds_with_vars.extend(sub.cmds_with_vars);
+                        cmds_separate.extend(sub.cmds_separate);
+                        includes.extend(sub.includes);
+                        binaries.extend(sub.binaries);
+                        plugins.extend(sub.plugins);
+                        functions.extend(sub.functions);
+                        config.extend(sub.config);
+                        for err in sub.errors {
+                            errors.push(format!("In {}: {}", lib_name, err));
+                        }
+                    }
+                    if Path::new(&lib_bin_path).exists() && Path::new(&lib_bin_path).metadata()?.permissions().mode() & 0o111 != 0 {
+                        if bytes_mode {
+                            println!("Embedding library binary: {}", lib_bin_path);
+                        }
+                        binaries.push(lib_bin_path);
+                    } else {
+                        libs.push(lib_name);
                     }
                 }
-                if Path::new(&lib_bin_path).exists() && Path::new(&lib_bin_path).metadata()?.permissions().mode() & 0o111 != 0 {
-                    if bytes_mode {
-                        println!("Embedding library binary: {lib_bin_path}");
-                    }
-                    binaries.push(lib_bin_path);
-                } else {
-                    libs.push(lib);
+                _ => {
+                    errors.push(format!("Line {line_num}: Unknown library prefix {}", prefix));
                 }
             }
         } else if line.starts_with(">>>") {
             let cmd_part_str: String = line[3..].split('!').next().unwrap_or("").trim().to_string();
             let mut cmd = cmd_part_str.clone();
             if is_super {
-                cmd = format!("sudo {cmd}");
+                cmd = format!("sudo {}", cmd);
             }
             if cmd.is_empty() {
                 errors.push(format!("Line {line_num}: Empty separate command"));
@@ -227,7 +266,7 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
             let cmd_part_str: String = line[2..].split('!').next().unwrap_or("").trim().to_string();
             let mut cmd = cmd_part_str.clone();
             if is_super {
-                cmd = format!("sudo {cmd}");
+                cmd = format!("sudo {}", cmd);
             }
             if cmd.is_empty() {
                 errors.push(format!("Line {line_num}: Empty command with vars"));
@@ -243,7 +282,7 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
             let cmd_part_str: String = line[1..].split('!').next().unwrap_or("").trim().to_string();
             let mut cmd = cmd_part_str.clone();
             if is_super {
-                cmd = format!("sudo {cmd}");
+                cmd = format!("sudo {}", cmd);
             }
             if cmd.is_empty() {
                 errors.push(format!("Line {line_num}: Empty command"));
@@ -288,10 +327,10 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
                 if Path::new(&plugin_path).exists() && Path::new(&plugin_path).metadata()?.permissions().mode() & 0o111 != 0 {
                     plugins.push(Plugin { name: plugin_name.clone(), is_super });
                     if verbose {
-                        println!("Loaded plugin: {plugin_name}");
+                        println!("Loaded plugin: {}", plugin_name);
                     }
                 } else {
-                    errors.push(format!("Line {line_num}: Plugin {plugin_name} not found or not executable"));
+                    errors.push(format!("Line {line_num}: Plugin {} not found or not executable", plugin_name));
                 }
             }
         } else if line.starts_with("=") {
@@ -301,7 +340,7 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
                     let cmd_part_str = parts[1].split('!').next().unwrap_or("").trim().to_string();
                     let mut cmd = cmd_part_str.clone();
                     if is_super {
-                        cmd = format!("sudo {cmd}");
+                        cmd = format!("sudo {}", cmd);
                     }
                     if cmd.is_empty() {
                         errors.push(format!("Line {line_num}: Empty loop command"));
@@ -328,12 +367,12 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
                 let cmd_part_str = parts[1].split('!').next().unwrap_or("").trim().to_string();
                 let mut cmd = cmd_part_str.clone();
                 if is_super {
-                    cmd = format!("sudo {cmd}");
+                    cmd = format!("sudo {}", cmd);
                 }
                 if condition.is_empty() || cmd.is_empty() {
                     errors.push(format!("Line {line_num}: Invalid conditional"));
                 } else {
-                    let if_cmd = format!("if {condition}; then {cmd}; fi");
+                    let if_cmd = format!("if {}; then {}; fi", condition, cmd);
                     let target = if let Some(ref f) = in_function {
                         functions.get_mut(f).unwrap()
                     } else {
@@ -346,9 +385,9 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
             }
         } else if line.starts_with("&") {
             let cmd_part_str = line[1..].split('!').next().unwrap_or("").trim().to_string();
-            let mut cmd = format!("{cmd_part_str} &");
+            let mut cmd = format!("{} &", cmd_part_str);
             if is_super {
-                cmd = format!("sudo {cmd}");
+                cmd = format!("sudo {}", cmd);
             }
             if cmd_part_str.is_empty() {
                 errors.push(format!("Line {line_num}: Empty background command"));
@@ -378,6 +417,9 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     if verbose {
         println!("System Deps: {:?}", deps);
         println!("Custom Libs: {:?}", libs);
+        println!("Rust Libs: {:?}", rust_libs);
+        println!("Python Libs: {:?}", python_libs);
+        println!("Java Libs: {:?}", java_libs);
         println!("Vars: {:?}", vars);
         println!("Local Vars: {:?}", local_vars);
         println!("Cmds (direct): {:?}", cmds);
@@ -395,6 +437,9 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     Ok(ParseResult {
         deps,
        libs,
+       rust_libs,
+       python_libs,
+       java_libs,
        vars,
        local_vars,
        cmds,
@@ -408,12 +453,14 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
        config,
     })
 }
+
 fn generate_check_cmd(dep: &str) -> String {
     if dep == "sudo" {
         return String::new();
     }
-    format!("command -v {dep} &> /dev/null || (sudo apt update && sudo apt install -y {dep})")
+    format!("command -v {} &> /dev/null || (sudo apt update && sudo apt install -y {})", dep, dep)
 }
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     let mut bytes_mode = false;
@@ -459,9 +506,30 @@ fn main() -> io::Result<()> {
             }
         }
     }
+    let mut deps = parse_result.deps.clone();
+    if !parse_result.rust_libs.is_empty() {
+        if !deps.contains(&"cargo".to_string()) {
+            deps.push("cargo".to_string());
+        }
+    }
+    if !parse_result.python_libs.is_empty() {
+        if !deps.contains(&"python3-pip".to_string()) {
+            deps.push("python3-pip".to_string());
+        }
+    }
+    if !parse_result.java_libs.is_empty() {
+        if !deps.contains(&"maven".to_string()) {
+            deps.push("maven".to_string());
+        }
+    }
+    parse_result.deps = deps;
+
     let ParseResult {
         deps,
         libs: _,
+        rust_libs,
+        python_libs,
+        java_libs,
         vars,
         local_vars,
         cmds,
@@ -477,7 +545,7 @@ fn main() -> io::Result<()> {
     if !errors.is_empty() {
         eprintln!("\x1b[31m\x1b[1mErrors:\x1b[0m");
         for err in errors {
-            eprintln!(" \x1b[31m✖ \x1b[0m{err}");
+            eprintln!(" \x1b[31m✖ \x1b[0m{}", err);
         }
         eprintln!();
         process::exit(1);
@@ -489,7 +557,7 @@ fn main() -> io::Result<()> {
     for cmd in direct_cmds {
         let mut sub_cmd = cmd.clone();
         for (k, v) in &local_vars {
-            sub_cmd = sub_cmd.replace(&format!("${k}"), v);
+            sub_cmd = sub_cmd.replace(&format!("${}", k), v);
         }
         substituted_direct.push(sub_cmd);
     }
@@ -497,7 +565,7 @@ fn main() -> io::Result<()> {
     for cmd in cmds_separate {
         let mut sub_cmd = cmd.clone();
         for (k, v) in &local_vars {
-            sub_cmd = sub_cmd.replace(&format!("${k}"), v);
+            sub_cmd = sub_cmd.replace(&format!("${}", k), v);
         }
         substituted_separate.push(sub_cmd);
     }
@@ -509,19 +577,29 @@ fn main() -> io::Result<()> {
             final_cmds.push(check);
         }
     }
+    // Add install commands for language libs
+    for lib in rust_libs {
+        final_cmds.push(format!("cargo install {}", lib));
+    }
+    for lib in python_libs {
+        final_cmds.push(format!("pip3 install --user {}", lib));
+    }
+    for lib in java_libs {
+        final_cmds.push(format!("mvn dependency:get -Dartifact={}", lib));
+    }
     final_cmds.extend(substituted_direct);
     // Separate file commands (>>>)
     for sub_cmd in substituted_separate {
-        let script = format!("#!/bin/bash\nset -e\n{sub_cmd}\n");
+        let script = format!("#!/bin/bash\nset -e\n{}\n", sub_cmd);
         let encoded = BASE64_STANDARD.encode(script.as_bytes());
-        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_cmd.XXXXXX); echo '{encoded}' | base64 -d > $temp && chmod +x $temp && $temp");
+        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_cmd.XXXXXX); echo '{}' | base64 -d > $temp && chmod +x $temp && $temp", encoded);
         final_cmds.push(extract_cmd);
     }
     // Binary libraries
     for bin_path in binaries {
         let bin_data = fs::read(&bin_path)?;
         let encoded = BASE64_STANDARD.encode(&bin_data);
-        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_bin.XXXXXX); echo '{encoded}' | base64 -d > $temp && chmod +x $temp && $temp");
+        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_bin.XXXXXX); echo '{}' | base64 -d > $temp && chmod +x $temp && $temp", encoded);
         final_cmds.push(extract_cmd);
     }
     // Plugins
@@ -531,9 +609,9 @@ fn main() -> io::Result<()> {
         let encoded = BASE64_STANDARD.encode(&plugin_data);
         let mut run_cmd = " $temp &".to_string();
         if plugin.is_super {
-            run_cmd = format!("sudo{run_cmd}");
+            run_cmd = format!("sudo{}", run_cmd);
         }
-        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_plugin.XXXXXX); echo '{encoded}' | base64 -d > $temp && chmod +x $temp &&{run_cmd}");
+        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_plugin.XXXXXX); echo '{}' | base64 -d > $temp && chmod +x $temp &&{}", encoded, run_cmd);
         final_cmds.push(extract_cmd);
     }
     // Cranelift setup
@@ -577,8 +655,8 @@ fn main() -> io::Result<()> {
     // Embed environment variables (@vars)
     let mut var_data_ids = Vec::new();
     for (i, (var, value)) in vars.iter().enumerate() {
-        let env_str = format!("{var}={value}");
-        let data_name = format!("env_{i}");
+        let env_str = format!("{}={}", var, value);
+        let data_name = format!("env_{}", i);
         let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
         let mut data_ctx = DataDescription::new();
         let mut bytes: Vec<u8> = env_str.into_bytes();
@@ -595,7 +673,7 @@ fn main() -> io::Result<()> {
     // Embed commands
     let mut cmd_data_ids = Vec::new();
     for (i, cmd) in final_cmds.iter().enumerate() {
-        let data_name = format!("cmd_{i}");
+        let data_name = format!("cmd_{}", i);
         let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
         let mut data_ctx = DataDescription::new();
         let mut bytes: Vec<u8> = cmd.as_bytes().to_vec();
