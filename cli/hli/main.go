@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const VERSION = "1.3.0"
+const VERSION = "1.3"
 
 var HACKER_DIR = filepath.Join(os.Getenv("HOME"), ".hackeros/hacker-lang")
 var FRONTEND_BIN_DIR = filepath.Join(HACKER_DIR, "bin/frontend")
