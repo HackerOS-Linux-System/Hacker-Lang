@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	Version      = "1.3"
+	Version      = "1.2"
 	HackerDir    = ".hackeros/hacker-lang"
 	BinDir       = "bin"
 	CompilerPath = "hacker-compiler"
@@ -21,17 +21,17 @@ const (
 )
 
 var (
-	boldStyle      = lipgloss.NewStyle().Bold(true)
-	purpleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A020F0")).Bold(true)
-	grayStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
-	whiteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
-	cyanStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF"))
-	greenStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	redStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
-	yellowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
+	boldStyle     = lipgloss.NewStyle().Bold(true)
+	purpleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A020F0")).Bold(true)
+	grayStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+	whiteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
+	cyanStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF"))
+	greenStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
+	redStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	yellowStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
 	lightGrayStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D3D3D3"))
-	blueStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#0000FF")).Bold(true)
-	magentaStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF"))
+	blueStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#0000FF")).Bold(true)
+	magentaStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF"))
 )
 
 func ensureHackerDir() error {
@@ -42,7 +42,6 @@ func ensureHackerDir() error {
 func displayWelcome() {
 	header := pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgMagenta)).WithTextStyle(pterm.NewStyle(pterm.FgWhite))
 	header.Println("Welcome to Hacker Lang CLI v" + Version)
-
 	pterm.DefaultSection.WithStyle(pterm.NewStyle(pterm.FgCyan)).Println(grayStyle.Render("Simplified tool for running and compiling .hacker scripts"))
 	pterm.Println(whiteStyle.Render("Type 'hackerc help' for available commands."))
 	helpCommand(false)
@@ -110,7 +109,6 @@ func helpCommand(showBanner bool) bool {
 		header.Println("Hacker Lang CLI - Simplified Scripting Tool v" + Version)
 	}
 	pterm.DefaultSection.WithStyle(pterm.NewStyle(pterm.FgBlue)).Println(blueStyle.Render("Available Commands:"))
-
 	tableData := pterm.TableData{
 		{lightGrayStyle.Render("Command"), lightGrayStyle.Render("Description"), lightGrayStyle.Render("Usage")},
 		{cyanStyle.Render("run"), whiteStyle.Render("Execute a .hacker script"), yellowStyle.Render("hackerc run <file> [--verbose]")},
@@ -118,7 +116,6 @@ func helpCommand(showBanner bool) bool {
 		{cyanStyle.Render("help"), whiteStyle.Render("Show this help menu"), yellowStyle.Render("hackerc help")},
 	}
 	pterm.DefaultTable.WithHasHeader().WithBoxed(true).WithData(tableData).Render()
-
 	pterm.Println()
 	pterm.DefaultSection.WithStyle(pterm.NewStyle(pterm.FgGray)).Println(grayStyle.Render("Global options:"))
 	pterm.DefaultBulletList.WithItems([]pterm.BulletListItem{
