@@ -6,13 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
-	"github.com/pterm/pterm"
 )
 
 const VERSION = "1.1" // Zaktualizowana wersja po zmianach
+
 const HACKER_DIR = "~/.hackeros/hacker-lang"
+
 const BIN_DIR = HACKER_DIR + "/bin"
 
 const (
@@ -26,13 +25,6 @@ const (
 	colorWhite  = "\033[37m"
 	colorBold   = "\033[1m"
 	colorGray   = "\033[90m"
-)
-
-var (
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	infoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
 )
 
 func expandHome(path string) string {
@@ -56,25 +48,25 @@ func runCommand(file string, verbose bool) bool {
 	}
 	output, err := cmd.Output()
 	if err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error parsing file: %v", err)))
+		fmt.Printf("Error parsing file: %v\n", err)
 		return false
 	}
 	var parsed struct {
-		Deps          []string                  `json:"deps"`
-		Libs          []string                  `json:"libs"`
-		Vars          map[string]string         `json:"vars"`
-		LocalVars     map[string]string         `json:"local_vars"`
-		Cmds          []string                  `json:"cmds"`
-		CmdsWithVars  []string                  `json:"cmds_with_vars"`
-		CmdsSeparate  []string                  `json:"cmds_separate"`
-		Includes      []string                  `json:"includes"`
-		Binaries      []string                  `json:"binaries"`
-		Errors        []string                  `json:"errors"`
-		Config        map[string]string         `json:"config"`
-		Plugins       []map[string]interface{}  `json:"plugins"` // Adjusted for JSON structure
+		Deps         []string                  `json:"deps"`
+		Libs         []string                  `json:"libs"`
+		Vars         map[string]string         `json:"vars"`
+		LocalVars    map[string]string         `json:"local_vars"`
+		Cmds         []string                  `json:"cmds"`
+		CmdsWithVars []string                  `json:"cmds_with_vars"`
+		CmdsSeparate []string                  `json:"cmds_separate"`
+		Includes     []string                  `json:"includes"`
+		Binaries     []string                  `json:"binaries"`
+		Errors       []string                  `json:"errors"`
+		Config       map[string]string         `json:"config"`
+		Plugins      []map[string]interface{}  `json:"plugins"` // Adjusted for JSON structure
 	}
 	if err := json.Unmarshal(output, &parsed); err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error unmarshaling parse output: %v", err)))
+		fmt.Printf("Error unmarshaling parse output: %v\n", err)
 		return false
 	}
 	if len(parsed.Config) == 0 {
@@ -99,21 +91,19 @@ func runCommand(file string, verbose bool) bool {
 		}
 	}
 	if len(parsed.Errors) > 0 {
-		fmt.Println("\n" + errorStyle.Render("Errors:"))
+		fmt.Println("\nErrors:")
 		for _, e := range parsed.Errors {
 			fmt.Println(" " + colorRed + "✖ " + colorReset + e)
 		}
 		fmt.Println()
 		return false
 	}
-	if len(parsed.Libs) > 0 {
-		fmt.Println(warningStyle.Render(fmt.Sprintf("Warning: Missing custom libs: %v", parsed.Libs)))
-		fmt.Println(warningStyle.Render("Please install them using bytes install <lib>"))
-	}
+	// Removed lib warning
+
 	// Main temp script
 	tempSh, err := os.CreateTemp("", "*.sh")
 	if err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating temp file: %v", err)))
+		fmt.Printf("Error creating temp file: %v\n", err)
 		return false
 	}
 	defer os.Remove(tempSh.Name())
@@ -135,7 +125,7 @@ func runCommand(file string, verbose bool) bool {
 		tempSh.WriteString(fmt.Sprintf("# Included from %s\n", inc))
 		libContent, err := os.ReadFile(libPath)
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Error reading include: %v", err)))
+			fmt.Printf("Error reading include: %v\n", err)
 			return false
 		}
 		tempSh.Write(libContent)
@@ -166,7 +156,7 @@ func runCommand(file string, verbose bool) bool {
 	for i, sepCmd := range parsed.CmdsSeparate {
 		sepTemp, err := os.CreateTemp("", fmt.Sprintf("sep_%d_*.sh", i))
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Error creating separate temp file: %v", err)))
+			fmt.Printf("Error creating separate temp file: %v\n", err)
 			return false
 		}
 		defer os.Remove(sepTemp.Name())
@@ -183,11 +173,11 @@ func runCommand(file string, verbose bool) bool {
 		os.Chmod(sepTemp.Name(), 0755)
 		separateTemps = append(separateTemps, sepTemp.Name())
 	}
-	fmt.Println(infoStyle.Render(fmt.Sprintf("Executing script: %s", file)))
-	fmt.Println(infoStyle.Render(fmt.Sprintf("Config: %v", parsed.Config)))
-	fmt.Println(successStyle.Render("Running..."))
-	// Add a progress bar using pterm
-	pb, _ := pterm.DefaultProgressbar.WithTotal(len(separateTemps) + 1).WithTitle("Executing commands").Start()
+	fmt.Printf("Executing script: %s\n", file)
+	fmt.Printf("Config: %v\n", parsed.Config)
+	fmt.Println("Running...")
+	// Removed progress bar
+
 	// Run separate scripts
 	for _, sepPath := range separateTemps {
 		runSep := exec.Command("bash", sepPath)
@@ -199,11 +189,9 @@ func runCommand(file string, verbose bool) bool {
 		runSep.Stderr = os.Stderr
 		err = runSep.Run()
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Separate command execution failed: %v", err)))
-			pb.Stop()
+			fmt.Printf("Separate command execution failed: %v\n", err)
 			return false
 		}
-		pb.Increment()
 	}
 	// Run main script
 	runCmd := exec.Command("bash", tempSh.Name())
@@ -215,13 +203,10 @@ func runCommand(file string, verbose bool) bool {
 	runCmd.Stderr = os.Stderr
 	err = runCmd.Run()
 	if err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Execution failed: %v", err)))
-		pb.Stop()
+		fmt.Printf("Execution failed: %v\n", err)
 		return false
 	}
-	pb.Increment()
-	pb.Stop()
-	fmt.Println(successStyle.Render("Execution completed successfully!"))
+	fmt.Println("Execution completed successfully!")
 	return true
 }
 
@@ -229,7 +214,7 @@ func main() {
 	ensureHackerDir()
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Println(errorStyle.Render("Usage: hacker-runtime <file> [--verbose]"))
+		fmt.Println("Usage: hacker-runtime <file> [--verbose]")
 		os.Exit(1)
 	}
 	verbose := false
