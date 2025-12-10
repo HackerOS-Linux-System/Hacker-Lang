@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tempfile;
 use std::os::unix::fs::PermissionsExt;
-const VERSION: &str = "1.1";
+const VERSION: &str = "1.3";
 const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
 const BIN_DIR: &str = "~/.hackeros/hacker-lang/bin";
 #[derive(Deserialize)]
