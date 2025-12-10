@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,572 +10,631 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/gosuri/uiprogress"
 	"github.com/pterm/pterm"
-	"github.com/urfave/cli/v2"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
-const VERSION = "1.3"
-
-var HACKER_DIR = filepath.Join(os.Getenv("HOME"), ".hackeros/hacker-lang")
-var FRONTEND_BIN_DIR = filepath.Join(HACKER_DIR, "bin/frontend")
-var MIDDLE_END_BIN_DIR = filepath.Join(HACKER_DIR, "bin/middle-end")
-var BIN_DIR = filepath.Join(HACKER_DIR, "bin")
-var CACHE_DIR = "./.cache"
-var LEXER_PATH = filepath.Join(FRONTEND_BIN_DIR, "hacker-lexer")
-var PARSER_PATH = filepath.Join(FRONTEND_BIN_DIR, "hacker-parser")
-var SA_PATH = filepath.Join(MIDDLE_END_BIN_DIR, "hacker-sa")
-var AST_PATH = filepath.Join(MIDDLE_END_BIN_DIR, "hacker-ast")
-var COMPILER_PATH = filepath.Join(BIN_DIR, "hacker-compiler")
-var RUNTIME_PATH = filepath.Join(BIN_DIR, "hacker-runtime")
-var EDITOR_PATH = filepath.Join(BIN_DIR, "hacker-editor")
-var REPL_PATH = filepath.Join(BIN_DIR, "hacker-repl")
+const Version = "1.2"
 
 var (
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	infoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	purpleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
-	grayStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	whiteStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	yellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	cyanStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	HackerDir    = filepath.Join(os.Getenv("HOME"), ".hackeros", "hacker-lang")
+	BinDir       = filepath.Join(HackerDir, "bin")
+	HistoryFile  = filepath.Join(os.Getenv("HOME"), ".hackeros", "history", "hacker_repl_history")
+	ParserPath   = filepath.Join(BinDir, "hacker-plsa")
+	CompilerPath = filepath.Join(BinDir, "hacker-compiler")
+	RuntimePath  = filepath.Join(BinDir, "hacker-runtime")
+	ReplPath     = filepath.Join(BinDir, "hacker-repl")
 )
 
+type Config struct {
+	Name        string
+	Version     string
+	Author      string
+	Description string
+	Entry       string
+	Libs        map[string][]string
+	Scripts     map[string]string
+	Meta        map[string]string
+}
+
 func ensureHackerDir() error {
-	dirs := []string{FRONTEND_BIN_DIR, MIDDLE_END_BIN_DIR, BIN_DIR, filepath.Join(HACKER_DIR, "libs"), filepath.Join(HACKER_DIR, "plugins"), CACHE_DIR}
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return err
-		}
+	if err := os.MkdirAll(BinDir, 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(HackerDir, "libs"), 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(HackerDir, "plugins"), 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(HistoryFile), 0755); err != nil {
+		return err
 	}
 	return nil
 }
 
-func getJsonOutput(binPath string, inputFile *string, args []string, verbose bool) (string, error) {
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		return "", fmt.Errorf(errorStyle.Render("Binary not found: " + binPath))
-	}
-	cmd := exec.Command(binPath, args...)
-	if inputFile != nil {
-		cmd.Args = append(cmd.Args, *inputFile)
-	}
-	var out strings.Builder
-	cmd.Stdout = &out
-	if verbose {
-		cmd.Stderr = os.Stderr
-	} else {
-		cmd.Stderr = io.Discard
-	}
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-	return out.String(), nil
-}
-
-func chainPipeline(file string, stages []string, finalOutput *string, verbose bool, mode string) (bool, string) {
-	uiprogress.Start()
-	bar := uiprogress.AddBar(len(stages)).AppendCompleted().PrependElapsed()
-	bar.Width = 30
-	currentJson := ""
-	tempFiles := []string{}
-	defer func() {
-		for _, tf := range tempFiles {
-			os.Remove(tf)
-		}
-		uiprogress.Stop()
-	}()
-	for _, stage := range stages {
-		bar.Set(bar.Current() + 1)
-		var err error
-		switch stage {
-			case "lexer":
-				currentJson, err = getJsonOutput(LEXER_PATH, &file, []string{}, verbose)
-			case "parser":
-				parserArgs := []string{}
-				if mode == "hli" {
-					parserArgs = append(parserArgs, "--mode", mode)
-				}
-				input := tempFiles[len(tempFiles)-1]
-				currentJson, err = getJsonOutput(PARSER_PATH, &input, parserArgs, verbose)
-			case "sa":
-				input := tempFiles[len(tempFiles)-1]
-				currentJson, err = getJsonOutput(SA_PATH, &input, []string{}, verbose)
-			case "ast":
-				input := tempFiles[len(tempFiles)-1]
-				currentJson, err = getJsonOutput(AST_PATH, &input, []string{}, verbose)
-			case "compiler":
-				compilerArgs := []string{}
-				if finalOutput != nil {
-					compilerArgs = append(compilerArgs, *finalOutput)
-				} else {
-					tempOut := "temp_exec"
-					compilerArgs = append(compilerArgs, tempOut)
-				}
-				if verbose {
-					compilerArgs = append(compilerArgs, "--verbose")
-				}
-				if finalOutput != nil {
-					compilerArgs = append(compilerArgs, "--bytes")
-				}
-				input := tempFiles[len(tempFiles)-1]
-				_, err = getJsonOutput(COMPILER_PATH, &input, compilerArgs, verbose)
-				// Check if output exists
-				outFile := *finalOutput
-				if finalOutput == nil {
-					outFile = "temp_exec"
-				}
-				if _, statErr := os.Stat(outFile); statErr == nil {
-					err = nil
-				}
-		}
-		if err != nil {
-			fmt.Println(errorStyle.Render("Pipeline failed at " + stage))
-			return false, ""
-		}
-		if stage != "compiler" {
-			tempFile, tempErr := os.CreateTemp("", "*.json")
-			if tempErr != nil {
-				return false, ""
-			}
-			tempFile.WriteString(currentJson)
-			tempFile.Close()
-			tempFiles = append(tempFiles, tempFile.Name())
-		}
-	}
-	lastStage := stages[len(stages)-1]
-	if lastStage == "compiler" {
-		return true, ""
-	}
-	return true, currentJson
-}
-
 func displayWelcome() {
-	fmt.Println(purpleStyle.Render("Welcome to Hacker Lang Interface (HLI) v" + VERSION))
-	fmt.Println(grayStyle.Render("Advanced scripting interface for Hacker Lang with full pipeline support."))
-	fmt.Println(whiteStyle.Render("Type 'hli help' for commands or 'hli repl' to start interactive mode."))
+	header := pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgLightMagenta)).WithTextStyle(pterm.NewStyle(pterm.FgBlack, pterm.Bold))
+	header.Println("Welcome to Hacker Lang Interface (HLI) v" + Version)
+	pterm.Println(pterm.Gray("Advanced scripting interface for HackerOS Linux system, inspired by Cargo"))
+	pterm.Println(pterm.White("Type 'hli help' for commands or 'hli repl' to start interactive mode."))
 	helpCommand(false)
 }
 
-func loadProjectEntry() string {
-	bytesFile := "bytes.yaml"
-	if _, err := os.Stat(bytesFile); err == nil {
-		data, err := os.ReadFile(bytesFile)
+func loadProjectConfig() (*Config, error) {
+	if _, err := os.Stat("bytes.yaml"); err == nil {
+		data, err := os.ReadFile("bytes.yaml")
 		if err != nil {
-			return ""
+			return nil, err
 		}
-		var config map[string]interface{}
-		yaml.Unmarshal(data, &config)
-		pkg, ok := config["package"].(map[string]interface{})
-		if !ok {
-			return ""
+		var yamlConfig struct {
+			Package struct {
+				Name    string `yaml:"name"`
+				Version string `yaml:"version"`
+				Author  string `yaml:"author"`
+			} `yaml:"package"`
+			Entry string `yaml:"entry"`
 		}
-		if entry, ok := pkg["entry"].(string); ok {
-			return entry
+		if err := yaml.Unmarshal(data, &yamlConfig); err != nil {
+			return nil, err
 		}
+		return &Config{
+			Name:    yamlConfig.Package.Name,
+			Version: yamlConfig.Package.Version,
+			Author:  yamlConfig.Package.Author,
+			Entry:   yamlConfig.Entry,
+		}, nil
+	} else if _, err := os.Stat("package.hfx"); err == nil {
+		data, err := os.ReadFile("package.hfx")
+		if err != nil {
+			return nil, err
+		}
+		return parseHFX(string(data))
 	}
-	return ""
+	return nil, fmt.Errorf("no project file found (bytes.yaml or package.hfx)")
 }
 
-func runCommand(file string, verbose bool) bool {
-	if !checkDependencies(file, verbose, nil) {
-		return false
+func parseHFX(content string) (*Config, error) {
+	config := &Config{
+		Libs:    make(map[string][]string),
+		Scripts: make(map[string]string),
+		Meta:    make(map[string]string),
 	}
-	stages := []string{"lexer", "parser", "sa", "ast", "compiler"}
-	tempExec := "temp_hli_exec"
-	success, _ := chainPipeline(file, stages, &tempExec, verbose, "hli")
-	if success {
-		cmd := exec.Command(tempExec)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		os.Remove(tempExec)
-		return err == nil
-	}
-	return false
-}
-
-func compileCommand(file string, output string, verbose bool, bytesMode bool) bool {
-	if !checkDependencies(file, verbose, nil) {
-		return false
-	}
-	stages := []string{"lexer", "parser", "sa", "ast", "compiler"}
-	success, _ := chainPipeline(file, stages, &output, verbose, "hli")
-	return success
-}
-
-func checkCommand(file string, verbose bool) bool {
-	if !checkDependencies(file, verbose, nil) {
-		return false
-	}
-	stages := []string{"lexer", "parser", "sa"}
-	success, saJson := chainPipeline(file, stages, nil, verbose, "hli")
-	if success {
-		var parsed map[string]interface{}
-		err := json.Unmarshal([]byte(saJson), &parsed)
-		if err == nil {
-			errors, _ := parsed["errors"].([]interface{})
-			semErrors, _ := parsed["semantic_errors"].([]interface{})
-			allErrors := append(errors, semErrors...)
-			if len(allErrors) == 0 {
-				fmt.Println(successStyle.Render("Validation passed!"))
-				return true
-			} else {
-				fmt.Println(errorStyle.Render("\nErrors:"))
-				for _, e := range allErrors {
-					fmt.Println(" ✖ " + e.(string))
+	var currentSection string
+	var currentLang string
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "//") { // assume comments start with //
+			continue
+		}
+		if strings.HasSuffix(line, "{") || strings.HasSuffix(line, "[") {
+			key := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(line, "{"), "["))
+			switch key {
+			case "package":
+				currentSection = "package"
+			case "-> libs":
+				currentSection = "libs"
+			case "-> scripts":
+				currentSection = "scripts"
+			case "-> meta":
+				currentSection = "meta"
+			}
+			continue
+		}
+		if line == "}" || line == "]" {
+			currentSection = ""
+			currentLang = ""
+			continue
+		}
+		if currentSection == "libs" {
+			if strings.HasPrefix(line, "-> ") && strings.HasSuffix(line, ":") {
+				currentLang = strings.TrimSuffix(strings.TrimPrefix(line, "-> "), ":")
+				config.Libs[currentLang] = []string{}
+				continue
+			} else if strings.HasPrefix(line, "-> ") {
+				lib := strings.TrimPrefix(line, "-> ")
+				if currentLang != "" {
+					config.Libs[currentLang] = append(config.Libs[currentLang], lib)
 				}
-				return false
+				continue
+			}
+		}
+		if (currentSection == "scripts" || currentSection == "meta") && strings.HasPrefix(line, "-> ") {
+			subline := strings.TrimPrefix(line, "-> ")
+			parts := strings.SplitN(subline, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				value = strings.TrimSuffix(value, ",")
+				value = strings.Trim(value, "\"")
+				if currentSection == "scripts" {
+					config.Scripts[key] = value
+				} else if currentSection == "meta" {
+					config.Meta[key] = value
+				}
+			}
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		value = strings.TrimSuffix(value, ",")
+		value = strings.Trim(value, "\"")
+		switch currentSection {
+		case "package":
+			switch key {
+			case "name":
+				config.Name = value
+			case "version":
+				config.Version = value
+			case "author":
+				config.Author = value
+			case "description":
+				config.Description = value
+			}
+		default:
+			if key == "entry" {
+				config.Entry = value
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if config.Entry == "" {
+		return nil, fmt.Errorf("missing entry in package.hfx")
+	}
+	return config, nil
+}
+
+func loadProjectEntry() (string, error) {
+	config, err := loadProjectConfig()
+	if err != nil {
+		return "", err
+	}
+	return config.Entry, nil
+}
+
+func runCommand(file string, verbose bool) bool {
+	if _, err := os.Stat(RuntimePath); os.IsNotExist(err) {
+		pterm.Error.Println("Hacker runtime not found at " + RuntimePath + ". Please install the Hacker Lang tools.")
+		return false
+	}
+	args := []string{file}
+	if verbose {
+		args = append(args, "--verbose")
+	}
+	cmd := exec.Command(RuntimePath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	return err == nil
+}
+
+func compileCommand(file string, output string, verbose bool, bytesMode bool) bool {
+	if _, err := os.Stat(CompilerPath); os.IsNotExist(err) {
+		pterm.Error.Println("Hacker compiler not found at " + CompilerPath + ". Please install the Hacker Lang tools.")
+		return false
+	}
+	args := []string{file, output}
+	if bytesMode {
+		args = append(args, "--bytes")
+	}
+	if verbose {
+		args = append(args, "--verbose")
+	}
+	cmd := exec.Command(CompilerPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	return err == nil
+}
+
+func checkCommand(file string, verbose bool) bool {
+	if _, err := os.Stat(ParserPath); os.IsNotExist(err) {
+		pterm.Error.Println("Hacker parser not found at " + ParserPath + ". Please install the Hacker Lang tools.")
+		return false
+	}
+	args := []string{file}
+	if verbose {
+		args = append(args, "--verbose")
+	}
+	cmd := exec.Command(ParserPath, args...)
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err := cmd.Run()
+	if err != nil {
+		pterm.Error.Println("Error parsing file: " + errOut.String())
+		return false
+	}
+	var parsed struct {
+		Errors []string `json:"errors"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		pterm.Error.Println("Error unmarshaling parse output: " + err.Error())
+		return false
+	}
+	if len(parsed.Errors) == 0 {
+		pterm.Success.Println("Syntax validation passed!")
+		return true
+	}
+	pterm.Error.Println("Errors:")
+	for _, e := range parsed.Errors {
+		pterm.Println(pterm.Red("✖ ") + e)
+	}
 	return false
 }
 
-func initCommand(file *string, verbose bool) bool {
-	targetFile := "main.hacker"
-	if file != nil {
-		targetFile = *file
+func initCommand(file string, verbose bool) bool {
+	targetFile := file
+	if targetFile == "" {
+		targetFile = "main.hacker"
 	}
 	if _, err := os.Stat(targetFile); err == nil {
-		fmt.Println(errorStyle.Render("File " + targetFile + " already exists!"))
+		pterm.Error.Println("File " + targetFile + " already exists!")
 		return false
 	}
-	template := `! Updated Hacker Lang template with new syntax support
-	// sudo apt
-	# network-utils
-	#> python:requests ! Foreign Python lib example
-	@APP_NAME=HackerApp
-	@LOG_LEVEL=debug
-	$ITER=1 ! Local var
-	=3 > echo "Iteration: $ITER - $APP_NAME" ! Loop with vars
-	? [ -f /etc/os-release ] > cat /etc/os-release | grep PRETTY_NAME ! Conditional
-	& ping -c 1 google.com ! Background
-	: my_func
-	> echo "In function"
-	:
-	. my_func ! Call function
-	# logging
-	> echo "Starting..."
-	>>> sudo apt update && sudo apt upgrade -y ! Separate
-	\\ plugin-tool ! Plugin
-	[
-	Author=Advanced User
-	Version=1.0
-	]
-	`
-	os.WriteFile(targetFile, []byte(template), 0644)
-	fmt.Println(successStyle.Render("Initialized template at " + targetFile))
+	template := `! Hacker Lang advanced template 
+// sudo ! Privileged operations 
+// curl ! For downloads
+# network-utils ! Custom library example
+@APP_NAME=HackerApp ! Application name 
+@LOG_LEVEL=debug 
+=3 > echo "Iteration: $APP_NAME" ! Loop example 
+? [ -f /etc/os-release ] > cat /etc/os-release | grep PRETTY_NAME ! Conditional 
+& ping -c 1 google.com ! Background task
+# logging ! Include logging library
+
+echo "Starting update..." 
+sudo apt update && sudo apt upgrade -y ! System update
+
+echo "With var: $APP_NAME"
+
+long_running_command_with_vars 
+[ 
+Author=Advanced User 
+Version=1.0 
+Description=System maintenance script 
+]`
+	if err := os.WriteFile(targetFile, []byte(template), 0644); err != nil {
+		pterm.Error.Println("Failed to write template: " + err.Error())
+		return false
+	}
+	pterm.Success.Println("Initialized template at " + targetFile)
 	if verbose {
-		fmt.Println(yellowStyle.Render("\nTemplate content:"))
-		fmt.Println(template)
+		pterm.Warning.Println("Template content:")
+		pterm.Println(pterm.Yellow(template))
 	}
+	// Create project file if not exists
 	bytesFile := "bytes.yaml"
-	if _, err := os.Stat(bytesFile); os.IsNotExist(err) {
-		bytesTemplate := `package:
-		name: my-hacker-project
-		version: 0.1.0
-		author: User
-		entry: ` + targetFile + `
-		dependencies:
-		- network-utils
-		- logging
-		- python:requests
-		`
-		os.WriteFile(bytesFile, []byte(bytesTemplate), 0644)
-		fmt.Println(successStyle.Render("Initialized bytes.yaml for project"))
+	hfxFile := "package.hfx"
+	_, errBytes := os.Stat(bytesFile)
+	_, errHfx := os.Stat(hfxFile)
+	if os.IsNotExist(errBytes) && os.IsNotExist(errHfx) {
+		// Prefer creating package.hfx as per new instruction
+		hfxTemplate := fmt.Sprintf(`package {
+name: "my-hacker-project",
+version: "0.1.0",
+author: "User",
+description: "My Hacker project"
+}
+entry: "%s"
+-> libs [
+-> python:
+-> library1
+-> rust:
+-> library2
+]
+-> scripts {
+-> build: "hackerc compile %s"
+-> run: "hacker run ."
+-> release: "hacker compile --bytes"
+}
+-> meta {
+-> license: "MIT"
+-> repo: "https://github.com/user/repo"
+}`, targetFile, targetFile)
+		if err := os.WriteFile(hfxFile, []byte(hfxTemplate), 0644); err != nil {
+			pterm.Error.Println("Failed to write package.hfx: " + err.Error())
+			return false
+		}
+		pterm.Success.Println("Initialized package.hfx for project")
+	} else if os.IsNotExist(errBytes) {
+		// If hfx exists, no need
+	} else {
+		// Update entry if needed, but skip for simplicity
 	}
-	os.MkdirAll(CACHE_DIR, 0755)
 	return true
 }
 
 func cleanCommand(verbose bool) bool {
 	count := 0
-	files, _ := os.ReadDir("/tmp")
-	for _, f := range files {
-		if strings.HasPrefix(f.Name(), "hacker_") || strings.HasPrefix(f.Name(), "temp_hli_exec") {
-			path := filepath.Join("/tmp", f.Name())
+	files, _ := filepath.Glob("/tmp/*.sh")
+	for _, path := range files {
+		base := filepath.Base(path)
+		if strings.HasPrefix(base, "tmp") || strings.HasPrefix(base, "sep_") {
 			if verbose {
-				fmt.Println(yellowStyle.Render("Removed: " + path))
+				pterm.Warning.Println("Removed: " + path)
 			}
 			os.Remove(path)
 			count++
 		}
 	}
-	if _, err := os.Stat(CACHE_DIR); err == nil {
-		empty := true
-		files, _ := os.ReadDir(CACHE_DIR)
-		if len(files) > 0 {
-			empty = false
-		}
-		if empty {
-			os.RemoveAll(CACHE_DIR)
-			if verbose {
-				fmt.Println(yellowStyle.Render("Cleaned empty cache: " + CACHE_DIR))
-			}
-		}
-	}
-	fmt.Println(successStyle.Render(fmt.Sprintf("Removed %d temporary files", count)))
+	pterm.Success.Println(fmt.Sprintf("Removed %d temporary files", count))
 	return true
 }
 
 func unpackBytes(verbose bool) bool {
-	bytesPath1 := filepath.Join(HACKER_DIR, "bin/bytes")
+	bytesPath1 := filepath.Join(HackerDir, "bin/bytes")
 	bytesPath2 := "/usr/bin/bytes"
 	if _, err := os.Stat(bytesPath1); err == nil {
-		fmt.Println(successStyle.Render("Bytes already installed at " + bytesPath1 + "."))
+		pterm.Success.Println("Bytes already installed at " + bytesPath1 + ".")
 		return true
 	}
 	if _, err := os.Stat(bytesPath2); err == nil {
-		fmt.Println(successStyle.Render("Bytes already installed at " + bytesPath2 + "."))
+		pterm.Success.Println("Bytes already installed at " + bytesPath2 + ".")
 		return true
 	}
-	os.MkdirAll(BIN_DIR, 0755)
+	if err := os.MkdirAll(BinDir, 0755); err != nil {
+		pterm.Error.Println("Failed to create bin dir: " + err.Error())
+		return false
+	}
 	url := "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.3/bytes"
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println(errorStyle.Render("Failed to download bytes: " + err.Error()))
+		pterm.Error.Println("Failed to download: " + err.Error())
 		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("Error: status code %d", resp.StatusCode)))
+		pterm.Error.Println(fmt.Sprintf("Error: status code %d", resp.StatusCode))
 		return false
 	}
 	f, err := os.Create(bytesPath1)
 	if err != nil {
+		pterm.Error.Println("Failed to create file: " + err.Error())
 		return false
 	}
 	defer f.Close()
-	io.Copy(f, resp.Body)
-	os.Chmod(bytesPath1, 0755)
-	if verbose {
-		fmt.Println(successStyle.Render("Downloaded and installed bytes from " + url + " to " + bytesPath1))
+	_, err = io.Copy(f, resp.Body)
+	if err != nil {
+		pterm.Error.Println("Failed to copy: " + err.Error())
+		return false
 	}
-	fmt.Println(successStyle.Render("Bytes installed successfully!"))
+	if err := os.Chmod(bytesPath1, 0755); err != nil {
+		pterm.Error.Println("Failed to chmod: " + err.Error())
+		return false
+	}
+	if verbose {
+		pterm.Success.Println("Downloaded and installed bytes from " + url + " to " + bytesPath1)
+	}
+	pterm.Success.Println("Bytes installed successfully!")
 	return true
 }
 
-func editorCommand(file *string) bool {
-	if _, err := os.Stat(EDITOR_PATH); os.IsNotExist(err) {
-		fmt.Println(errorStyle.Render("Hacker editor not found at " + EDITOR_PATH + ". Please install the Hacker Lang tools."))
-		return false
-	}
-	args := []string{}
-	if file != nil {
-		args = append(args, *file)
-	}
-	fmt.Println(cyanStyle.Render("Launching editor: " + EDITOR_PATH + " " + strings.Join(args, " ")))
-	cmd := exec.Command(EDITOR_PATH, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err == nil {
-		fmt.Println(successStyle.Render("Editor session completed."))
-		return true
-	} else {
-		fmt.Println(errorStyle.Render("Editor failed."))
-		return false
-	}
-}
-
 func runRepl(verbose bool) bool {
-	if _, err := os.Stat(REPL_PATH); os.IsNotExist(err) {
-		fmt.Println(errorStyle.Render("Hacker REPL not found at " + REPL_PATH + ". Please install the Hacker Lang tools."))
+	if _, err := os.Stat(ReplPath); os.IsNotExist(err) {
+		pterm.Error.Println("Hacker REPL not found at " + ReplPath + ". Please install the Hacker Lang tools.")
 		return false
 	}
 	args := []string{}
 	if verbose {
 		args = append(args, "--verbose")
 	}
-	cmd := exec.Command(REPL_PATH, args...)
-	cmd.Stdin = os.Stdin
+	cmd := exec.Command(ReplPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
 	err := cmd.Run()
 	if err == nil {
-		fmt.Println(successStyle.Render("REPL session ended."))
+		pterm.Success.Println("REPL session ended.")
 		return true
-	} else {
-		fmt.Println(errorStyle.Render("REPL failed."))
-		return false
 	}
+	pterm.Error.Println("REPL failed.")
+	return false
 }
 
 func versionCommand() bool {
-	fmt.Println(cyanStyle.Render("Hacker Lang Interface (HLI) v" + VERSION))
+	pterm.Println(pterm.Cyan("Hacker Lang Interface (HLI) v" + Version))
 	return true
 }
 
 func syntaxCommand() bool {
-	fmt.Println(purpleStyle.Render("Hacker Lang Syntax Example:\n"))
+	pterm.DefaultHeader.Println("Hacker Lang Syntax Example:")
 	exampleCode := `// sudo
-	# obsidian
-	#> rust:serde ! Foreign Rust lib
-	@USER=admin
-	$ITER=0
-	=2 > echo $USER - $ITER
-	? [ -d /tmp ] > echo OK
-	& sleep 10
-	>> echo "With var: $USER"
-	>>> separate_command
-	: myfunc
-	> echo in func
-	:
-	. myfunc
-	# logging
-	> sudo apt update
-	[
-	Config=Example
-	]`
-	fmt.Println(whiteStyle.Render(exampleCode))
+
+# obsidian
+@USER=admin 
+=2 > echo $USER 
+? [ -d /tmp ] > echo OK 
+& sleep 10
+
+echo "With var: $USER"
+
+separate_command
+
+# logging
+
+sudo apt update 
+[ Config=Example ]`
+	pterm.Println(pterm.White(exampleCode))
 	return true
 }
 
 func docsCommand() bool {
-	fmt.Println(purpleStyle.Render("Hacker Lang Documentation:\n"))
-	fmt.Println("Hacker Lang is an advanced scripting language for HackerOS.")
-	fmt.Println("Key features:")
-	fmt.Println("- Privileged operations with // sudo")
-	fmt.Println("- Library includes with # lib-name or #> foreign-lang:lib")
-	fmt.Println("- Variables with @VAR=value (global), $var=value (local)")
-	fmt.Println("- Loops with =N > command")
-	fmt.Println("- Conditionals with ? condition > command")
-	fmt.Println("- Background tasks with & command")
-	fmt.Println("- Multi-line commands with >> and >>>")
-	fmt.Println("- Functions with : name ... : and calls .name")
-	fmt.Println("- Metadata blocks with [ key=value ]")
-	fmt.Println("- Foreign libs cached in .cache for hli")
-	fmt.Println("\nFor more details, visit the official documentation or use 'hli tutorials' for examples.")
+	pterm.DefaultHeader.Println("Hacker Lang Documentation:")
+	pterm.Println("Hacker Lang is an advanced scripting language for HackerOS.")
+	pterm.Println("Key features:")
+	bulletList := pterm.BulletListPrinter{}
+	bulletList.Items = []pterm.BulletListItem{
+		{Level: 0, Text: "Privileged operations with // sudo"},
+		{Level: 0, Text: "Library includes with # lib-name"},
+		{Level: 0, Text: "Variables with @VAR=value"},
+		{Level: 0, Text: "Loops with =N > command"},
+		{Level: 0, Text: "Conditionals with ? condition > command"},
+		{Level: 0, Text: "Background tasks with & command"},
+		{Level: 0, Text: "Multi-line commands with >> and >>>"},
+		{Level: 0, Text: "Metadata blocks with [ key=value ]"},
+	}
+	bulletList.Render()
+	pterm.Println("\nFor more details, visit the official documentation or use 'hli tutorials' for examples.")
 	return true
 }
 
 func tutorialsCommand() bool {
-	fmt.Println(purpleStyle.Render("Hacker Lang Tutorials:\n"))
-	fmt.Println("Tutorial 1: Basic Script")
-	fmt.Println("Create main.hacker with > echo 'Hello'")
-	fmt.Println("Run with: hli run")
-	fmt.Println("\nTutorial 2: Pipeline")
-	fmt.Println("hli check main.hacker # Validates lexer->parser->sa")
-	fmt.Println("hli compile main.hacker -o exec # Full to binary")
-	fmt.Println("\nTutorial 3: Foreign Libs")
-	fmt.Println("Use #> python:requests in script; cached in .cache")
-	fmt.Println("hli run # Handles automatically")
+	pterm.DefaultHeader.Println("Hacker Lang Tutorials:")
+	pterm.Println("Tutorial 1: Basic Script")
+	pterm.Println("Create a file main.hacker with:")
+	pterm.Println("> echo 'Hello, Hacker Lang!'")
+	pterm.Println("Run with: hli run")
+	pterm.Println("\nTutorial 2: Using Libraries")
+	pterm.Println("Add # logging to your script.")
+	pterm.Println("HLI will automatically install if missing.")
+	pterm.Println("\nTutorial 3: Projects")
+	pterm.Println("Use 'hli init' to create a project with bytes.yaml.")
+	pterm.Println("Then 'hli run' to execute.")
 	return true
 }
 
 func helpCommand(showBanner bool) bool {
 	if showBanner {
-		fmt.Println(purpleStyle.Render("Hacker Lang Interface (HLI) - Pipeline-Enabled v" + VERSION + "\n"))
+		header := pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgLightMagenta)).WithTextStyle(pterm.NewStyle(pterm.FgBlack, pterm.Bold))
+		header.Println("Hacker Lang Interface (HLI) - Advanced Scripting Tool v" + Version)
 	}
-	fmt.Println(purpleStyle.Render("Commands Overview:"))
-	table := pterm.TableData{{"Command", "Description", "Arguments"}}
-	table = append(table, []string{"run", "Execute via full pipeline (lexer->...->exec)", "[file] [--verbose]"})
-	table = append(table, []string{"compile", "Compile via pipeline to binary", "[file] [-o output] [--verbose] [--bytes]"})
-	table = append(table, []string{"check", "Check via pipeline up to SA", "[file] [--verbose]"})
-	table = append(table, []string{"init", "Initialize a new project", "[--file <file>] [--verbose]"})
-	table = append(table, []string{"clean", "Clean temporary files", "[--verbose]"})
-	table = append(table, []string{"editor", "Launch hacker editor", "[file]"})
-	table = append(table, []string{"repl", "Launch hacker REPL", "[--verbose]"})
-	table = append(table, []string{"version", "Show version", ""})
-	table = append(table, []string{"syntax", "Show syntax example", ""})
-	table = append(table, []string{"docs", "Show documentation", ""})
-	table = append(table, []string{"tutorials", "Show tutorials", ""})
-	table = append(table, []string{"project-run", "Run bytes project", "[--verbose]"})
-	pterm.DefaultTable.WithHasHeader().WithData(table).Render()
+	pterm.DefaultSection.Println("Commands Overview:")
+	tableData := [][]string{
+		{"Command", "Description", "Arguments"},
+		{"run", "Execute a .hacker script or project", "[file] [--verbose]"},
+		{"compile", "Compile to native executable or project", "[file] [-o output] [--verbose] [--bytes]"},
+		{"check", "Validate syntax", "[file] [--verbose]"},
+		{"init", "Generate template script/project", "[file] [--verbose]"},
+		{"clean", "Remove temporary files", "[--verbose]"},
+		{"repl", "Launch interactive REPL", "[--verbose]"},
+		{"unpack", "Unpack and install bytes", "bytes [--verbose]"},
+		{"docs", "Show documentation", ""},
+		{"tutorials", "Show tutorials", ""},
+		{"version", "Display version", ""},
+		{"help", "Show this help menu", ""},
+		{"syntax", "Show syntax examples", ""},
+		{"help-ui", "Show special commands list", ""},
+	}
+	pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
 	return true
 }
 
 func runHelpUi() bool {
-	fmt.Println(purpleStyle.Render("Hacker Lang Commands List"))
-	table := pterm.TableData{}
-	table = append(table, []string{"run: Execute via pipeline - hli run [file] [--verbose]"})
-	// Add all
-	pterm.DefaultTable.WithData(table).Render()
+	pterm.DefaultHeader.WithBackgroundStyle(pterm.NewStyle(pterm.BgLightMagenta)).Println("Hacker Lang Commands List")
+	bulletList := pterm.BulletListPrinter{}
+	bulletList.Items = []pterm.BulletListItem{
+		{Level: 0, Text: "run: Execute script/project - Usage: hli run [file] [--verbose]"},
+		{Level: 0, Text: "compile: Compile to executable/project - Usage: hli compile [file] [-o output] [--verbose] [--bytes]"},
+		{Level: 0, Text: "check: Validate syntax - Usage: hli check [file] [--verbose]"},
+		{Level: 0, Text: "init: Generate template - Usage: hli init [file] [--verbose]"},
+		{Level: 0, Text: "clean: Remove temps - Usage: hli clean [--verbose]"},
+		{Level: 0, Text: "repl: Interactive REPL - Usage: hli repl [--verbose]"},
+		{Level: 0, Text: "unpack: Unpack and install bytes - Usage: hli unpack bytes [--verbose]"},
+		{Level: 0, Text: "docs: Show documentation - Usage: hli docs"},
+		{Level: 0, Text: "tutorials: Show tutorials - Usage: hli tutorials"},
+		{Level: 0, Text: "version: Show version - Usage: hli version"},
+		{Level: 0, Text: "help: Show help - Usage: hli help"},
+		{Level: 0, Text: "syntax: Show syntax examples - Usage: hli syntax"},
+		{Level: 0, Text: "help-ui: Interactive help UI - This UI"},
+	}
+	bulletList.Render()
 	return true
 }
 
-func runBytesProject(verbose bool) bool {
-	bytesFile := "bytes.yaml"
-	if _, err := os.Stat(bytesFile); os.IsNotExist(err) {
-		fmt.Println(errorStyle.Render("Error: " + bytesFile + " not found. Use 'hli init' to create a project."))
-		return false
-	}
-	data, err := os.ReadFile(bytesFile)
+func runProject(verbose bool) bool {
+	config, err := loadProjectConfig()
 	if err != nil {
+		pterm.Error.Println(err.Error() + ". Use 'hli init' to create a project.")
 		return false
 	}
-	var config map[string]interface{}
-	yaml.Unmarshal(data, &config)
-	packageInfo := config["package"].(map[string]interface{})
-	name := packageInfo["name"].(string)
-	version := packageInfo["version"].(string)
-	author := packageInfo["author"].(string)
-	entry := packageInfo["entry"].(string)
-	fmt.Println(successStyle.Render(fmt.Sprintf("Running project %s v%s by %s", name, version, author)))
-	// deps := config["dependencies"].([]interface{})
-	checkDependencies(entry, verbose, nil) // Pass deps if needed
-	return runCommand(entry, verbose)
+	pterm.Success.Println(fmt.Sprintf("Running project %s v%s by %s", config.Name, config.Version, config.Author))
+	checkDependencies(config.Entry, verbose)
+	return runCommand(config.Entry, verbose)
 }
 
-// Similarly for compileBytesProject, checkBytesProject
+func compileProject(output string, verbose bool, bytesMode bool) bool {
+	config, err := loadProjectConfig()
+	if err != nil {
+		pterm.Error.Println(err.Error() + ". Use 'hli init' to create a project.")
+		return false
+	}
+	if output == "" {
+		output = config.Name
+	}
+	pterm.Println(pterm.Cyan(fmt.Sprintf("Compiling project %s to %s with --bytes", config.Name, output)))
+	checkDependencies(config.Entry, verbose)
+	return compileCommand(config.Entry, output, verbose, bytesMode)
+}
 
-func checkDependencies(file string, verbose bool, depsYaml []interface{}) bool {
+func checkProject(verbose bool) bool {
+	config, err := loadProjectConfig()
+	if err != nil {
+		pterm.Error.Println(err.Error() + ". Use 'hli init' to create a project.")
+		return false
+	}
+	checkDependencies(config.Entry, verbose)
+	return checkCommand(config.Entry, verbose)
+}
+
+func checkDependencies(file string, verbose bool) bool {
 	if _, err := os.Stat(file); os.IsNotExist(err) {
-		fmt.Println(errorStyle.Render("File " + file + " not found for dependency check."))
+		pterm.Error.Println("File " + file + " not found for dependency check.")
 		return false
 	}
 	content, err := os.ReadFile(file)
 	if err != nil {
+		pterm.Error.Println("Failed to read file: " + err.Error())
 		return false
 	}
-	lines := strings.Split(string(content), "\n")
-	libsDir := filepath.Join(HACKER_DIR, "libs")
-	pluginsDir := filepath.Join(HACKER_DIR, "plugins")
+	libsDir := filepath.Join(HackerDir, "libs")
+	pluginsDir := filepath.Join(HackerDir, "plugins")
 	missingLibs := []string{}
 	missingPlugins := []string{}
+	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
 		stripped := strings.TrimSpace(line)
+		if stripped == "" {
+			continue
+		}
 		if strings.HasPrefix(stripped, "//") {
-			// Deps
-		} else if strings.HasPrefix(stripped, "#") || strings.HasPrefix(stripped, "#>") {
-			libName := strings.TrimSpace(stripped[1:])
-			if strings.HasPrefix(stripped, "#>") {
-				libName = strings.TrimSpace(stripped[2:])
-			}
-			if libName != "" {
-				libMatches, _ := filepath.Glob(filepath.Join(libsDir, libName+"*"))
-				cacheMatches, _ := filepath.Glob(filepath.Join(CACHE_DIR, libName+"*"))
-				if len(libMatches) == 0 && len(cacheMatches) == 0 {
-					missingLibs = append(missingLibs, libName)
-				}
-			}
-		} else if strings.HasPrefix(stripped, "\\") {
-			pluginName := strings.TrimSpace(stripped[1:])
+			pluginName := strings.TrimSpace(stripped[2:])
+			pluginName = regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(strings.Split(pluginName, " ")[0], "")
 			if pluginName != "" {
-				pluginMatches, _ := filepath.Glob(filepath.Join(pluginsDir, pluginName+"*"))
-				if len(pluginMatches) == 0 {
+				matches, _ := filepath.Glob(filepath.Join(pluginsDir, pluginName+"*"))
+				if len(matches) == 0 && !contains(missingPlugins, pluginName) {
 					missingPlugins = append(missingPlugins, pluginName)
 				}
 			}
+		} else if strings.HasPrefix(stripped, "#") {
+			libName := strings.TrimSpace(stripped[1:])
+			libName = regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(strings.Split(libName, " ")[0], "")
+			if libName != "" {
+				matches, _ := filepath.Glob(filepath.Join(libsDir, libName+"*"))
+				if len(matches) == 0 && !contains(missingLibs, libName) {
+					missingLibs = append(missingLibs, libName)
+				}
+			}
 		}
-	}
-	// From depsYaml if provided
-	if len(missingPlugins) > 0 || len(missingLibs) > 0 {
-		unpackBytes(verbose)
 	}
 	if len(missingPlugins) > 0 {
 		if verbose {
-			fmt.Println(warningStyle.Render("Missing plugins: " + strings.Join(missingPlugins, ", ")))
+			pterm.Warning.Println("Missing plugins: " + strings.Join(missingPlugins, ", "))
 		}
 		for _, p := range missingPlugins {
-			fmt.Println(yellowStyle.Render("Installing plugin " + p + " via bytes..."))
+			pterm.Warning.Println("Installing plugin " + p + " via bytes...")
 			cmd := exec.Command("bytes", "plugin", "install", p)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -584,225 +645,406 @@ func checkDependencies(file string, verbose bool, depsYaml []interface{}) bool {
 	}
 	if len(missingLibs) > 0 {
 		if verbose {
-			fmt.Println(warningStyle.Render("Missing libs: " + strings.Join(missingLibs, ", ")))
+			pterm.Warning.Println("Missing libs: " + strings.Join(missingLibs, ", "))
 		}
 		for _, l := range missingLibs {
-			fmt.Println(yellowStyle.Render("Installing lib " + l + " via bytes or cache..."))
-			if strings.Contains(l, ":") {
-				// Foreign
-				libDir := filepath.Join(CACHE_DIR, l)
-				if _, err := os.Stat(libDir); os.IsNotExist(err) {
-					os.MkdirAll(libDir, 0755)
-					// Download - simulate
-					fmt.Println("Cached foreign lib " + l)
-				}
-			} else {
-				cmd := exec.Command("bytes", "install", l)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
-					return false
-				}
+			pterm.Warning.Println("Installing lib " + l + " via bytes...")
+			cmd := exec.Command("bytes", "install", l)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return false
 			}
 		}
 	}
 	return true
 }
 
-// Main
-func main() {
-	app := &cli.App{
-		Name:  "hli",
-		Usage: "Hacker Lang Interface",
-		Action: func(c *cli.Context) error {
-			displayWelcome()
-			return nil
-		},
-		Commands: []*cli.Command{
-			{
-				Name:  "run",
-				Usage: "Execute via full pipeline",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "verbose"},
-				},
-				Action: func(c *cli.Context) error {
-					file := c.Args().First()
-					verbose := c.Bool("verbose")
-					if file == "" {
-						file = loadProjectEntry()
-					}
-					if file == "" {
-						fmt.Println(errorStyle.Render("No file or project."))
-						return cli.Exit("", 1)
-					}
-					success := runCommand(file, verbose)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:  "compile",
-				Usage: "Compile via pipeline to binary",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "o", Usage: "output file"},
-					&cli.BoolFlag{Name: "verbose"},
-					&cli.BoolFlag{Name: "bytes"},
-				},
-				Action: func(c *cli.Context) error {
-					file := c.Args().First()
-					output := c.String("o")
-					verbose := c.Bool("verbose")
-					bytesMode := c.Bool("bytes")
-					if file == "" {
-						file = loadProjectEntry()
-					}
-					if file == "" {
-						fmt.Println(errorStyle.Render("No file or project."))
-						return cli.Exit("", 1)
-					}
-					success := compileCommand(file, output, verbose, bytesMode)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:  "check",
-				Usage: "Check via pipeline up to SA",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "verbose"},
-				},
-				Action: func(c *cli.Context) error {
-					file := c.Args().First()
-					verbose := c.Bool("verbose")
-					if file == "" {
-						file = loadProjectEntry()
-					}
-					if file == "" {
-						fmt.Println(errorStyle.Render("No file or project."))
-						return cli.Exit("", 1)
-					}
-					success := checkCommand(file, verbose)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:  "init",
-				Usage: "Initialize a new project",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "file"},
-					&cli.BoolFlag{Name: "verbose"},
-				},
-				Action: func(c *cli.Context) error {
-					var filePtr *string
-					file := c.String("file")
-					if file != "" {
-						filePtr = &file
-					}
-					verbose := c.Bool("verbose")
-					success := initCommand(filePtr, verbose)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:  "clean",
-				Usage: "Clean temporary files",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "verbose"},
-				},
-				Action: func(c *cli.Context) error {
-					verbose := c.Bool("verbose")
-					success := cleanCommand(verbose)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:  "editor",
-				Usage: "Launch hacker editor",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "file"},
-				},
-				Action: func(c *cli.Context) error {
-					var filePtr *string
-					file := c.Args().First()
-					if file != "" {
-						filePtr = &file
-					}
-					success := editorCommand(filePtr)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:  "repl",
-				Usage: "Launch hacker REPL",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "verbose"},
-				},
-				Action: func(c *cli.Context) error {
-					verbose := c.Bool("verbose")
-					success := runRepl(verbose)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-			{
-				Name:   "version",
-				Usage:  "Show version",
-				Action: func(c *cli.Context) error { versionCommand(); return nil },
-			},
-			{
-				Name:   "syntax",
-				Usage:  "Show syntax example",
-				Action: func(c *cli.Context) error { syntaxCommand(); return nil },
-			},
-			{
-				Name:   "docs",
-				Usage:  "Show documentation",
-				Action: func(c *cli.Context) error { docsCommand(); return nil },
-			},
-			{
-				Name:   "tutorials",
-				Usage:  "Show tutorials",
-				Action: func(c *cli.Context) error { tutorialsCommand(); return nil },
-			},
-			{
-				Name:   "help",
-				Usage:  "Show help",
-				Action: func(c *cli.Context) error { helpCommand(true); return nil },
-			},
-			{
-				Name:  "project-run",
-				Usage: "Run bytes project",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "verbose"},
-				},
-				Action: func(c *cli.Context) error {
-					verbose := c.Bool("verbose")
-					success := runBytesProject(verbose)
-					if success {
-						return nil
-					}
-					return cli.Exit("", 1)
-				},
-			},
-		},
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
 	}
-	app.Run(os.Args)
+	return false
+}
+
+type TaskConfig struct {
+	Vars map[string]interface{} `yaml:"vars"`
+	Tasks map[string]struct {
+		Requires []string `yaml:"requires"`
+		Run []string `yaml:"run"`
+	} `yaml:"tasks"`
+	Aliases map[string]string `yaml:"aliases"`
+}
+
+func executeTask(taskName string, config *TaskConfig, executed map[string]struct{}) error {
+	if _, ok := executed[taskName]; ok {
+		return fmt.Errorf("cycle detected in tasks involving %s", taskName)
+	}
+	executed[taskName] = struct{}{}
+	task, ok := config.Tasks[taskName]
+	if !ok {
+		return fmt.Errorf("task %s not found", taskName)
+	}
+	for _, req := range task.Requires {
+		if err := executeTask(req, config, executed); err != nil {
+			return err
+		}
+	}
+	for _, cmdStr := range task.Run {
+		// Substitute vars
+		for varName, varValue := range config.Vars {
+			cmdStr = strings.ReplaceAll(cmdStr, "{{"+varName+"}}", fmt.Sprint(varValue))
+		}
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("command failed: %s", cmdStr)
+		}
+	}
+	return nil
+}
+
+var rootCmd = &cobra.Command{
+	Use:   "hli",
+	Short: "Hacker Lang Interface (HLI) - Advanced Scripting Tool",
+	Run: func(cmd *cobra.Command, args []string) {
+		displayWelcome()
+	},
+}
+
+func init() {
+	if err := ensureHackerDir(); err != nil {
+		pterm.Fatal.Println("Failed to ensure hacker dir: " + err.Error())
+	}
+	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(compileCmd)
+	rootCmd.AddCommand(checkCmd)
+	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(cleanCmd)
+	rootCmd.AddCommand(replCmd)
+	rootCmd.AddCommand(unpackCmd)
+	rootCmd.AddCommand(docsCmd)
+	rootCmd.AddCommand(tutorialsCmd)
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(helpCmd)
+	rootCmd.AddCommand(syntaxCmd)
+	rootCmd.AddCommand(helpUiCmd)
+}
+
+var runCmd = &cobra.Command{
+	Use:   "run [file]",
+	Short: "Execute a .hacker script or project",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		var file string
+		if len(args) > 0 {
+			file = args[0]
+		}
+		var success bool
+		if file == "" {
+			entry, err := loadProjectEntry()
+			if err != nil {
+				pterm.Error.Println("No project found. Use 'hli init' or specify a file.")
+				success = false
+			} else {
+				checkDependencies(entry, verbose)
+				success = runCommand(entry, verbose)
+			}
+		} else if file == "." {
+			success = runProject(verbose)
+		} else {
+			checkDependencies(file, verbose)
+			success = runCommand(file, verbose)
+		}
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	runCmd.Flags().BoolP("verbose", "", false, "Enable verbose output")
+}
+
+var compileCmd = &cobra.Command{
+	Use:   "compile [file]",
+	Short: "Compile to native executable or project",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		output, _ := cmd.Flags().GetString("output")
+		bytesMode, _ := cmd.Flags().GetBool("bytes")
+		var file string
+		if len(args) > 0 {
+			file = args[0]
+		}
+		var success bool
+		if file == "" {
+			entry, err := loadProjectEntry()
+			if err != nil {
+				pterm.Error.Println("No project found. Use 'hli init' or specify a file.")
+				success = false
+			} else {
+				if output == "" {
+					output = strings.TrimSuffix(entry, filepath.Ext(entry))
+				}
+				checkDependencies(entry, verbose)
+				success = compileCommand(entry, output, verbose, bytesMode)
+			}
+		} else if file == "." {
+			success = compileProject(output, verbose, bytesMode)
+		} else {
+			if output == "" {
+				output = strings.TrimSuffix(file, filepath.Ext(file))
+			}
+			checkDependencies(file, verbose)
+			success = compileCommand(file, output, verbose, bytesMode)
+		}
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	compileCmd.Flags().StringP("output", "o", "", "Specify output file")
+	compileCmd.Flags().Bool("bytes", false, "Enable bytes mode")
+	compileCmd.Flags().BoolP("verbose", "", false, "Enable verbose output")
+}
+
+var checkCmd = &cobra.Command{
+	Use:   "check [file]",
+	Short: "Validate syntax",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		var file string
+		if len(args) > 0 {
+			file = args[0]
+		}
+		var success bool
+		if file == "" {
+			entry, err := loadProjectEntry()
+			if err != nil {
+				pterm.Error.Println("No project found. Use 'hli init' or specify a file.")
+				success = false
+			} else {
+				checkDependencies(entry, verbose)
+				success = checkCommand(entry, verbose)
+			}
+		} else if file == "." {
+			success = checkProject(verbose)
+		} else {
+			checkDependencies(file, verbose)
+			success = checkCommand(file, verbose)
+		}
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	checkCmd.Flags().BoolP("verbose", "", false, "Enable verbose output")
+}
+
+var initCmd = &cobra.Command{
+	Use:   "init [file]",
+	Short: "Generate template script/project",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		var file string
+		if len(args) > 0 {
+			file = args[0]
+		}
+		success := initCommand(file, verbose)
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	initCmd.Flags().BoolP("verbose", "", false, "Enable verbose output (show template content)")
+}
+
+var cleanCmd = &cobra.Command{
+	Use:   "clean",
+	Short: "Remove temporary files",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		success := cleanCommand(verbose)
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	cleanCmd.Flags().BoolP("verbose", "", false, "Show removed files")
+}
+
+var replCmd = &cobra.Command{
+	Use:   "repl",
+	Short: "Launch interactive REPL",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		success := runRepl(verbose)
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	replCmd.Flags().BoolP("verbose", "", false, "Enable verbose output")
+}
+
+var unpackCmd = &cobra.Command{
+	Use:   "unpack bytes",
+	Short: "Unpack and install bytes",
+	Run: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		if len(args) != 1 || args[0] != "bytes" {
+			pterm.Error.Println("Expected exactly one argument: bytes")
+			cmd.Help()
+			os.Exit(1)
+		}
+		success := unpackBytes(verbose)
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func init() {
+	unpackCmd.Flags().BoolP("verbose", "", false, "Enable verbose output")
+}
+
+var docsCmd = &cobra.Command{
+	Use:   "docs",
+	Short: "Show documentation",
+	Run: func(cmd *cobra.Command, args []string) {
+		success := docsCommand()
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+var tutorialsCmd = &cobra.Command{
+	Use:   "tutorials",
+	Short: "Show tutorials",
+	Run: func(cmd *cobra.Command, args []string) {
+		success := tutorialsCommand()
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Display version",
+	Run: func(cmd *cobra.Command, args []string) {
+		success := versionCommand()
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+var helpCmd = &cobra.Command{
+	Use:   "help",
+	Short: "Show this help menu",
+	Run: func(cmd *cobra.Command, args []string) {
+		success := helpCommand(true)
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+var syntaxCmd = &cobra.Command{
+	Use:   "syntax",
+	Short: "Show syntax examples",
+	Run: func(cmd *cobra.Command, args []string) {
+		success := syntaxCommand()
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+var helpUiCmd = &cobra.Command{
+	Use:   "help-ui",
+	Short: "Show special commands list",
+	Run: func(cmd *cobra.Command, args []string) {
+		success := runHelpUi()
+		if !success {
+			os.Exit(1)
+		}
+	},
+}
+
+func main() {
+	if len(os.Args) > 1 {
+		command := os.Args[1]
+		if command == "--version" || command == "-v" {
+			versionCommand()
+			os.Exit(0)
+		} else if command == "--help" || command == "-h" {
+			helpCommand(true)
+			os.Exit(0)
+		}
+		knownCommands := []string{"run", "compile", "check", "init", "clean", "repl", "unpack", "docs", "tutorials", "version", "help", "syntax", "help-ui"}
+		isKnown := false
+		for _, kc := range knownCommands {
+			if command == kc {
+				isKnown = true
+				break
+			}
+		}
+		if !isKnown {
+			if _, err := os.Stat(".hackerfile"); err == nil {
+				data, err := os.ReadFile(".hackerfile")
+				if err != nil {
+					pterm.Error.Println("Error reading .hackerfile: " + err.Error())
+					os.Exit(1)
+				}
+				var config TaskConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					pterm.Error.Println("Error parsing .hackerfile: " + err.Error())
+					os.Exit(1)
+				}
+				aliasedTask := command
+				if alias, ok := config.Aliases[command]; ok {
+					aliasedTask = alias
+				}
+				if _, ok := config.Tasks[aliasedTask]; ok {
+					executed := make(map[string]struct{})
+					if err := executeTask(aliasedTask, &config, executed); err != nil {
+						pterm.Error.Println("Error executing task: " + err.Error())
+						os.Exit(1)
+					}
+					os.Exit(0)
+				} else {
+					pterm.Error.Println("Unknown task: " + command)
+					helpCommand(false)
+					os.Exit(1)
+				}
+			} else if command == "install" || command == "update" || command == "remove" {
+				pterm.Warning.Println("Please use bytes " + command)
+				os.Exit(0)
+			} else {
+				pterm.Error.Println("Unknown command: " + command)
+				helpCommand(false)
+				os.Exit(1)
+			}
+		}
+	}
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
