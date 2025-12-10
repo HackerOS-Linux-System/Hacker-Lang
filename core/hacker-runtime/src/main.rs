@@ -6,17 +6,14 @@ use std::io::{self, Write};
 use std::path::{PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-
 use miette::{Diagnostic, IntoDiagnostic, LabeledSpan, NamedSource, Report, SourceSpan};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile;
 use std::os::unix::fs::PermissionsExt;
-
 const VERSION: &str = "1.1";
 const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
 const BIN_DIR: &str = "~/.hackeros/hacker-lang/bin";
-
 #[derive(Deserialize)]
 struct Parsed {
     deps: Vec<String>,
@@ -31,36 +28,32 @@ struct Parsed {
     errors: Vec<String>,
     config: HashMap<String, String>,
     plugins: Vec<HashMap<String, Value>>,
+    #[serde(default)]
     memory: String,
+    #[serde(default)]
     memory_commands: Vec<String>,
 }
-
 #[derive(Debug)]
 struct ParseErrors {
     src: NamedSource<Arc<str>>,
     spans: Vec<(SourceSpan, String)>,
 }
-
 impl fmt::Display for ParseErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "There were {} parse errors in the file", self.spans.len())
     }
 }
-
 impl std::error::Error for ParseErrors {}
-
 impl Diagnostic for ParseErrors {
     fn source_code(&self) -> Option<&dyn miette::SourceCode> {
         Some(&self.src as &dyn miette::SourceCode)
     }
-
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
         Some(Box::new(self.spans.iter().map(|(span, msg)| {
             LabeledSpan::new_with_span(Some(msg.clone()), *span)
         })))
     }
 }
-
 fn expand_home(path: &str) -> PathBuf {
     if path.starts_with('~') {
         if let Ok(home) = env::var("HOME") {
@@ -69,17 +62,14 @@ fn expand_home(path: &str) -> PathBuf {
     }
     PathBuf::from(path)
 }
-
 fn ensure_hacker_dir() -> io::Result<()> {
     fs::create_dir_all(expand_home(BIN_DIR))?;
     fs::create_dir_all(expand_home(&format!("{}/libs", HACKER_DIR)))?;
     Ok(())
 }
-
 fn get_span(source: &str, line_num: usize) -> Option<SourceSpan> {
     let mut current_line = 1;
     let mut start = None;
-
     for (i, c) in source.char_indices() {
         if current_line == line_num {
             if start.is_none() {
@@ -93,7 +83,6 @@ fn get_span(source: &str, line_num: usize) -> Option<SourceSpan> {
             current_line += 1;
         }
     }
-
     if let Some(s) = start {
         let len = source.len() - s;
         Some(SourceSpan::new(s.into(), len.into()))
@@ -101,10 +90,8 @@ fn get_span(source: &str, line_num: usize) -> Option<SourceSpan> {
         None
     }
 }
-
 fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
     let source = fs::read_to_string(file).into_diagnostic()?;
-
     let parser_path = expand_home(&format!("{}/hacker-plsa", BIN_DIR));
     let mut cmd = Command::new(&parser_path);
     cmd.arg(file);
@@ -120,7 +107,6 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
     }
     let json_str = String::from_utf8(output.stdout).into_diagnostic()?;
     let parsed: Parsed = serde_json::from_str(&json_str).into_diagnostic()?;
-
     let mut config = parsed.config;
     if config.is_empty() {
         let config_file = ".hacker-config";
@@ -136,7 +122,6 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
             }
         }
     }
-
     if !parsed.errors.is_empty() {
         let mut errs = vec![];
         for e in parsed.errors {
@@ -151,7 +136,6 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
             // Fallback for unparseable error
             return Err(miette::miette!(e));
         }
-
         let mut spans = vec![];
         for (line_num, msg) in errs {
             if let Some(span) = get_span(&source, line_num) {
@@ -163,19 +147,17 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
                 ));
             }
         }
-
         let diag = ParseErrors {
             src: NamedSource::new(file, Arc::from(source)),
             spans,
         };
         return Err(Report::new(diag));
     }
-
     // Create main temp script
     let mut temp_sh = tempfile::Builder::new()
-        .suffix(".sh")
-        .tempfile()
-        .into_diagnostic()?;
+    .suffix(".sh")
+    .tempfile()
+    .into_diagnostic()?;
     temp_sh.write_all(b"#!/bin/bash\n").into_diagnostic()?;
     temp_sh.write_all(b"set -e\n").into_diagnostic()?;
     if parsed.memory == "manual" {
@@ -217,13 +199,13 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
     }
     for plugin in &parsed.plugins {
         let path = plugin
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| miette::miette!("Invalid plugin path"))?;
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| miette::miette!("Invalid plugin path"))?;
         let is_super = plugin
-            .get("super")
-            .and_then(|v| v.as_bool())
-            .ok_or_else(|| miette::miette!("Invalid plugin super"))?;
+        .get("super")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| miette::miette!("Invalid plugin super"))?;
         let cmd_str = if is_super {
             format!("sudo {} &", path)
         } else {
@@ -234,18 +216,17 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
     temp_sh.flush().into_diagnostic()?;
     let temp_path = temp_sh.path().to_path_buf();
     fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
-
     // Separate scripts
     let mut separate_temps: Vec<PathBuf> = vec![];
     for (i, sep_cmd) in parsed.cmds_separate.iter().enumerate() {
         let mut sep_temp = tempfile::Builder::new()
-            .prefix(&format!("sep_{}_", i))
-            .suffix(".sh")
-            .tempfile()
-            .into_diagnostic()?;
+        .prefix(&format!("sep_{}_", i))
+        .suffix(".sh")
+        .tempfile()
+        .into_diagnostic()?;
         sep_temp
-            .write_all(b"#!/bin/bash\nset -e\n")
-            .into_diagnostic()?;
+        .write_all(b"#!/bin/bash\nset -e\n")
+        .into_diagnostic()?;
         if parsed.memory == "manual" {
             for mc in &parsed.memory_commands {
                 writeln!(sep_temp, "{}", mc).into_diagnostic()?;
@@ -263,11 +244,9 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
         fs::set_permissions(&sep_path, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
         separate_temps.push(sep_path);
     }
-
     println!("Executing script: {}", file);
     println!("Config: {:?}", config);
     println!("Running...");
-
     // Run separate scripts
     for sep_path in &separate_temps {
         let mut run_sep = Command::new("bash");
@@ -284,7 +263,6 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
             return Err(miette::miette!("Separate command execution failed"));
         }
     }
-
     // Run main script
     let mut run_cmd = Command::new("bash");
     run_cmd.arg(&temp_path);
@@ -299,14 +277,11 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
     if !status.success() {
         return Err(miette::miette!("Execution failed"));
     }
-
     println!("Execution completed successfully!");
     Ok(())
 }
-
 fn inner_main() -> miette::Result<()> {
     ensure_hacker_dir().into_diagnostic()?;
-
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("Usage: hacker-runtime <file> [--verbose]");
@@ -314,11 +289,9 @@ fn inner_main() -> miette::Result<()> {
     }
     let file = &args[1];
     let verbose = args.len() > 2 && args[2] == "--verbose";
-
     run_command(file, verbose)?;
     Ok(())
 }
-
 fn main() {
     if let Err(err) = inner_main() {
         eprintln!("{:?}", err);
