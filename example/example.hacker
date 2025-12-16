@@ -1,4 +1,10 @@
-// sudo
-// apt
+// bins
 > sudo apt update
-> echo "Update Done"
+^> apt update
+! comments
+# lang/repo:lib
+\\ plugin-name
+<memory managment>
+[
+config
+]
