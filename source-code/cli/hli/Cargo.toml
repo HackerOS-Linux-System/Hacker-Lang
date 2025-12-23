@@ -1,1 +1,7 @@
+[package]
+name = "hli"
+version = "1.5.0"
+edition = "2021"
 
+[dependencies]
+pyo3 = { version = "0.22.2", features = ["auto-initialize"] }
