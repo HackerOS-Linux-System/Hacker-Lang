@@ -1,33 +1,12 @@
-// go
+// golang
 // crystal
 // rust
 // cargo
+// pyhon3.13
 
-> cd CORE
-> cd hacker-compiler
-> cargo build --release
+> cd source-code
+> cd core
+>>> cd hacker-compiler && cargo build --release && cd .. && cd hacker-runtime && cargo build --release && cd .. && cd hacker-plsa && g++ -std=c++17 -O2 -o hacker_plsa main.cpp 
 > cd ..
-> cd hacker-parser
-> cargo build --release
-> cd ..
-> cd hacker-runtime
-> go get hacker-runtime
-> go build
-> cd ..
-> cd ..
-> cd CLI
-> cd hackerc
-> crystal build src/main.cr --release
-> sudo mv main hackerc
-> cd ..
-> cd hli
-> crystal build src/main.cr --release
-> sudo mv main hli
-> cd ..
-> cd bytes
-> crystal build src/main.cr --release
-> sudo mv main bytes
-> cd ..
-> cd hlh
-> crystal build src/main.cr --release
-> sudo mv main hlh
+> cd cli
+>>> cd hackerc && crystal build src/main.cr --release && cd .. && cd hli && cargo build --release && cd .. && cd hl && crystal build src/main.cr --release && cd .. && cd hlp && crystal build src/main.cr --release && cd .. && cd bytes && go get bytes && go build && cd .. && cd hlh && crystal build src/main.cr --releae
