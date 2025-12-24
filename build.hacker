@@ -6,7 +6,7 @@
 
 > cd source-code
 > cd core
->>> cd hacker-compiler && cargo build --release && cd .. && cd hacker-runtime && cargo build --release && cd .. && cd hacker-plsa && g++ -std=c++17 -O2 -o hacker_plsa main.cpp 
+>>> cd hacker-compiler && cargo build --release && cd .. && cd hacker-runtime && cargo build --release && cd .. && cd hacker-plsa && g++ -std=c++17 -O2 -o hacker-plsa main.cpp 
 > cd ..
 > cd cli
 >>> cd hackerc && crystal build src/main.cr --release && cd .. && cd hli && cargo build --release && cd .. && cd hl && crystal build src/main.cr --release && cd .. && cd hlp && crystal build src/main.cr --release && cd .. && cd bytes && go get bytes && go build && cd .. && cd hlh && crystal build src/main.cr --release
