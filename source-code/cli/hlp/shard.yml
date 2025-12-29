@@ -1,1 +1,24 @@
+name: hlp
+version: 1.3
+authors:
+  - "HackerOS Team <hackeros068@gmail.com>"
+description: |
+  Hacker Lang Projects (HLP) - Advanced Scripting Tool for HackerOS Linux system, inspired by Cargo.
+license: MIT
+crystal: ">= 1.0.0"
 
+dependencies:
+  http:
+    github: crystal-lang/crystal
+    version: "~> 1.0"  # Stdlib, but listed if needed for clarity; actually not required.
+  yaml:
+    github: crystal-lang/crystal
+    version: "~> 1.0"  # Stdlib YAML.
+
+# No external dependencies needed beyond stdlib for core functionality.
+# For rich console output, we approximate with Crystal's Colorize and manual formatting.
+# If you want fancier output, add a shard like 'tintin' or 'tablo' for tables.
+# For example, to add tablo for tables:
+#  tablo:
+#    github: hutou/tablo
+# But to keep it minimal, we use stdlib only.
