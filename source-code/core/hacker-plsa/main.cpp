@@ -10,20 +10,16 @@
 #include <cstdlib>
 #include <cctype>
 #include <iomanip>
-#include <sstream>  // Added for stringstream
-
+#include <sstream> // Added for stringstream
 namespace fs = std::filesystem;
-
 const std::string HACKER_DIR_SUFFIX = "/.hackeros/hacker-lang";
-
 struct Plugin {
     std::string path;
     bool is_super;
 };
-
 struct ParseResult {
     std::unordered_map<std::string, int> deps;
-    std::unordered_map<std::string, int> libs;  // Default/bytes libs
+    std::unordered_map<std::string, int> libs; // Default/bytes libs
     std::unordered_map<std::string, int> rust_libs;
     std::unordered_map<std::string, int> python_libs;
     std::unordered_map<std::string, int> java_libs;
@@ -39,36 +35,30 @@ struct ParseResult {
     std::vector<std::string> errors;
     std::unordered_map<std::string, std::string> config_data;
 };
-
 void merge_maps(std::unordered_map<std::string, int>& dest, const std::unordered_map<std::string, int>& src) {
     for (const auto& p : src) {
         dest[p.first] = p.second;
     }
 }
-
 void merge_string_maps(std::unordered_map<std::string, std::string>& dest, const std::unordered_map<std::string, std::string>& src) {
     for (const auto& p : src) {
         dest[p.first] = p.second;
     }
 }
-
 void merge_function_maps(std::unordered_map<std::string, std::vector<std::string>>& dest, const std::unordered_map<std::string, std::vector<std::string>>& src) {
     for (const auto& p : src) {
         dest[p.first] = p.second;
     }
 }
-
 std::string trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \t");
     if (first == std::string::npos) return "";
     size_t last = str.find_last_not_of(" \t");
     return str.substr(first, last - first + 1);
 }
-
 bool starts_with(const std::string& s, const std::string& prefix) {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
-
 void write_json_string(std::ostream& w, const std::string& s) {
     w << "\"";
     for (char c : s) {
@@ -91,7 +81,6 @@ void write_json_string(std::ostream& w, const std::string& s) {
     }
     w << "\"";
 }
-
 void output_json(const ParseResult& res) {
     std::ostream& out = std::cout;
     out << "{";
@@ -244,7 +233,6 @@ void output_json(const ParseResult& res) {
     out << "}";
     out << "}" << std::endl;
 }
-
 ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
     ParseResult res;
     bool in_config = false;
@@ -389,7 +377,7 @@ ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
                 res.python_libs[lib_name] = 1;
             } else if (prefix == "java") {
                 res.java_libs[lib_name] = 1;
-            } else if (prefix == "bytes" || prefix.empty()) {  // Handle default or explicit bytes
+            } else if (prefix == "bytes" || prefix.empty()) { // Handle default or explicit bytes
                 // Existing logic for bytes/hacker-lang libs
                 fs::path lib_dir = hacker_dir / "libs" / lib_name;
                 fs::path lib_hacker_path = lib_dir / "main.hacker";
@@ -399,7 +387,7 @@ ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
                     ParseResult sub = parse_hacker_file(lib_hacker_path.string(), verbose);
                     merge_maps(res.deps, sub.deps);
                     merge_maps(res.libs, sub.libs);
-                    merge_maps(res.rust_libs, sub.rust_libs);  // Merge new fields
+                    merge_maps(res.rust_libs, sub.rust_libs); // Merge new fields
                     merge_maps(res.python_libs, sub.python_libs);
                     merge_maps(res.java_libs, sub.java_libs);
                     merge_string_maps(res.vars_dict, sub.vars_dict);
@@ -750,7 +738,6 @@ ParseResult parse_hacker_file(const std::string& file_path, bool verbose) {
     }
     return res;
 }
-
 int main(int argc, char* argv[]) {
     bool verbose = false;
     std::string file_path;
