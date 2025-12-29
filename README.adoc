@@ -28,7 +28,7 @@ Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium 
 * `hackerc` - wszystkie możliwości kompilatora hacker lang w tym narzędziu
 * `hl` — narzedzie cli do uruchamaia i kompilacji samych plików .hacker (służy do drobnych skryptów, programów, projektów).
 * `hli` — skrót od hacker lang interface narzędzie do interaktywnych komend działa tak samo jak hlp.
-* `hlp` — skrót od hacker lang projects narzędzie glównie opiera się na plikach Project.hacker lub Project.hfx/Project.json/Project.yaml
+* `hlp` — skrót od hacker lang projects narzędzie glównie opiera się na plikach Project.hacker lub Project.hfx/Project.toml
 * `bytes` — narzędzie do instalacji bibliotek, pluginów dla hacker lang.
 * `hlh` — skrót od hacker lang help - narzedzie pokazuje szczegółowe informacje o narzędziach hackerc, bytes, hli.
 
