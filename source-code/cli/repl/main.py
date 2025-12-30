@@ -11,7 +11,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-VERSION = "1.3"
+VERSION = "1.4"
 HACKER_DIR = Path.home() / ".hackeros" / "hacker-lang"
 LIBS_DIR = HACKER_DIR / "libs"
 HISTORY_DIR = Path.home() / ".hackeros" / "history"
