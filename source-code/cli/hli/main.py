@@ -6,18 +6,21 @@ import re
 import subprocess
 import sys
 import tempfile
-
 import requests
+import tomllib
 import yaml
-
+import shlex
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
+from rich.tree import Tree
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.styles import Style
 
 console = Console()
-
 VERSION = "1.2"
-
 HACKER_DIR = os.path.join(os.getenv("HOME"), ".hackeros", "hacker-lang")
 BIN_DIR = os.path.join(HACKER_DIR, "bin")
 HISTORY_FILE = os.path.join(os.getenv("HOME"), ".hackeros", "history", "hacker_repl_history")
@@ -50,83 +53,21 @@ def display_welcome():
     help_command(False)
 
 def load_project_config():
-    if os.path.exists("bytes.yaml"):
-        with open("bytes.yaml") as f:
-            data = yaml.safe_load(f)
+    if os.path.exists("Project.toml"):
+        with open("Project.toml", "rb") as f:
+            data = tomllib.load(f)
         pkg = data.get("package", {})
         config = Config()
         config.name = pkg.get("name", "")
         config.version = pkg.get("version", "")
         config.author = pkg.get("author", "")
+        config.description = pkg.get("description", "")
         config.entry = data.get("entry", "")
+        config.libs = data.get("libs", {})
+        config.scripts = data.get("scripts", {})
+        config.meta = data.get("meta", {})
         return config
-    elif os.path.exists("package.hfx"):
-        with open("package.hfx") as f:
-            content = f.read()
-        return parse_hfx(content)
-    raise ValueError("no project file found (bytes.yaml or package.hfx)")
-
-def parse_hfx(content):
-    config = Config()
-    current_section = ""
-    current_lang = ""
-    lines = content.splitlines()
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("//"):
-            continue
-        if line.endswith("{") or line.endswith("["):
-            key = line.rstrip("{[").strip()
-            if key == "package":
-                current_section = "package"
-            elif key == "-> libs":
-                current_section = "libs"
-            elif key == "-> scripts":
-                current_section = "scripts"
-            elif key == "-> meta":
-                current_section = "meta"
-            continue
-        if line == "}" or line == "]":
-            current_section = ""
-            current_lang = ""
-            continue
-        if current_section == "libs":
-            if line.startswith("-> ") and line.endswith(":"):
-                current_lang = line[3:-1].strip()
-                config.libs[current_lang] = []
-                continue
-            elif line.startswith("-> "):
-                lib = line[3:].strip()
-                if current_lang:
-                    config.libs[current_lang].append(lib)
-                continue
-        if current_section in ("scripts", "meta") and line.startswith("-> "):
-            subline = line[3:].strip()
-            if ":" in subline:
-                key, value = [part.strip() for part in subline.split(":", 1)]
-                value = value.rstrip(",").strip('"')
-                if current_section == "scripts":
-                    config.scripts[key] = value
-                elif current_section == "meta":
-                    config.meta[key] = value
-            continue
-        if ":" in line:
-            key, value = [part.strip() for part in line.split(":", 1)]
-            value = value.rstrip(",").strip('"')
-            if current_section == "package":
-                if key == "name":
-                    config.name = value
-                elif key == "version":
-                    config.version = value
-                elif key == "author":
-                    config.author = value
-                elif key == "description":
-                    config.description = value
-            elif key == "entry":
-                config.entry = value
-    if not config.entry:
-        raise ValueError("missing entry in package.hfx")
-    return config
+    raise ValueError("no project file found (Project.toml)")
 
 def load_project_entry():
     config = load_project_config()
@@ -209,34 +150,31 @@ Description=System maintenance script
     if verbose:
         console.print("Template content:", style="yellow")
         console.print(template, style="yellow")
-    bytes_file = "bytes.yaml"
-    hfx_file = "package.hfx"
-    if not os.path.exists(bytes_file) and not os.path.exists(hfx_file):
-        hfx_template = f'''package {{
-name: "my-hacker-project",
-version: "0.1.0",
-author: "User",
-description: "My Hacker project"
-}}
-entry: "{target_file}"
--> libs [
--> python:
--> library1
--> rust:
--> library2
-]
--> scripts {{
--> build: "hl compile {target_file}"
--> run: "hacker run ."
--> release: "hacker compile --bytes"
-}}
--> meta {{
--> license: "MIT"
--> repo: "https://github.com/user/repo"
-}}'''
-        with open(hfx_file, "w") as f:
-            f.write(hfx_template)
-        console.print("Initialized package.hfx for project", style="green")
+    toml_file = "Project.toml"
+    if not os.path.exists(toml_file):
+        toml_template = f'''[package]
+name = "my-hacker-project"
+version = "0.1.0"
+author = "User"
+description = "My Hacker project"
+entry = "{target_file}"
+
+[libs]
+python = ["library1"]
+rust = ["library2"]
+
+[scripts]
+build = "hli compile {target_file}"
+run = "hli run ."
+release = "hli compile --bytes"
+
+[meta]
+license = "MIT"
+repo = "https://github.com/user/repo"
+'''
+        with open(toml_file, "w") as f:
+            f.write(toml_template)
+        console.print("Initialized Project.toml for project", style="green")
     return True
 
 def clean_command(verbose):
@@ -337,7 +275,7 @@ def tutorials_command():
     console.print("Add # logging to your script.")
     console.print("HLI will automatically install if missing.")
     console.print("\nTutorial 3: Projects")
-    console.print("Use 'hli init' to create a project with bytes.yaml.")
+    console.print("Use 'hli init' to create a project with Project.toml.")
     console.print("Then 'hli run' to execute.")
     return True
 
@@ -345,7 +283,7 @@ def help_command(show_banner):
     if show_banner:
         console.print(f"Hacker Lang Interface (HLI) - Advanced Scripting Tool v{VERSION}", style="bold magenta")
     console.print("Commands Overview:", style="bold")
-    table = Table(box=box.ROUNDED)
+    table = Table(box=None)
     table.add_column("Command")
     table.add_column("Description")
     table.add_column("Arguments")
@@ -479,6 +417,183 @@ def execute_task(task_name, config, executed=set()):
         if proc.returncode != 0:
             raise ValueError(f"command failed: {cmd_str}")
 
+def display_command_list():
+    console.clear()
+    title = Text("HLI Shell - Commands", style="bold purple")
+    tree = Tree("Available Commands", style="bold blue")
+    
+    core = tree.add("Core commands", style="blue")
+    core.add("run [file] [--verbose]")
+    core.add("compile [file] [-o output] [--verbose] [--bytes]")
+    core.add("check [file] [--verbose]")
+    core.add("init [file] [--verbose]")
+    core.add("clean [--verbose]")
+    core.add("repl [--verbose]")
+    
+    install = tree.add("Install commands", style="blue")
+    install.add("unpack bytes [--verbose]")
+    
+    info = tree.add("Info commands", style="blue")
+    info.add("docs")
+    info.add("tutorials")
+    info.add("version")
+    info.add("help")
+    info.add("syntax")
+    info.add("help-ui")
+    
+    tree.add("exit: Exit the shell")
+    
+    panel = Panel(tree, title=title, expand=False, border_style="purple")
+    console.print(panel)
+
+def handle_command(args):
+    known_commands = ["run", "compile", "check", "init", "clean", "repl", "unpack", "docs", "tutorials", "version", "help", "syntax", "help-ui"]
+    success = True
+    if args.command in known_commands:
+        if args.command == "run":
+            verbose = args.verbose
+            file = args.file
+            if not file:
+                try:
+                    entry = load_project_entry()
+                    check_dependencies(entry, verbose)
+                    success = run_command(entry, verbose)
+                except Exception as e:
+                    console.print("No project found. Use 'hli init' or specify a file.", style="red")
+                    success = False
+            elif file == ".":
+                success = run_project(verbose)
+            else:
+                check_dependencies(file, verbose)
+                success = run_command(file, verbose)
+        elif args.command == "compile":
+            verbose = args.verbose
+            output = args.output
+            bytes_mode = args.bytes
+            file = args.file
+            if not file:
+                try:
+                    entry = load_project_entry()
+                    if not output:
+                        output = os.path.splitext(entry)[0]
+                    check_dependencies(entry, verbose)
+                    success = compile_command(entry, output, verbose, bytes_mode)
+                except Exception as e:
+                    console.print("No project found. Use 'hli init' or specify a file.", style="red")
+                    success = False
+            elif file == ".":
+                success = compile_project(output, verbose, bytes_mode)
+            else:
+                if not output:
+                    output = os.path.splitext(file)[0]
+                check_dependencies(file, verbose)
+                success = compile_command(file, output, verbose, bytes_mode)
+        elif args.command == "check":
+            verbose = args.verbose
+            file = args.file
+            if not file:
+                try:
+                    entry = load_project_entry()
+                    check_dependencies(entry, verbose)
+                    success = check_command(entry, verbose)
+                except Exception as e:
+                    console.print("No project found. Use 'hli init' or specify a file.", style="red")
+                    success = False
+            elif file == ".":
+                success = check_project(verbose)
+            else:
+                check_dependencies(file, verbose)
+                success = check_command(file, verbose)
+        elif args.command == "init":
+            success = init_command(args.file, args.verbose)
+        elif args.command == "clean":
+            success = clean_command(args.verbose)
+        elif args.command == "repl":
+            success = run_repl(args.verbose)
+        elif args.command == "unpack":
+            verbose = args.verbose
+            if args.item != "bytes":
+                console.print("Expected exactly one argument: bytes", style="red")
+                success = False
+            else:
+                success = unpack_bytes(verbose)
+        elif args.command == "docs":
+            success = docs_command()
+        elif args.command == "tutorials":
+            success = tutorials_command()
+        elif args.command == "version":
+            success = version_command()
+        elif args.command == "help":
+            success = help_command(True)
+        elif args.command == "syntax":
+            success = syntax_command()
+        elif args.command == "help-ui":
+            success = run_help_ui()
+    else:
+        console.print(f"Unknown command: {args.command}", style="red")
+        help_command(False)
+        success = False
+    return success
+
+def interactive_main():
+    commands = [
+        "run", "run --verbose",
+        "compile", "compile -o", "compile --verbose", "compile --bytes",
+        "check", "check --verbose",
+        "init", "init --verbose",
+        "clean", "clean --verbose",
+        "repl", "repl --verbose",
+        "unpack bytes", "unpack bytes --verbose",
+        "docs", "tutorials", "version", "help", "syntax", "help-ui", "exit"
+    ]
+    completer = WordCompleter(commands, ignore_case=True)
+    style = Style.from_dict({
+        'prompt': 'blue bold',
+    })
+    session = PromptSession(completer=completer, style=style)
+    console.print("Welcome to HLI Shell! Integrated with hacker v2.1. Type 'exit' to quit.", style="blue")
+    while True:
+        display_command_list()
+        try:
+            cmd = session.prompt('hli> ')
+            if cmd.strip() == "":
+                continue
+            if cmd == "exit":
+                console.print("Exiting HLI Shell...", style="gray")
+                break
+            try:
+                argv = shlex.split(cmd)
+                args = parser.parse_args(argv)
+                handle_command(args)
+            except SystemExit:
+                parts = shlex.split(cmd)
+                command = parts[0] if parts else ""
+                if command in ["install", "update", "remove"]:
+                    console.print(f"Please use bytes {command}", style="yellow")
+                elif os.path.exists(".hackerfile"):
+                    with open(".hackerfile") as f:
+                        data = yaml.safe_load(f)
+                    config = TaskConfig(data.get("vars"), data.get("tasks"), data.get("aliases"))
+                    aliased_task = config.aliases.get(command, command)
+                    if aliased_task in config.tasks:
+                        executed = set()
+                        try:
+                            execute_task(aliased_task, config, executed)
+                        except Exception as e:
+                            console.print(f"Error executing task: {e}", style="red")
+                    else:
+                        console.print(f"Unknown command: {cmd}", style="red")
+                else:
+                    pass  # argparse already handled error
+            except Exception as e:
+                console.print(f"Error executing command: {e}", style="red")
+            console.input("Press Enter to continue...")
+        except KeyboardInterrupt:
+            console.print("\nInterrupted. Type 'exit' to quit.", style="gray")
+            continue
+        except EOFError:
+            break
+
 if __name__ == "__main__":
     ensure_hacker_dir()
     if len(sys.argv) > 1:
@@ -520,112 +635,33 @@ if __name__ == "__main__":
     subparsers.add_parser("help-ui", help="Show special commands list")
     args = parser.parse_args()
     if not args.command:
-        display_welcome()
+        interactive_main()
         sys.exit(0)
-    known_commands = ["run", "compile", "check", "init", "clean", "repl", "unpack", "docs", "tutorials", "version", "help", "syntax", "help-ui"]
-    if args.command not in known_commands:
-        if os.path.exists(".hackerfile"):
-            with open(".hackerfile") as f:
-                data = yaml.safe_load(f)
-            config = TaskConfig(data.get("vars"), data.get("tasks"), data.get("aliases"))
-            aliased_task = config.aliases.get(args.command, args.command)
-            if aliased_task in config.tasks:
-                executed = set()
-                try:
-                    execute_task(aliased_task, config, executed)
-                    sys.exit(0)
-                except Exception as e:
-                    console.print(f"Error executing task: {e}", style="red")
+    else:
+        if args.command not in ["run", "compile", "check", "init", "clean", "repl", "unpack", "docs", "tutorials", "version", "help", "syntax", "help-ui"]:
+            if os.path.exists(".hackerfile"):
+                with open(".hackerfile") as f:
+                    data = yaml.safe_load(f)
+                config = TaskConfig(data.get("vars"), data.get("tasks"), data.get("aliases"))
+                aliased_task = config.aliases.get(args.command, args.command)
+                if aliased_task in config.tasks:
+                    executed = set()
+                    try:
+                        execute_task(aliased_task, config, executed)
+                        sys.exit(0)
+                    except Exception as e:
+                        console.print(f"Error executing task: {e}", style="red")
+                        sys.exit(1)
+                else:
+                    console.print(f"Unknown task: {args.command}", style="red")
+                    help_command(False)
                     sys.exit(1)
+            elif args.command in ["install", "update", "remove"]:
+                console.print(f"Please use bytes {args.command}", style="yellow")
+                sys.exit(0)
             else:
-                console.print(f"Unknown task: {args.command}", style="red")
+                console.print(f"Unknown command: {args.command}", style="red")
                 help_command(False)
                 sys.exit(1)
-        elif args.command in ["install", "update", "remove"]:
-            console.print(f"Please use bytes {args.command}", style="yellow")
-            sys.exit(0)
-        else:
-            console.print(f"Unknown command: {args.command}", style="red")
-            help_command(False)
-            sys.exit(1)
-    success = True
-    if args.command == "run":
-        verbose = args.verbose
-        file = args.file
-        if not file:
-            try:
-                entry = load_project_entry()
-                check_dependencies(entry, verbose)
-                success = run_command(entry, verbose)
-            except Exception as e:
-                console.print("No project found. Use 'hli init' or specify a file.", style="red")
-                success = False
-        elif file == ".":
-            success = run_project(verbose)
-        else:
-            check_dependencies(file, verbose)
-            success = run_command(file, verbose)
-    elif args.command == "compile":
-        verbose = args.verbose
-        output = args.output
-        bytes_mode = args.bytes
-        file = args.file
-        if not file:
-            try:
-                entry = load_project_entry()
-                if not output:
-                    output = os.path.splitext(entry)[0]
-                check_dependencies(entry, verbose)
-                success = compile_command(entry, output, verbose, bytes_mode)
-            except Exception as e:
-                console.print("No project found. Use 'hli init' or specify a file.", style="red")
-                success = False
-        elif file == ".":
-            success = compile_project(output, verbose, bytes_mode)
-        else:
-            if not output:
-                output = os.path.splitext(file)[0]
-            check_dependencies(file, verbose)
-            success = compile_command(file, output, verbose, bytes_mode)
-    elif args.command == "check":
-        verbose = args.verbose
-        file = args.file
-        if not file:
-            try:
-                entry = load_project_entry()
-                check_dependencies(entry, verbose)
-                success = check_command(entry, verbose)
-            except Exception as e:
-                console.print("No project found. Use 'hli init' or specify a file.", style="red")
-                success = False
-        elif file == ".":
-            success = check_project(verbose)
-        else:
-            check_dependencies(file, verbose)
-            success = check_command(file, verbose)
-    elif args.command == "init":
-        success = init_command(args.file, args.verbose)
-    elif args.command == "clean":
-        success = clean_command(args.verbose)
-    elif args.command == "repl":
-        success = run_repl(args.verbose)
-    elif args.command == "unpack":
-        verbose = args.verbose
-        if args.item != "bytes":
-            console.print("Expected exactly one argument: bytes", style="red")
-            success = False
-        else:
-            success = unpack_bytes(verbose)
-    elif args.command == "docs":
-        success = docs_command()
-    elif args.command == "tutorials":
-        success = tutorials_command()
-    elif args.command == "version":
-        success = version_command()
-    elif args.command == "help":
-        success = help_command(True)
-    elif args.command == "syntax":
-        success = syntax_command()
-    elif args.command == "help-ui":
-        success = run_help_ui()
-    sys.exit(0 if success else 1)
+        success = handle_command(args)
+        sys.exit(0 if success else 1)
