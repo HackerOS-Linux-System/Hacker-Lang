@@ -20,7 +20,7 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.styles import Style
 
 console = Console()
-VERSION = "1.2"
+VERSION = "1.4"
 HACKER_DIR = os.path.join(os.getenv("HOME"), ".hackeros", "hacker-lang")
 BIN_DIR = os.path.join(HACKER_DIR, "bin")
 HISTORY_FILE = os.path.join(os.getenv("HOME"), ".hackeros", "history", "hacker_repl_history")
