@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	Version      = "1.2"
+	Version      = "1.4"
 	HackerDir    = ".hackeros/hacker-lang"
 	BinDir       = "bin"
 	CompilerPath = "hacker-compiler"
