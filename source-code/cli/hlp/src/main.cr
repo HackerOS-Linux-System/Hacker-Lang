@@ -5,12 +5,10 @@ require "yaml"
 require "regex"
 require "process"
 require "http/client"
-require "colorize"
 require "dir"
 require "file"
 
-VERSION = "1.2"
-
+VERSION = "1.4"
 HOME = ENV["HOME"]
 HACKER_DIR = File.join(HOME, ".hackeros", "hacker-lang")
 BIN_DIR = File.join(HACKER_DIR, "bin")
@@ -39,9 +37,9 @@ def ensure_hacker_dir
 end
 
 def display_welcome
-  puts "Welcome to Hacker Lang Projects (HLP) v#{VERSION}".colorize(:magenta)
-  puts "Advanced scripting interface for HackerOS Linux system, inspired by Cargo".colorize(:light_gray)
-  puts "Type 'hlp help' for commands or 'hlp repl' to start interactive mode.".colorize(:white)
+  puts "Welcome to Hacker Lang Projects (HLP) v#{VERSION}"
+  puts "Advanced scripting interface for HackerOS Linux system, inspired by Cargo"
+  puts "Type 'hlp help' for commands or 'hlp repl' to start interactive mode."
   help_command(false)
 end
 
@@ -95,9 +93,9 @@ def parse_hfx(content : String) : Config
         config.libs[current_lang] = [] of String
         next
       elsif line.starts_with?("-> ")
-        lib = line[3..].strip
+        lib_name = line[3..].strip
         if !current_lang.empty?
-          config.libs[current_lang] << lib
+          config.libs[current_lang] << lib_name
         end
         next
       end
@@ -147,7 +145,7 @@ end
 
 def run_command(file : String, verbose : Bool) : Bool
   if !File.exists?(RUNTIME_PATH)
-    puts "Hacker runtime not found at #{RUNTIME_PATH}. Please install the Hacker Lang tools.".colorize(:red)
+    puts "Hacker runtime not found at #{RUNTIME_PATH}. Please install the Hacker Lang tools."
     return false
   end
   args = [file]
@@ -158,7 +156,7 @@ end
 
 def compile_command(file : String, output : String, verbose : Bool, bytes_mode : Bool) : Bool
   if !File.exists?(COMPILER_PATH)
-    puts "Hacker compiler not found at #{COMPILER_PATH}. Please install the Hacker Lang tools.".colorize(:red)
+    puts "Hacker compiler not found at #{COMPILER_PATH}. Please install the Hacker Lang tools."
     return false
   end
   args = [file, output]
@@ -170,7 +168,7 @@ end
 
 def check_command(file : String, verbose : Bool) : Bool
   if !File.exists?(PARSER_PATH)
-    puts "Hacker parser not found at #{PARSER_PATH}. Please install the Hacker Lang tools.".colorize(:red)
+    puts "Hacker parser not found at #{PARSER_PATH}. Please install the Hacker Lang tools."
     return false
   end
   args = [file]
@@ -178,23 +176,23 @@ def check_command(file : String, verbose : Bool) : Bool
   output = IO::Memory.new
   status = Process.run(PARSER_PATH, args, output: output, error: STDERR)
   if !status.success?
-    puts "Error parsing file".colorize(:red)
+    puts "Error parsing file"
     return false
   end
   begin
     parsed = JSON.parse(output.to_s).as_h
   rescue e : Exception
-    puts "Error unmarshaling parse output: #{e.message}".colorize(:red)
+    puts "Error unmarshaling parse output: #{e.message}"
     return false
   end
   errors = parsed["errors"]?.try(&.as_a) || [] of JSON::Any
   if errors.empty?
-    puts "Syntax validation passed!".colorize(:green)
+    puts "Syntax validation passed!"
     return true
   end
-  puts "Errors:".colorize(:red)
+  puts "Errors:"
   errors.each do |e|
-    puts "✖ #{e}".colorize(:red)
+    puts "✖ #{e}"
   end
   false
 end
@@ -202,7 +200,7 @@ end
 def init_command(file : String?, verbose : Bool) : Bool
   target_file = file || "main.hacker"
   if File.exists?(target_file)
-    puts "File #{target_file} already exists!".colorize(:red)
+    puts "File #{target_file} already exists!"
     return false
   end
   template = <<-TEMPLATE
@@ -220,17 +218,13 @@ echo "Starting update..."
 sudo apt update && sudo apt upgrade -y ! System update
 echo "With var: $APP_NAME"
 long_running_command_with_vars
-[
-Author=Advanced User
-Version=1.0
-Description=System maintenance script
-]
+[ Author=Advanced User Version=1.0 Description=System maintenance script ]
 TEMPLATE
   File.write(target_file, template)
-  puts "Initialized template at #{target_file}".colorize(:green)
+  puts "Initialized template at #{target_file}"
   if verbose
-    puts "Template content:".colorize(:yellow)
-    puts template.colorize(:yellow)
+    puts "Template content:"
+    puts template
   end
   bytes_file = "bytes.yaml"
   hfx_file = "package.hfx"
@@ -260,7 +254,7 @@ entry: "#{target_file}"
 }
 HFX
     File.write(hfx_file, hfx_template)
-    puts "Initialized package.hfx for project".colorize(:green)
+    puts "Initialized package.hfx for project"
   end
   true
 end
@@ -271,13 +265,13 @@ def clean_command(verbose : Bool) : Bool
     base = File.basename(path)
     if base.starts_with?("tmp") || base.starts_with?("sep_")
       if verbose
-        puts "Removed: #{path}".colorize(:yellow)
+        puts "Removed: #{path}"
       end
       File.delete(path)
       count += 1
     end
   end
-  puts "Removed #{count} temporary files".colorize(:green)
+  puts "Removed #{count} temporary files"
   true
 end
 
@@ -285,52 +279,52 @@ def unpack_bytes(verbose : Bool) : Bool
   bytes_path1 = File.join(BIN_DIR, "bytes")
   bytes_path2 = "/usr/bin/bytes"
   if File.exists?(bytes_path1)
-    puts "Bytes already installed at #{bytes_path1}.".colorize(:green)
+    puts "Bytes already installed at #{bytes_path1}."
     return true
   end
   if File.exists?(bytes_path2)
-    puts "Bytes already installed at #{bytes_path2}.".colorize(:green)
+    puts "Bytes already installed at #{bytes_path2}."
     return true
   end
   FileUtils.mkdir_p(BIN_DIR)
   url = "https://github.com/Bytes-Repository/Bytes-CLI-Tool/releases/download/v0.3/bytes"
   response = HTTP::Client.get(url)
   if response.status_code != 200
-    puts "Error: status code #{response.status_code}".colorize(:red)
+    puts "Error: status code #{response.status_code}"
     return false
   end
   File.write(bytes_path1, response.body)
   File.chmod(bytes_path1, 0o755)
   if verbose
-    puts "Downloaded and installed bytes from #{url} to #{bytes_path1}".colorize(:green)
+    puts "Downloaded and installed bytes from #{url} to #{bytes_path1}"
   end
-  puts "Bytes installed successfully!".colorize(:green)
+  puts "Bytes installed successfully!"
   true
 end
 
 def run_repl(verbose : Bool) : Bool
   if !File.exists?(REPL_PATH)
-    puts "Hacker REPL not found at #{REPL_PATH}. Please install the Hacker Lang tools.".colorize(:red)
+    puts "Hacker REPL not found at #{REPL_PATH}. Please install the Hacker Lang tools."
     return false
   end
   args = [] of String
   args << "--verbose" if verbose
   status = Process.run(REPL_PATH, args, input: STDIN)
   if status.success?
-    puts "REPL session ended.".colorize(:green)
+    puts "REPL session ended."
     return true
   end
-  puts "REPL failed.".colorize(:red)
+  puts "REPL failed."
   false
 end
 
 def version_command : Bool
-  puts "Hacker Lang Projects (HLP) v#{VERSION}".colorize(:cyan)
+  puts "Hacker Lang Projects (HLP) v#{VERSION}"
   true
 end
 
 def syntax_command : Bool
-  puts "Hacker Lang Syntax Example:".colorize.mode(:bold)
+  puts "Hacker Lang Syntax Example:"
   example_code = <<-EXAMPLE
 // sudo
 # obsidian
@@ -344,12 +338,12 @@ separate_command
 sudo apt update
 [ Config=Example ]
 EXAMPLE
-  puts example_code.colorize(:white)
+  puts example_code
   true
 end
 
 def docs_command : Bool
-  puts "Hacker Lang Documentation:".colorize.mode(:bold)
+  puts "Hacker Lang Documentation:"
   puts "Hacker Lang is an advanced scripting language for HackerOS."
   puts "Key features:"
   features = [
@@ -368,7 +362,7 @@ def docs_command : Bool
 end
 
 def tutorials_command : Bool
-  puts "Hacker Lang Tutorials:".colorize.mode(:bold)
+  puts "Hacker Lang Tutorials:"
   puts "Tutorial 1: Basic Script"
   puts "Create a file main.hacker with:"
   puts "> echo 'Hello, Hacker Lang!'"
@@ -384,9 +378,9 @@ end
 
 def help_command(show_banner : Bool) : Bool
   if show_banner
-    puts "Hacker Lang Projects (HLP) - Advanced Scripting Tool v#{VERSION}".colorize(:magenta).mode(:bold)
+    puts "Hacker Lang Projects (HLP) - Advanced Scripting Tool v#{VERSION}"
   end
-  puts "Commands Overview:".colorize.mode(:bold)
+  puts "Commands Overview:"
   # Manual table formatting since no tablo shard
   puts "Command".ljust(15) + "Description".ljust(50) + "Arguments"
   puts "-" * 80
@@ -411,7 +405,7 @@ def help_command(show_banner : Bool) : Bool
 end
 
 def run_help_ui : Bool
-  puts "Hacker Lang Commands List".colorize(:magenta).mode(:bold)
+  puts "Hacker Lang Commands List"
   items = [
     "run: Execute script/project - Usage: hlp run [file] [--verbose]",
     "compile: Compile to executable/project - Usage: hlp compile [file] [-o output] [--verbose] [--bytes]",
@@ -427,7 +421,7 @@ def run_help_ui : Bool
     "syntax: Show syntax examples - Usage: hlp syntax",
     "help-ui: Interactive help UI - This UI",
   ]
-  items.each { |item| puts "- #{item}".colorize(:magenta) }
+  items.each { |item| puts "- #{item}" }
   true
 end
 
@@ -435,10 +429,10 @@ def run_project(verbose : Bool) : Bool
   begin
     config = load_project_config
   rescue e : Exception
-    puts "#{e.message}. Use 'hlp init' to create a project.".colorize(:red)
+    puts "#{e.message}. Use 'hlp init' to create a project."
     return false
   end
-  puts "Running project #{config.name} v#{config.version} by #{config.author}".colorize(:green)
+  puts "Running project #{config.name} v#{config.version} by #{config.author}"
   check_dependencies(config.entry, verbose)
   run_command(config.entry, verbose)
 end
@@ -447,11 +441,11 @@ def compile_project(output : String?, verbose : Bool, bytes_mode : Bool) : Bool
   begin
     config = load_project_config
   rescue e : Exception
-    puts "#{e.message}. Use 'hlp init' to create a project.".colorize(:red)
+    puts "#{e.message}. Use 'hlp init' to create a project."
     return false
   end
   output ||= config.name
-  puts "Compiling project #{config.name} to #{output} with --bytes".colorize(:cyan)
+  puts "Compiling project #{config.name} to #{output} with --bytes"
   check_dependencies(config.entry, verbose)
   compile_command(config.entry, output, verbose, bytes_mode)
 end
@@ -460,7 +454,7 @@ def check_project(verbose : Bool) : Bool
   begin
     config = load_project_config
   rescue e : Exception
-    puts "#{e.message}. Use 'hlp init' to create a project.".colorize(:red)
+    puts "#{e.message}. Use 'hlp init' to create a project."
     return false
   end
   check_dependencies(config.entry, verbose)
@@ -489,20 +483,20 @@ def check_dependencies(file : String, verbose : Bool) : Bool
   end
   if !missing_plugins.empty?
     if verbose
-      puts "Missing plugins: #{missing_plugins.join(", ")}".colorize(:yellow)
+      puts "Missing plugins: #{missing_plugins.join(", ")}"
     end
     missing_plugins.each do |p|
-      puts "Installing plugin #{p} via bytes...".colorize(:yellow)
+      puts "Installing plugin #{p} via bytes..."
       status = Process.run("bytes", ["plugin", "install", p])
       return false if !status.success?
     end
   end
   if !missing_libs.empty?
     if verbose
-      puts "Missing libs: #{missing_libs.join(", ")}".colorize(:yellow)
+      puts "Missing libs: #{missing_libs.join(", ")}"
     end
     missing_libs.each do |l|
-      puts "Installing lib #{l} via bytes...".colorize(:yellow)
+      puts "Installing lib #{l} via bytes..."
       status = Process.run("bytes", ["install", l])
       return false if !status.success?
     end
@@ -510,12 +504,29 @@ def check_dependencies(file : String, verbose : Bool) : Bool
   true
 end
 
+def yaml_to_hash(yaml : YAML::Any) : Hash(String, YAML::Any)
+  yaml.as_h.each_with_object(Hash(String, YAML::Any).new) do |(k, v), h|
+    h[k.as_s] = v
+  end
+end
+
+def convert_yaml_value(val : YAML::Any) : String | Int64 | Float64
+  if s = val.as_s?
+    s
+  elsif i = val.as_i64?
+    i
+  elsif f = val.as_f?
+    f
+  else
+    raise "Unsupported type in vars: #{val.raw.class}"
+  end
+end
+
 class TaskConfig
-  property vars : Hash(String, String | Int32 | Float64)
+  property vars : Hash(String, String | Int64 | Float64)
   property tasks : Hash(String, Hash(String, Array(String)))
   property aliases : Hash(String, String)
-
-  def initialize(@vars = Hash(String, String | Int32 | Float64).new, @tasks = Hash(String, Hash(String, Array(String))).new, @aliases = Hash(String, String).new)
+  def initialize(@vars = Hash(String, String | Int64 | Float64).new, @tasks = Hash(String, Hash(String, Array(String))).new, @aliases = Hash(String, String).new)
   end
 end
 
@@ -551,7 +562,6 @@ end
 # Manual argument parsing since subparsers are complex; use OptionParser for each command
 command = ARGV.shift? || ""
 success = true
-
 case command
 when ""
   display_welcome
@@ -565,7 +575,7 @@ when "run"
       check_dependencies(entry, verbose)
       success = run_command(entry, verbose)
     rescue e : Exception
-      puts "No project found. Use 'hlp init' or specify a file.".colorize(:red)
+      puts "No project found. Use 'hlp init' or specify a file."
       success = false
     end
   elsif file == "."
@@ -591,7 +601,7 @@ when "compile"
       check_dependencies(entry, verbose)
       success = compile_command(entry, output, verbose, bytes_mode)
     rescue e : Exception
-      puts "No project found. Use 'hlp init' or specify a file.".colorize(:red)
+      puts "No project found. Use 'hlp init' or specify a file."
       success = false
     end
   elsif file == "."
@@ -610,7 +620,7 @@ when "check"
       check_dependencies(entry, verbose)
       success = check_command(entry, verbose)
     rescue e : Exception
-      puts "No project found. Use 'hlp init' or specify a file.".colorize(:red)
+      puts "No project found. Use 'hlp init' or specify a file."
       success = false
     end
   elsif file == "."
@@ -633,7 +643,7 @@ when "unpack"
   verbose = ARGV.includes?("--verbose")
   item = ARGV.reject { |a| a == "--verbose" }.first? || ""
   if item != "bytes"
-    puts "Expected exactly one argument: bytes".colorize(:red)
+    puts "Expected exactly one argument: bytes"
     success = false
   else
     success = unpack_bytes(verbose)
@@ -653,11 +663,11 @@ when "help-ui"
 else
   if File.exists?(".hackerfile")
     data = YAML.parse(File.read(".hackerfile")).as_h
-    vars = data["vars"]?.try(&.as_h) || {} of String => YAML::Any
-    vars_hash = vars.transform_values(&.as(String | Int64 | Float64))
-    tasks = data["tasks"]?.try(&.as_h) || {} of String => YAML::Any
-    tasks_hash = tasks.transform_values { |v| v.as_h.transform_values { |vv| vv.as_a.map(&.as_s) } }
-    aliases = data["aliases"]?.try(&.as_h.transform_values(&.as_s)) || {} of String => String
+    vars = data["vars"]?.try { |v| yaml_to_hash(v) } || Hash(String, YAML::Any).new
+    vars_hash = vars.transform_values { |val| convert_yaml_value(val) }
+    tasks = data["tasks"]?.try { |t| yaml_to_hash(t) } || Hash(String, YAML::Any).new
+    tasks_hash = tasks.transform_values { |v| yaml_to_hash(v).transform_values { |vv| vv.as_a.map(&.as_s) } }
+    aliases = data["aliases"]?.try { |a| yaml_to_hash(a).transform_values(&.as_s) } || Hash(String, String).new
     config = TaskConfig.new(vars_hash, tasks_hash, aliases)
     aliased_task = config.aliases[command]? || command
     if config.tasks.has_key?(aliased_task)
@@ -665,22 +675,21 @@ else
         execute_task(aliased_task, config)
         exit 0
       rescue e : Exception
-        puts "Error executing task: #{e.message}".colorize(:red)
+        puts "Error executing task: #{e.message}"
         exit 1
       end
     else
-      puts "Unknown task: #{command}".colorize(:red)
+      puts "Unknown task: #{command}"
       help_command(false)
       exit 1
     end
   elsif ["install", "update", "remove"].includes?(command)
-    puts "Please use bytes #{command}".colorize(:yellow)
+    puts "Please use bytes #{command}"
     exit 0
   else
-    puts "Unknown command: #{command}".colorize(:red)
+    puts "Unknown command: #{command}"
     help_command(false)
     exit 1
   end
 end
-
 exit success ? 0 : 1
