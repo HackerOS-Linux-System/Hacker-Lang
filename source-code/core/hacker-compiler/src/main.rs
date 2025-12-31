@@ -1,20 +1,19 @@
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::path::Path;
 use std::process;
-use cranelift::prelude::*;
-use cranelift_codegen::ir::Function;
-use cranelift_codegen::isa;
-use cranelift_codegen::settings;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{DataDescription, Linkage, Module};
-use cranelift_object::{ObjectBuilder, ObjectModule};
-use subprocess::{Exec, PopenError};
-use std::os::unix::fs::PermissionsExt;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
+use subprocess::{Exec, PopenError};
+use std::os::unix::fs::PermissionsExt;
+use inkwell::context::Context;
+use inkwell::module::Linkage;
+use inkwell::passes::PassManager;
+use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
+use inkwell::OptimizationLevel;
+use inkwell::AddressSpace;
 
 const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
 
@@ -436,21 +435,21 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     }
     Ok(ParseResult {
         deps,
-       libs,
-       rust_libs,
-       python_libs,
-       java_libs,
-       vars,
-       local_vars,
-       cmds,
-       cmds_with_vars,
-       cmds_separate,
-       includes,
-       binaries,
-       plugins,
-       functions,
-       errors,
-       config,
+        libs,
+        rust_libs,
+        python_libs,
+        java_libs,
+        vars,
+        local_vars,
+        cmds,
+        cmds_with_vars,
+        cmds_separate,
+        includes,
+        binaries,
+        plugins,
+        functions,
+        errors,
+        config,
     })
 }
 
@@ -523,7 +522,6 @@ fn main() -> io::Result<()> {
         }
     }
     parse_result.deps = deps;
-
     let ParseResult {
         deps,
         libs: _,
@@ -607,100 +605,117 @@ fn main() -> io::Result<()> {
         let plugin_path = expand_home(&format!("{}/plugins/{}", HACKER_DIR, plugin.name));
         let plugin_data = fs::read(&plugin_path)?;
         let encoded = BASE64_STANDARD.encode(&plugin_data);
-        let mut run_cmd = " $temp &".to_string();
+        let mut run_cmd = "$temp".to_string();
         if plugin.is_super {
-            run_cmd = format!("sudo{}", run_cmd);
+            run_cmd = format!("sudo {}", run_cmd);
         }
-        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_plugin.XXXXXX); echo '{}' | base64 -d > $temp && chmod +x $temp &&{}", encoded, run_cmd);
+        let extract_cmd = format!("temp=$(mktemp /tmp/hacker_plugin.XXXXXX); echo '{}' | base64 -d > $temp && chmod +x $temp && {} &", encoded, run_cmd);
         final_cmds.push(extract_cmd);
     }
-    // Cranelift setup
-    let mut flag_builder = settings::builder();
-    flag_builder.set("is_pic", "true").expect("Failed to set is_pic");
-    let flags = settings::Flags::new(flag_builder);
-    let triple = target_lexicon::Triple::host();
-    let isa_builder = isa::lookup(triple).expect("Host not supported");
-    let isa = isa_builder.finish(flags).expect("ISA build failed");
-    let builder = ObjectBuilder::new(
-        isa,
-        output_path.file_stem().unwrap().to_str().unwrap().as_bytes().to_vec(),
-                                     cranelift_module::default_libcall_names(),
-    ).expect("ObjectBuilder failed");
-    let mut module = ObjectModule::new(builder);
-    let pointer_type = module.target_config().pointer_type();
+
+    // LLVM/Inkwell setup
+    let context = Context::create();
+    let module = context.create_module("hacker_module");
+    let builder = context.create_builder();
+
+    let i32_type = context.i32_type();
+    let i8_type = context.i8_type();
+    let i8_ptr_type = context.ptr_type(AddressSpace::default());
+
     // Declare external functions
-    let mut sig_system = module.make_signature();
-    sig_system.params.push(AbiParam::new(pointer_type));
-    sig_system.returns.push(AbiParam::new(types::I32));
-    sig_system.call_conv = module.target_config().default_call_conv;
-    let system_id = module.declare_function("system", Linkage::Import, &sig_system).unwrap();
-    let mut sig_putenv = module.make_signature();
-    sig_putenv.params.push(AbiParam::new(pointer_type));
-    sig_putenv.returns.push(AbiParam::new(types::I32));
-    sig_putenv.call_conv = module.target_config().default_call_conv;
-    let putenv_id = module.declare_function("putenv", Linkage::Import, &sig_putenv).unwrap();
+    let system_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+    let system_fn = module.add_function("system", system_type, Some(Linkage::External));
+
+    let putenv_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+    let putenv_fn = module.add_function("putenv", putenv_type, Some(Linkage::External));
+
     // Main function
-    let mut sig_main = module.make_signature();
-    sig_main.returns.push(AbiParam::new(types::I32));
-    sig_main.call_conv = module.target_config().default_call_conv;
-    let main_id = module.declare_function("main", Linkage::Export, &sig_main).unwrap();
-    let mut ctx = cranelift_codegen::Context::for_function(Function::with_name_signature(Default::default(), sig_main.clone()));
-    let mut func_builder_ctx = FunctionBuilderContext::new();
-    let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
-    let entry_block = builder.create_block();
-    builder.switch_to_block(entry_block);
-    builder.seal_block(entry_block);
-    let local_system = module.declare_func_in_func(system_id, &mut builder.func);
-    let local_putenv = module.declare_func_in_func(putenv_id, &mut builder.func);
+    let main_type = i32_type.fn_type(&[], false);
+    let main_fn = module.add_function("main", main_type, None);
+    let entry_block = context.append_basic_block(main_fn, "entry");
+    builder.position_at_end(entry_block);
+
     // Embed environment variables (@vars)
-    let mut var_data_ids = Vec::new();
     for (i, (var, value)) in vars.iter().enumerate() {
-        let env_str = format!("{}={}", var, value);
-        let data_name = format!("env_{}", i);
-        let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
-        let mut data_ctx = DataDescription::new();
-        let mut bytes: Vec<u8> = env_str.into_bytes();
-        bytes.push(0);
-        data_ctx.define(bytes.into_boxed_slice());
-        module.define_data(data_id, &data_ctx).unwrap();
-        var_data_ids.push(data_id);
+        let env_str = format!("{}={}\0", var, value);
+        let bytes = env_str.as_bytes();
+        let array_type = i8_type.array_type(bytes.len() as u32);
+        let global = module.add_global(array_type, None, &format!("env_{}", i));
+        global.set_linkage(Linkage::Internal);
+        global.set_initializer(&context.const_string(bytes, false));
+        let zero = context.i64_type().const_int(0, false);
+        let ptr = unsafe { builder.build_in_bounds_gep(array_type, global.as_pointer_value(), &[zero], "env_ptr") }.unwrap();
+        let cast_ptr = builder.build_bit_cast(ptr, i8_ptr_type, "cast_env_ptr").unwrap();
+        builder.build_call(putenv_fn, &[cast_ptr.into()], "putenv_call");
     }
-    for data_id in var_data_ids {
-        let global = module.declare_data_in_func(data_id, &mut builder.func);
-        let ptr = builder.ins().global_value(pointer_type, global);
-        builder.ins().call(local_putenv, &[ptr]);
-    }
+
     // Embed commands
-    let mut cmd_data_ids = Vec::new();
     for (i, cmd) in final_cmds.iter().enumerate() {
-        let data_name = format!("cmd_{}", i);
-        let data_id = module.declare_data(&data_name, Linkage::Local, true, false).unwrap();
-        let mut data_ctx = DataDescription::new();
-        let mut bytes: Vec<u8> = cmd.as_bytes().to_vec();
-        bytes.push(0);
-        data_ctx.define(bytes.into_boxed_slice());
-        module.define_data(data_id, &data_ctx).unwrap();
-        cmd_data_ids.push(data_id);
+        let cmd_str = format!("{}\0", cmd);
+        let bytes = cmd_str.as_bytes();
+        let array_type = i8_type.array_type(bytes.len() as u32);
+        let global = module.add_global(array_type, None, &format!("cmd_{}", i));
+        global.set_linkage(Linkage::Internal);
+        global.set_initializer(&context.const_string(bytes, false));
+        let zero = context.i64_type().const_int(0, false);
+        let ptr = unsafe { builder.build_in_bounds_gep(array_type, global.as_pointer_value(), &[zero], "cmd_ptr") }.unwrap();
+        let cast_ptr = builder.build_bit_cast(ptr, i8_ptr_type, "cast_cmd_ptr").unwrap();
+        builder.build_call(system_fn, &[cast_ptr.into()], "system_call");
     }
-    for data_id in cmd_data_ids {
-        let global = module.declare_data_in_func(data_id, &mut builder.func);
-        let ptr = builder.ins().global_value(pointer_type, global);
-        builder.ins().call(local_system, &[ptr]);
+
+    let zero_val = i32_type.const_zero();
+    builder.build_return(Some(&zero_val));
+
+    // Verify module
+    if let Err(err) = module.verify() {
+        eprintln!("LLVM verification error: {}", err.to_string());
+        process::exit(1);
     }
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().return_(&[zero]);
-    builder.finalize();
-    module.define_function(main_id, &mut ctx).unwrap();
-    let obj = module.finish().object.write().expect("Write object failed");
+
+    // Run passes
+    let fpm = PassManager::create(&module);
+    fpm.run_on(&main_fn);
+
+    // Initialize targets
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let cpu = TargetMachine::get_host_cpu_name().to_string();
+    let features = TargetMachine::get_host_cpu_features().to_string();
+    let target_machine = target
+        .create_target_machine(
+            &triple,
+            &cpu,
+            &features,
+            OptimizationLevel::Default,
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Failed to create target machine"))?;
+
+    // Write object file
     let temp_obj_path = output_path.with_extension("o");
-    let mut file = File::create(&temp_obj_path)?;
-    file.write_all(&obj)?;
-    let status = Exec::shell(format!("gcc -o {} {}", output_path.display(), temp_obj_path.display()))
+    target_machine
+        .write_to_file(&module, FileType::Object, temp_obj_path.as_path())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    // Link with gcc
+    let status = Exec::shell(format!(
+        "gcc -o {} {}",
+        output_path.display(),
+        temp_obj_path.display()
+    ))
     .join()
     .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "Linking failed"));
     }
+
     fs::remove_file(temp_obj_path)?;
+
     Ok(())
 }
