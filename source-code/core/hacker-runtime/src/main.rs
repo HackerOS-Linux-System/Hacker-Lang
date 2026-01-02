@@ -143,7 +143,7 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
             } else {
                 spans.push((
                     SourceSpan::from((0, 0)),
-                    format!("Line {} out of range: {}", line_num, msg),
+                            format!("Line {} out of range: {}", line_num, msg),
                 ));
             }
         }
@@ -176,7 +176,7 @@ fn run_command(file: &str, verbose: bool) -> miette::Result<()> {
             writeln!(
                 temp_sh,
                 "command -v {} &> /dev/null || (sudo apt update && sudo apt install -y {})",
-                dep, dep
+                     dep, dep
             )
             .into_diagnostic()?;
         }
