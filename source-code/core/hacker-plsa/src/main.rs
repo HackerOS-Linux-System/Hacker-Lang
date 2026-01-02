@@ -12,29 +12,24 @@ use std::fs::{self, File};
 use std::io::{self, BufRead};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-
 const HACKER_DIR_SUFFIX: &str = "/.hackeros/hacker-lang";
-
 #[derive(Serialize, Clone)]
 struct Param {
     name: String,
     type_: String,
     default: Option<String>,
 }
-
 #[derive(Serialize, Clone)]
 struct Function {
     params: Vec<Param>,
     body: Vec<String>,
 }
-
 #[derive(Serialize, Clone)]
 struct Plugin {
     path: String,
     #[serde(rename = "super")]
     is_super: bool,
 }
-
 #[derive(Serialize, Clone)]
 struct ParseResult {
     deps: Vec<String>,
@@ -56,11 +51,9 @@ struct ParseResult {
     #[serde(rename = "config")]
     config_data: HashMap<String, String>,
 }
-
 fn trim(s: &str) -> String {
     s.trim().to_string()
 }
-
 fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
     let mut res = ParseResult {
         deps: Vec::new(),
@@ -80,15 +73,12 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
         errors: Vec::new(),
         config_data: HashMap::new(),
     };
-
     let mut in_config = false;
     let mut in_comment = false;
     let mut in_function: Option<String> = None;
     let mut line_num: u32 = 0;
-
     let home = env::var("HOME").unwrap_or_default();
     let hacker_dir: PathBuf = Path::new(&home).join(HACKER_DIR_SUFFIX.strip_prefix('/').unwrap_or(HACKER_DIR_SUFFIX));
-
     let file = match File::open(file_path) {
         Ok(f) => f,
         Err(_) => {
@@ -99,7 +89,6 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             return res;
         }
     };
-
     let reader = io::BufReader::new(file);
     'line_loop: for line_res in reader.lines() {
         line_num += 1;
@@ -127,18 +116,18 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
         if line == "[" {
             if in_config {
                 res.errors
-                    .push(format!("Line {}: Nested config section", line_num));
+                .push(format!("Line {}: Nested config section", line_num));
             }
             if in_function.is_some() {
                 res.errors
-                    .push(format!("Line {}: Config in function", line_num));
+                .push(format!("Line {}: Config in function", line_num));
             }
             in_config = true;
             continue;
         } else if line == "]" {
             if !in_config {
                 res.errors
-                    .push(format!("Line {}: Closing ] without [", line_num));
+                .push(format!("Line {}: Closing ] without [", line_num));
             }
             in_config = false;
             continue;
@@ -156,7 +145,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 in_function = None;
             } else {
                 res.errors
-                    .push(format!("Line {}: Ending function without start", line_num));
+                .push(format!("Line {}: Ending function without start", line_num));
             }
             continue;
         } else if line.starts_with(':') {
@@ -168,7 +157,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             };
             if func_name.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty function name", line_num));
+                .push(format!("Line {}: Empty function name", line_num));
                 continue;
             }
             if in_function.is_some() {
@@ -210,7 +199,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             };
             if func_name.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty function call", line_num));
+                .push(format!("Line {}: Empty function call", line_num));
                 continue;
             }
             if let Some(func) = res.functions.get(&func_name).cloned() {
@@ -290,7 +279,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 || line.starts_with("T>"))
             {
                 res.errors
-                    .push(format!("Line {}: Invalid in function", line_num));
+                .push(format!("Line {}: Invalid in function", line_num));
                 continue;
             }
         }
@@ -299,7 +288,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             parsed = true;
             if in_function.is_some() {
                 res.errors
-                    .push(format!("Line {}: Deps not allowed in function", line_num));
+                .push(format!("Line {}: Deps not allowed in function", line_num));
                 continue;
             }
             let dep = trim(&line[2..]);
@@ -307,19 +296,19 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 res.deps.push(dep);
             } else {
                 res.errors
-                    .push(format!("Line {}: Empty system dependency", line_num));
+                .push(format!("Line {}: Empty system dependency", line_num));
             }
         } else if line.starts_with('#') {
             parsed = true;
             if in_function.is_some() {
                 res.errors
-                    .push(format!("Line {}: Libs not allowed in function", line_num));
+                .push(format!("Line {}: Libs not allowed in function", line_num));
                 continue;
             }
             let full_lib = trim(&line[1..]);
             if full_lib.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty library/include", line_num));
+                .push(format!("Line {}: Empty library/include", line_num));
                 continue;
             }
             let (prefix, lib_name) = if let Some(colon_pos) = full_lib.find(':') {
@@ -371,7 +360,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                     let mode = metadata.mode();
                     if (mode & 0o111) != 0 {
                         res.binaries
-                            .push(lib_bin_path.to_string_lossy().to_string());
+                        .push(lib_bin_path.to_string_lossy().to_string());
                     } else {
                         res.libs.push(lib_name);
                     }
@@ -398,7 +387,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             }
             if mut_cmd.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty separate file command", line_num));
+                .push(format!("Line {}: Empty separate file command", line_num));
             } else {
                 let target = if let Some(ref f) = in_function {
                     &mut res.functions.get_mut(f).unwrap().body
@@ -421,7 +410,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             }
             if mut_cmd.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty command with vars", line_num));
+                .push(format!("Line {}: Empty command with vars", line_num));
             } else {
                 let target = if let Some(ref f) = in_function {
                     &mut res.functions.get_mut(f).unwrap().body
@@ -469,13 +458,13 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             let after = trim(&line[pos..]);
             if !after.starts_with('=') {
                 res.errors
-                    .push(format!("Line {}: Invalid variable", line_num));
+                .push(format!("Line {}: Invalid variable", line_num));
                 continue;
             }
             let mut value = trim(&after[1..]);
             if value.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Invalid variable", line_num));
+                .push(format!("Line {}: Invalid variable", line_num));
                 continue;
             }
             // Handle list and dict
@@ -539,13 +528,13 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             let after = trim(&line[pos..]);
             if !after.starts_with('=') {
                 res.errors
-                    .push(format!("Line {}: Invalid local variable", line_num));
+                .push(format!("Line {}: Invalid local variable", line_num));
                 continue;
             }
             let mut value = trim(&after[1..]);
             if value.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Invalid local variable", line_num));
+                .push(format!("Line {}: Invalid local variable", line_num));
                 continue;
             }
             // Handle list and dict
@@ -597,7 +586,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             let plugin_name = trim(&line[1..]);
             if plugin_name.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty plugin name", line_num));
+                .push(format!("Line {}: Empty plugin name", line_num));
                 continue;
             }
             let plugin_dir = hacker_dir.join("plugins").join(&plugin_name);
@@ -606,7 +595,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 if (mode & 0o111) != 0 {
                     res.plugins.push(Plugin {
                         path: plugin_dir.to_string_lossy().to_string(),
-                        is_super,
+                                     is_super,
                     });
                 } else {
                     res.errors.push(format!(
@@ -634,18 +623,18 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                     Ok(n) => n,
                     Err(_) => {
                         res.errors
-                            .push(format!("Line {}: Invalid loop count", line_num));
+                        .push(format!("Line {}: Invalid loop count", line_num));
                         continue;
                     }
                 };
                 if num < 0 {
                     res.errors
-                        .push(format!("Line {}: Negative loop count", line_num));
+                    .push(format!("Line {}: Negative loop count", line_num));
                     continue;
                 }
                 if cmd_part.is_empty() {
                     res.errors
-                        .push(format!("Line {}: Empty loop command", line_num));
+                    .push(format!("Line {}: Empty loop command", line_num));
                     continue;
                 }
                 let cmd_base = if is_super {
@@ -663,7 +652,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 }
             } else {
                 res.errors
-                    .push(format!("Line {}: Invalid loop syntax", line_num));
+                .push(format!("Line {}: Invalid loop syntax", line_num));
             }
         } else if line.starts_with('?') {
             parsed = true;
@@ -677,7 +666,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 };
                 if condition.is_empty() || cmd_part.is_empty() {
                     res.errors
-                        .push(format!("Line {}: Invalid conditional", line_num));
+                    .push(format!("Line {}: Invalid conditional", line_num));
                     continue;
                 }
                 let cmd = if is_super {
@@ -694,7 +683,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
                 target.push(if_cmd);
             } else {
                 res.errors
-                    .push(format!("Line {}: Invalid conditional", line_num));
+                .push(format!("Line {}: Invalid conditional", line_num));
             }
         } else if line.starts_with('&') {
             parsed = true;
@@ -706,7 +695,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
             };
             if cmd_part.is_empty() {
                 res.errors
-                    .push(format!("Line {}: Empty background command", line_num));
+                .push(format!("Line {}: Empty background command", line_num));
                 continue;
             }
             let mut cmd = format!("{} &", cmd_part);
@@ -780,7 +769,7 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
         }
         if !parsed {
             res.errors
-                .push(format!("Line {}: Invalid syntax", line_num));
+            .push(format!("Line {}: Invalid syntax", line_num));
         }
     }
     if in_config {
@@ -792,34 +781,26 @@ fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
     if in_function.is_some() {
         res.errors.push("Unclosed function block".to_string());
     }
-
     // Sort with rayon
     res.deps.par_sort_unstable();
     res.libs.par_sort_unstable();
     res.rust_libs.par_sort_unstable();
     res.python_libs.par_sort_unstable();
     res.java_libs.par_sort_unstable();
-
     res
 }
-
 fn main() -> Result<()> {
     env_logger::init();
     info!("Starting hacker-plsa");
-
     #[derive(Parser)]
     #[command(version = "0.1.0")]
     struct Args {
         #[arg(long)]
         verbose: bool,
-
         file: String,
     }
-
     let args = Args::parse();
-
     let res = parse_hacker_file(&args.file, args.verbose);
-
     if args.verbose {
         if !res.errors.is_empty() {
             println!("\n{}", "Errors:".red().bold());
@@ -854,9 +835,7 @@ fn main() -> Result<()> {
         let config_str: Vec<String> = res.config_data.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
         println!("Config: {{{}}}", config_str.join(", "));
     }
-
     let json = serde_json::to_string(&res)?;
     println!("{}", json);
-
     Ok(())
 }
