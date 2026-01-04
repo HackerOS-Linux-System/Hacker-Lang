@@ -535,23 +535,23 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     }
     Ok(ParseResult {
         deps,
-        libs,
-        rust_libs,
-        python_libs,
-        java_libs,
-        vars,
-        local_vars,
-        cmds,
-        cmds_with_vars,
-        cmds_separate,
-        includes,
-        binaries,
-        plugins,
-        functions,
-        errors,
-        config,
-        built_in_libs,
-        translator_blocks,
+       libs,
+       rust_libs,
+       python_libs,
+       java_libs,
+       vars,
+       local_vars,
+       cmds,
+       cmds_with_vars,
+       cmds_separate,
+       includes,
+       binaries,
+       plugins,
+       functions,
+       errors,
+       config,
+       built_in_libs,
+       translator_blocks,
     })
 }
 fn generate_check_cmd(dep: &str) -> String {
@@ -888,7 +888,7 @@ fn main() -> io::Result<()> {
     let status = Exec::shell(format!(
         "gcc -o {} {}",
         output_path.display(),
-        temp_obj_path.display()
+                                     temp_obj_path.display()
     ))
     .join()
     .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
