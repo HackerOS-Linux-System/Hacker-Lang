@@ -1,841 +1,891 @@
-use anyhow::Result;
-use clap::Parser;
-use colored::Colorize;
-use env_logger;
-use log::info;
-use rayon::prelude::*;
-use regex::Regex;
-use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs::{self, File};
-use std::io::{self, BufRead};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-const HACKER_DIR_SUFFIX: &str = "/.hackeros/hacker-lang";
-#[derive(Serialize, Clone)]
-struct Param {
-    name: String,
-    type_: String,
-    default: Option<String>,
+package main
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:slice"
+import "core:strconv"
+import "core:encoding/json"
+import "core:path/filepath"
+
+HACKER_DIR_SUFFIX :: "/.hackeros/hacker-lang"
+
+Param :: struct {
+	name:    string,
+	type_:   string `json:"type"`,
+	default: Maybe(string),
 }
-#[derive(Serialize, Clone)]
-struct Function {
-    params: Vec<Param>,
-    body: Vec<String>,
+
+Function :: struct {
+	params: [dynamic]Param,
+	body:   [dynamic]string,
 }
-#[derive(Serialize, Clone)]
-struct Plugin {
-    path: String,
-    #[serde(rename = "super")]
-    is_super: bool,
+
+Plugin :: struct {
+	path:     string,
+	is_super: bool `json:"super"`,
 }
-#[derive(Serialize, Clone)]
-struct ParseResult {
-    deps: Vec<String>,
-    libs: Vec<String>,
-    rust_libs: Vec<String>,
-    python_libs: Vec<String>,
-    java_libs: Vec<String>,
-    #[serde(rename = "vars")]
-    vars_dict: HashMap<String, String>,
-    local_vars: HashMap<String, String>,
-    cmds: Vec<String>,
-    cmds_with_vars: Vec<String>,
-    cmds_separate: Vec<String>,
-    includes: Vec<String>,
-    binaries: Vec<String>,
-    plugins: Vec<Plugin>,
-    functions: HashMap<String, Function>,
-    errors: Vec<String>,
-    #[serde(rename = "config")]
-    config_data: HashMap<String, String>,
+
+ParseResult :: struct {
+	deps:         [dynamic]string,
+	libs:         [dynamic]string,
+	rust_libs:    [dynamic]string,
+	python_libs:  [dynamic]string,
+	java_libs:    [dynamic]string,
+	vars_dict:    map[string]string `json:"vars"`,
+	local_vars:   map[string]string,
+	cmds:         [dynamic]string,
+	cmds_with_vars: [dynamic]string,
+	cmds_separate:[dynamic]string,
+	includes:     [dynamic]string,
+	binaries:     [dynamic]string,
+	plugins:      [dynamic]Plugin,
+	functions:    map[string]Function,
+	errors:       [dynamic]string,
+	config_data:  map[string]string `json:"config"`,
 }
-fn trim(s: &str) -> String {
-    s.trim().to_string()
+
+trim :: proc(s: string) -> string {
+	return strings.trim_space(s)
 }
-fn parse_hacker_file(file_path: &str, verbose: bool) -> ParseResult {
-    let mut res = ParseResult {
-        deps: Vec::new(),
-        libs: Vec::new(),
-        rust_libs: Vec::new(),
-        python_libs: Vec::new(),
-        java_libs: Vec::new(),
-        vars_dict: HashMap::new(),
-        local_vars: HashMap::new(),
-        cmds: Vec::new(),
-        cmds_with_vars: Vec::new(),
-        cmds_separate: Vec::new(),
-        includes: Vec::new(),
-        binaries: Vec::new(),
-        plugins: Vec::new(),
-        functions: HashMap::new(),
-        errors: Vec::new(),
-        config_data: HashMap::new(),
-    };
-    let mut in_config = false;
-    let mut in_comment = false;
-    let mut in_function: Option<String> = None;
-    let mut line_num: u32 = 0;
-    let home = env::var("HOME").unwrap_or_default();
-    let hacker_dir: PathBuf = Path::new(&home).join(HACKER_DIR_SUFFIX.strip_prefix('/').unwrap_or(HACKER_DIR_SUFFIX));
-    let file = match File::open(file_path) {
-        Ok(f) => f,
-        Err(_) => {
-            if verbose {
-                println!("File {} not found", file_path);
-            }
-            res.errors.push(format!("File {} not found", file_path));
-            return res;
-        }
-    };
-    let reader = io::BufReader::new(file);
-    'line_loop: for line_res in reader.lines() {
-        line_num += 1;
-        let line_slice = match line_res {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let line_trimmed = trim(&line_slice);
-        if line_trimmed.is_empty() {
-            continue;
-        }
-        let mut line = line_trimmed.clone();
-        let mut is_super = false;
-        if line.starts_with('^') {
-            is_super = true;
-            line = trim(&line[1..]);
-        }
-        if line == "!!" {
-            in_comment = !in_comment;
-            continue;
-        }
-        if in_comment {
-            continue;
-        }
-        if line == "[" {
-            if in_config {
-                res.errors
-                .push(format!("Line {}: Nested config section", line_num));
-            }
-            if in_function.is_some() {
-                res.errors
-                .push(format!("Line {}: Config in function", line_num));
-            }
-            in_config = true;
-            continue;
-        } else if line == "]" {
-            if !in_config {
-                res.errors
-                .push(format!("Line {}: Closing ] without [", line_num));
-            }
-            in_config = false;
-            continue;
-        }
-        if in_config {
-            if let Some(eq_pos) = line.find('=') {
-                let key = trim(&line[..eq_pos]);
-                let value = trim(&line[eq_pos + 1..]);
-                res.config_data.insert(key, value);
-            }
-            continue;
-        }
-        if line == ":" {
-            if in_function.is_some() {
-                in_function = None;
-            } else {
-                res.errors
-                .push(format!("Line {}: Ending function without start", line_num));
-            }
-            continue;
-        } else if line.starts_with(':') {
-            let rest = trim(&line[1..]);
-            let (func_name, params_str_opt) = if let Some(pos) = rest.find('(') {
-                (trim(&rest[..pos]), Some(trim(&rest[pos + 1..])))
-            } else {
-                (rest, None)
-            };
-            if func_name.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty function name", line_num));
-                continue;
-            }
-            if in_function.is_some() {
-                res.errors.push(format!("Line {}: Nested function", line_num));
-                continue;
-            }
-            let mut params = Vec::new();
-            if let Some(mut params_str) = params_str_opt {
-                if !params_str.ends_with(')') {
-                    res.errors.push(format!("Line {}: Missing ) in function definition", line_num));
-                    continue;
-                }
-                params_str = trim(&params_str[..params_str.len() - 1]);
-                for p in params_str.split(',') {
-                    let p = trim(p);
-                    let (name, rest) = if let Some(col_pos) = p.find(':') {
-                        (trim(&p[..col_pos]), trim(&p[col_pos + 1..]))
-                    } else {
-                        (p, String::new())
-                    };
-                    let (type_, default) = if let Some(eq_pos) = rest.find('=') {
-                        (trim(&rest[..eq_pos]), Some(trim(&rest[eq_pos + 1..])))
-                    } else {
-                        (rest, None)
-                    };
-                    let type_ = if type_.is_empty() { "str".to_string() } else { type_ };
-                    params.push(Param { name, type_, default });
-                }
-            }
-            res.functions.insert(func_name.clone(), Function { params, body: Vec::new() });
-            in_function = Some(func_name);
-            continue;
-        } else if line.starts_with('.') {
-            let rest = trim(&line[1..]);
-            let (func_name, args_str_opt) = if let Some(pos) = rest.find('(') {
-                (trim(&rest[..pos]), Some(trim(&rest[pos + 1..])))
-            } else {
-                (rest, None)
-            };
-            if func_name.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty function call", line_num));
-                continue;
-            }
-            if let Some(func) = res.functions.get(&func_name).cloned() {
-                let mut args = Vec::new();
-                if let Some(mut args_str) = args_str_opt {
-                    if !args_str.ends_with(')') {
-                        res.errors.push(format!("Line {}: Missing ) in function call", line_num));
-                        continue;
-                    }
-                    args_str = trim(&args_str[..args_str.len() - 1]);
-                    args = args_str.split(',').map(trim).collect();
-                }
-                let params = func.params;
-                if args.len() > params.len() {
-                    res.errors.push(format!("Line {}: Too many arguments for {}", line_num, func_name));
-                    continue;
-                }
-                let mut sub_map: HashMap<String, String> = HashMap::new();
-                for (i, param) in params.iter().enumerate() {
-                    let val = if i < args.len() {
-                        args[i].clone()
-                    } else if let Some(ref d) = param.default {
-                        d.clone()
-                    } else {
-                        res.errors.push(format!("Line {}: Missing argument {} for {}", line_num, param.name, func_name));
-                        continue 'line_loop;
-                    };
-                    let valid = match param.type_.as_str() {
-                        "int" => val.parse::<i64>().is_ok(),
-                        "bool" => val == "true" || val == "false",
-                        "str" => true,
-                        "list" => val.contains(' '), // rough check
-                        "dict" => val.contains('='),
-                        _ => true,
-                    };
-                    if !valid {
-                        res.errors.push(format!("Line {}: Type mismatch for {}: expected {}, got {}", line_num, param.name, param.type_, val));
-                        continue 'line_loop;
-                    }
-                    sub_map.insert(param.name.clone(), val);
-                }
-                let body = func.body;
-                let sub_body: Vec<String> = body.par_iter().map(|cmd| {
-                    let mut new_cmd = cmd.clone();
-                    for (name, val) in &sub_map {
-                        new_cmd = new_cmd.replace(&format!("${}", name), val);
-                    }
-                    new_cmd
-                }).collect();
-                if let Some(ref f) = in_function {
-                    if let Some(target_func) = res.functions.get_mut(f) {
-                        target_func.body.extend(sub_body);
-                    }
-                } else {
-                    res.cmds.extend(sub_body);
-                }
-            } else {
-                res.errors.push(format!(
-                    "Line {}: Unknown function {}",
-                    line_num, func_name
-                ));
-            }
-            continue;
-        }
-        if let Some(_) = &in_function {
-            if !(line.starts_with('>')
-                || line.starts_with('=')
-                || line.starts_with('?')
-                || line.starts_with('&')
-                || line.starts_with('!')
-                || line.starts_with('@')
-                || line.starts_with('$')
-                || line.starts_with('\\')
-                || line.starts_with(">>")
-                || line.starts_with(">>>")
-                || line.starts_with("%")
-                || line.starts_with("T>"))
-            {
-                res.errors
-                .push(format!("Line {}: Invalid in function", line_num));
-                continue;
-            }
-        }
-        let mut parsed = false;
-        if line.starts_with("//") {
-            parsed = true;
-            if in_function.is_some() {
-                res.errors
-                .push(format!("Line {}: Deps not allowed in function", line_num));
-                continue;
-            }
-            let dep = trim(&line[2..]);
-            if !dep.is_empty() {
-                res.deps.push(dep);
-            } else {
-                res.errors
-                .push(format!("Line {}: Empty system dependency", line_num));
-            }
-        } else if line.starts_with('#') {
-            parsed = true;
-            if in_function.is_some() {
-                res.errors
-                .push(format!("Line {}: Libs not allowed in function", line_num));
-                continue;
-            }
-            let full_lib = trim(&line[1..]);
-            if full_lib.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty library/include", line_num));
-                continue;
-            }
-            let (prefix, lib_name) = if let Some(colon_pos) = full_lib.find(':') {
-                (trim(&full_lib[..colon_pos]), trim(&full_lib[colon_pos + 1..]))
-            } else {
-                ("bytes".to_string(), full_lib)
-            };
-            if lib_name.is_empty() {
-                res.errors.push(format!(
-                    "Line {}: Empty library name after prefix",
-                    line_num
-                ));
-                continue;
-            }
-            if prefix == "rust" {
-                res.rust_libs.push(lib_name);
-            } else if prefix == "python" {
-                res.python_libs.push(lib_name);
-            } else if prefix == "java" {
-                res.java_libs.push(lib_name);
-            } else if prefix == "bytes" {
-                let lib_dir = hacker_dir.join("libs").join(&lib_name);
-                let lib_hacker_path = lib_dir.join("main.hacker");
-                let lib_bin_path = hacker_dir.join("libs").join(&lib_name);
-                if lib_hacker_path.exists() {
-                    res.includes.push(lib_name.clone());
-                    let sub = parse_hacker_file(&lib_hacker_path.to_string_lossy(), verbose);
-                    res.deps.extend(sub.deps);
-                    res.libs.extend(sub.libs);
-                    res.rust_libs.extend(sub.rust_libs);
-                    res.python_libs.extend(sub.python_libs);
-                    res.java_libs.extend(sub.java_libs);
-                    res.vars_dict.extend(sub.vars_dict);
-                    res.local_vars.extend(sub.local_vars);
-                    res.cmds.extend(sub.cmds);
-                    res.cmds_with_vars.extend(sub.cmds_with_vars);
-                    res.cmds_separate.extend(sub.cmds_separate);
-                    res.includes.extend(sub.includes);
-                    res.binaries.extend(sub.binaries);
-                    res.plugins.extend(sub.plugins);
-                    for (k, v) in sub.functions {
-                        res.functions.insert(k, v);
-                    }
-                    for sub_err in sub.errors {
-                        res.errors.push(format!("In {}: {}", lib_name, sub_err));
-                    }
-                }
-                if let Ok(metadata) = fs::metadata(&lib_bin_path) {
-                    let mode = metadata.mode();
-                    if (mode & 0o111) != 0 {
-                        res.binaries
-                        .push(lib_bin_path.to_string_lossy().to_string());
-                    } else {
-                        res.libs.push(lib_name);
-                    }
-                } else {
-                    res.libs.push(lib_name);
-                }
-            } else {
-                res.errors.push(format!(
-                    "Line {}: Unknown library prefix: {}",
-                    line_num, prefix
-                ));
-            }
-        } else if line.starts_with(">>>") {
-            parsed = true;
-            let cmd = trim(&line[3..]);
-            let cmd = if let Some(excl) = cmd.find('!') {
-                trim(&cmd[..excl])
-            } else {
-                cmd
-            };
-            let mut mut_cmd = cmd.clone();
-            if is_super {
-                mut_cmd = format!("sudo {}", mut_cmd);
-            }
-            if mut_cmd.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty separate file command", line_num));
-            } else {
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds_separate
-                };
-                target.push(mut_cmd);
-            }
-        } else if line.starts_with(">>") {
-            parsed = true;
-            let cmd = trim(&line[2..]);
-            let cmd = if let Some(excl) = cmd.find('!') {
-                trim(&cmd[..excl])
-            } else {
-                cmd
-            };
-            let mut mut_cmd = cmd.clone();
-            if is_super {
-                mut_cmd = format!("sudo {}", mut_cmd);
-            }
-            if mut_cmd.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty command with vars", line_num));
-            } else {
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds_with_vars
-                };
-                target.push(mut_cmd);
-            }
-        } else if line.starts_with('>') {
-            parsed = true;
-            let cmd = trim(&line[1..]);
-            let cmd = if let Some(excl) = cmd.find('!') {
-                trim(&cmd[..excl])
-            } else {
-                cmd
-            };
-            let mut mut_cmd = cmd.clone();
-            if is_super {
-                mut_cmd = format!("sudo {}", mut_cmd);
-            }
-            if mut_cmd.is_empty() {
-                res.errors.push(format!("Line {}: Empty command", line_num));
-            } else {
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds
-                };
-                target.push(mut_cmd);
-            }
-        } else if line.starts_with('@') {
-            parsed = true;
-            let mut pos = 1;
-            while pos < line.len() && (line.as_bytes()[pos].is_ascii_alphanumeric() || line.as_bytes()[pos] == b'_') {
-                pos += 1;
-            }
-            let key_str = &line[1..pos];
-            let (key, type_) = if let Some(col_pos) = key_str.find(':') {
-                (&key_str[..col_pos], &key_str[col_pos + 1..])
-            } else {
-                (key_str, "str")
-            };
-            let key = key.to_string();
-            let type_ = type_.to_string();
-            let after = trim(&line[pos..]);
-            if !after.starts_with('=') {
-                res.errors
-                .push(format!("Line {}: Invalid variable", line_num));
-                continue;
-            }
-            let mut value = trim(&after[1..]);
-            if value.is_empty() {
-                res.errors
-                .push(format!("Line {}: Invalid variable", line_num));
-                continue;
-            }
-            // Handle list and dict
-            if type_ == "list" {
-                if value.starts_with('[') && value.ends_with(']') {
-                    let inner = &value[1..value.len() - 1];
-                    let items: Vec<String> = inner.split(',').map(trim).collect();
-                    value = items.join(" ");
-                } else {
-                    res.errors.push(format!("Line {}: Invalid list format for {}", line_num, key));
-                    continue;
-                }
-            } else if type_ == "dict" {
-                if value.starts_with('{') && value.ends_with('}') {
-                    let inner = &value[1..value.len() - 1];
-                    let pairs: Vec<String> = inner.split(',').map(|p| {
-                        let pp: Vec<String> = p.splitn(2, ':').map(trim).collect();
-                        if pp.len() == 2 {
-                            format!("{}={}", pp[0], pp[1])
-                        } else {
-                            String::new()
-                        }
-                    }).filter(|s| !s.is_empty()).collect();
-                    value = pairs.join(" ");
-                } else {
-                    res.errors.push(format!("Line {}: Invalid dict format for {}", line_num, key));
-                    continue;
-                }
-            }
-            // Validate type
-            let valid = match type_.as_str() {
-                "int" => value.parse::<i64>().is_ok(),
-                "bool" => value == "true" || value == "false",
-                "str" => true,
-                "list" => true,
-                "dict" => true,
-                _ => {
-                    res.errors.push(format!("Line {}: Unknown type {} for variable {}", line_num, type_, key));
-                    false
-                }
-            };
-            if !valid {
-                res.errors.push(format!("Line {}: Type validation failed for {}: {}", line_num, key, value));
-                continue;
-            }
-            res.vars_dict.insert(key, value);
-        } else if line.starts_with('$') {
-            parsed = true;
-            let mut pos = 1;
-            while pos < line.len() && (line.as_bytes()[pos].is_ascii_alphanumeric() || line.as_bytes()[pos] == b'_') {
-                pos += 1;
-            }
-            let key_str = &line[1..pos];
-            let (key, type_) = if let Some(col_pos) = key_str.find(':') {
-                (&key_str[..col_pos], &key_str[col_pos + 1..])
-            } else {
-                (key_str, "str")
-            };
-            let key = key.to_string();
-            let type_ = type_.to_string();
-            let after = trim(&line[pos..]);
-            if !after.starts_with('=') {
-                res.errors
-                .push(format!("Line {}: Invalid local variable", line_num));
-                continue;
-            }
-            let mut value = trim(&after[1..]);
-            if value.is_empty() {
-                res.errors
-                .push(format!("Line {}: Invalid local variable", line_num));
-                continue;
-            }
-            // Handle list and dict
-            if type_ == "list" {
-                if value.starts_with('[') && value.ends_with(']') {
-                    let inner = &value[1..value.len() - 1];
-                    let items: Vec<String> = inner.split(',').map(trim).collect();
-                    value = items.join(" ");
-                } else {
-                    res.errors.push(format!("Line {}: Invalid list format for {}", line_num, key));
-                    continue;
-                }
-            } else if type_ == "dict" {
-                if value.starts_with('{') && value.ends_with('}') {
-                    let inner = &value[1..value.len() - 1];
-                    let pairs: Vec<String> = inner.split(',').map(|p| {
-                        let pp: Vec<String> = p.splitn(2, ':').map(trim).collect();
-                        if pp.len() == 2 {
-                            format!("{}={}", pp[0], pp[1])
-                        } else {
-                            String::new()
-                        }
-                    }).filter(|s| !s.is_empty()).collect();
-                    value = pairs.join(" ");
-                } else {
-                    res.errors.push(format!("Line {}: Invalid dict format for {}", line_num, key));
-                    continue;
-                }
-            }
-            // Validate type
-            let valid = match type_.as_str() {
-                "int" => value.parse::<i64>().is_ok(),
-                "bool" => value == "true" || value == "false",
-                "str" => true,
-                "list" => true,
-                "dict" => true,
-                _ => {
-                    res.errors.push(format!("Line {}: Unknown type {} for local variable {}", line_num, type_, key));
-                    false
-                }
-            };
-            if !valid {
-                res.errors.push(format!("Line {}: Type validation failed for local {}: {}", line_num, key, value));
-                continue;
-            }
-            res.local_vars.insert(key, value);
-        } else if line.starts_with('\\') {
-            parsed = true;
-            let plugin_name = trim(&line[1..]);
-            if plugin_name.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty plugin name", line_num));
-                continue;
-            }
-            let plugin_dir = hacker_dir.join("plugins").join(&plugin_name);
-            if let Ok(metadata) = fs::metadata(&plugin_dir) {
-                let mode = metadata.mode();
-                if (mode & 0o111) != 0 {
-                    res.plugins.push(Plugin {
-                        path: plugin_dir.to_string_lossy().to_string(),
-                                     is_super,
-                    });
-                } else {
-                    res.errors.push(format!(
-                        "Line {}: Plugin {} not found or not executable",
-                        line_num, plugin_name
-                    ));
-                }
-            } else {
-                res.errors.push(format!(
-                    "Line {}: Plugin {} not found or not executable",
-                    line_num, plugin_name
-                ));
-            }
-        } else if line.starts_with('=') {
-            parsed = true;
-            if let Some(gt_pos) = line.find('>') {
-                let num_str = trim(&line[1..gt_pos]);
-                let cmd_part = trim(&line[gt_pos + 1..]);
-                let cmd_part = if let Some(excl) = cmd_part.find('!') {
-                    trim(&cmd_part[..excl])
-                } else {
-                    cmd_part
-                };
-                let num: i32 = match num_str.parse() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        res.errors
-                        .push(format!("Line {}: Invalid loop count", line_num));
-                        continue;
-                    }
-                };
-                if num < 0 {
-                    res.errors
-                    .push(format!("Line {}: Negative loop count", line_num));
-                    continue;
-                }
-                if cmd_part.is_empty() {
-                    res.errors
-                    .push(format!("Line {}: Empty loop command", line_num));
-                    continue;
-                }
-                let cmd_base = if is_super {
-                    format!("sudo {}", cmd_part)
-                } else {
-                    cmd_part
-                };
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds
-                };
-                for _ in 0..num {
-                    target.push(cmd_base.clone());
-                }
-            } else {
-                res.errors
-                .push(format!("Line {}: Invalid loop syntax", line_num));
-            }
-        } else if line.starts_with('?') {
-            parsed = true;
-            if let Some(gt_pos) = line.find('>') {
-                let condition = trim(&line[1..gt_pos]);
-                let cmd_part = trim(&line[gt_pos + 1..]);
-                let cmd_part = if let Some(excl) = cmd_part.find('!') {
-                    trim(&cmd_part[..excl])
-                } else {
-                    cmd_part
-                };
-                if condition.is_empty() || cmd_part.is_empty() {
-                    res.errors
-                    .push(format!("Line {}: Invalid conditional", line_num));
-                    continue;
-                }
-                let cmd = if is_super {
-                    format!("sudo {}", cmd_part)
-                } else {
-                    cmd_part
-                };
-                let if_cmd = format!("if {}; then {}; fi", condition, cmd);
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds
-                };
-                target.push(if_cmd);
-            } else {
-                res.errors
-                .push(format!("Line {}: Invalid conditional", line_num));
-            }
-        } else if line.starts_with('&') {
-            parsed = true;
-            let cmd_part = trim(&line[1..]);
-            let cmd_part = if let Some(excl) = cmd_part.find('!') {
-                trim(&cmd_part[..excl])
-            } else {
-                cmd_part
-            };
-            if cmd_part.is_empty() {
-                res.errors
-                .push(format!("Line {}: Empty background command", line_num));
-                continue;
-            }
-            let mut cmd = format!("{} &", cmd_part);
-            if is_super {
-                cmd = format!("sudo {}", cmd);
-            }
-            let target = if let Some(ref f) = in_function {
-                &mut res.functions.get_mut(f).unwrap().body
-            } else {
-                &mut res.cmds
-            };
-            target.push(cmd);
-        } else if line.starts_with('!') {
-            parsed = true;
-            // ignore
-        } else if line.starts_with("%") {
-            parsed = true;
-            let rest = trim(&line[1..]);
-            if let Some(gt_pos) = rest.find('>') {
-                let list_var = trim(&rest[..gt_pos]);
-                let cmd_part = trim(&rest[gt_pos + 1..]);
-                if list_var.is_empty() || cmd_part.is_empty() {
-                    res.errors.push(format!("Line {}: Invalid foreach syntax", line_num));
-                    continue;
-                }
-                let mut foreach_cmd = format!("for item in {}; do {}; done", list_var, cmd_part);
-                if is_super {
-                    foreach_cmd = format!("sudo {}", foreach_cmd);
-                }
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds
-                };
-                target.push(foreach_cmd);
-            } else {
-                res.errors.push(format!("Line {}: Invalid foreach syntax", line_num));
-            }
-        } else if line.starts_with("T>") {
-            parsed = true;
-            if let Some(c_pos) = line.find("C>") {
-                let try_cmd = trim(&line[2..c_pos]);
-                let rest_after_c = &line[c_pos + 2..];
-                let f_pos_opt = rest_after_c.find("F>");
-                let catch_cmd = if let Some(f_pos) = f_pos_opt {
-                    trim(&rest_after_c[..f_pos])
-                } else {
-                    trim(rest_after_c)
-                };
-                let finally_cmd = if let Some(f_pos) = f_pos_opt {
-                    trim(&rest_after_c[f_pos + 2..])
-                } else {
-                    String::new()
-                };
-                let mut try_catch_cmd = format!("( {} ) || {};", try_cmd, catch_cmd);
-                if !finally_cmd.is_empty() {
-                    try_catch_cmd = format!("{} {}", try_catch_cmd, finally_cmd);
-                }
-                if is_super {
-                    try_catch_cmd = format!("sudo {}", try_catch_cmd);
-                }
-                let target = if let Some(ref f) = in_function {
-                    &mut res.functions.get_mut(f).unwrap().body
-                } else {
-                    &mut res.cmds
-                };
-                target.push(try_catch_cmd);
-            } else {
-                res.errors.push(format!("Line {}: Invalid try-catch syntax", line_num));
-            }
-        }
-        if !parsed {
-            res.errors
-            .push(format!("Line {}: Invalid syntax", line_num));
-        }
-    }
-    if in_config {
-        res.errors.push("Unclosed config section".to_string());
-    }
-    if in_comment {
-        res.errors.push("Unclosed comment block".to_string());
-    }
-    if in_function.is_some() {
-        res.errors.push("Unclosed function block".to_string());
-    }
-    // Sort with rayon
-    res.deps.par_sort_unstable();
-    res.libs.par_sort_unstable();
-    res.rust_libs.par_sort_unstable();
-    res.python_libs.par_sort_unstable();
-    res.java_libs.par_sort_unstable();
-    res
+
+parse_hacker_file :: proc(file_path: string, verbose: bool) -> ParseResult {
+	res: ParseResult
+	res.vars_dict = make(map[string]string)
+	res.local_vars = make(map[string]string)
+	res.functions = make(map[string]Function)
+	res.config_data = make(map[string]string)
+	defer {
+		if len(res.vars_dict) > 0 { delete(res.vars_dict) }
+		if len(res.local_vars) > 0 { delete(res.local_vars) }
+		if len(res.functions) > 0 { delete(res.functions) }
+		if len(res.config_data) > 0 { delete(res.config_data) }
+	}
+
+	in_config := false
+	in_comment := false
+	in_function: Maybe(string)
+	line_num: u32 = 0
+
+	home := os.get_env("HOME")
+	hacker_dir := filepath.join({home, HACKER_DIR_SUFFIX[1:]}) // strip leading /
+
+	data, ok := os.read_entire_file(file_path)
+	if !ok {
+		if verbose {
+			fmt.printf("File %s not found\n", file_path)
+		}
+		append(&res.errors, fmt.tprintf("File %s not found", file_path))
+		return res
+	}
+	defer delete(data)
+
+	lines := strings.split_lines(string(data))
+	defer delete(lines)
+
+	line_loop: for line_slice in lines {
+		line_num += 1
+		line_trimmed := trim(line_slice)
+		if line_trimmed == "" { continue }
+		line := line_trimmed // copy
+		is_super := false
+		if strings.has_prefix(line, "^") {
+			is_super = true
+			line = trim(line[1:])
+		}
+		if line == "!!" {
+			in_comment = !in_comment
+			continue
+		}
+		if in_comment { continue }
+		if line == "[" {
+			if in_config {
+				append(&res.errors, fmt.tprintf("Line %d: Nested config section", line_num))
+			}
+			if in_function != nil {
+				append(&res.errors, fmt.tprintf("Line %d: Config in function", line_num))
+			}
+			in_config = true
+			continue
+		} else if line == "]" {
+			if !in_config {
+				append(&res.errors, fmt.tprintf("Line %d: Closing ] without [", line_num))
+			}
+			in_config = false
+			continue
+		}
+		if in_config {
+			eq_pos := strings.index(line, "=")
+			if eq_pos != -1 {
+				key := trim(line[:eq_pos])
+				value := trim(line[eq_pos+1:])
+				res.config_data[key] = value
+			}
+			continue
+		}
+		if line == ":" {
+			if in_function != nil {
+				in_function = nil
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Ending function without start", line_num))
+			}
+			continue
+		} else if strings.has_prefix(line, ":") {
+			rest := trim(line[1:])
+			func_name: string
+			params_str_opt: Maybe(string)
+			pos := strings.index(rest, "(")
+			if pos != -1 {
+				func_name = trim(rest[:pos])
+				params_str_opt = trim(rest[pos+1:])
+			} else {
+				func_name = rest
+			}
+			if func_name == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty function name", line_num))
+				continue
+			}
+			if in_function != nil {
+				append(&res.errors, fmt.tprintf("Line %d: Nested function", line_num))
+				continue
+			}
+			params: [dynamic]Param
+			if params_str, ok := params_str_opt.?; ok {
+				if !strings.has_suffix(params_str, ")") {
+					append(&res.errors, fmt.tprintf("Line %d: Missing ) in function definition", line_num))
+					continue
+				}
+				params_str = trim(params_str[:len(params_str)-1])
+				for p in strings.split(params_str, ",") {
+					p := trim(p)
+					name: string
+					rest: string
+					col_pos := strings.index(p, ":")
+					if col_pos != -1 {
+						name = trim(p[:col_pos])
+						rest = trim(p[col_pos+1:])
+					} else {
+						name = p
+						rest = ""
+					}
+					type_: string
+					default: Maybe(string)
+					eq_pos := strings.index(rest, "=")
+					if eq_pos != -1 {
+						type_ = trim(rest[:eq_pos])
+						default = trim(rest[eq_pos+1:])
+					} else {
+						type_ = rest
+					}
+					if type_ == "" { type_ = "str" }
+					append(&params, Param{name = name, type_ = type_, default = default})
+				}
+			}
+			res.functions[func_name] = Function{params = params, body = make([dynamic]string)}
+			in_function = func_name
+			continue
+		} else if strings.has_prefix(line, ".") {
+			rest := trim(line[1:])
+			func_name: string
+			args_str_opt: Maybe(string)
+			pos := strings.index(rest, "(")
+			if pos != -1 {
+				func_name = trim(rest[:pos])
+				args_str_opt = trim(rest[pos+1:])
+			} else {
+				func_name = rest
+			}
+			if func_name == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty function call", line_num))
+				continue
+			}
+			func_opt, func_ok := res.functions[func_name]
+			if !func_ok {
+				append(&res.errors, fmt.tprintf("Line %d: Unknown function %s", line_num, func_name))
+				continue
+			}
+			func_ := copy_function(func_opt)
+			args: [dynamic]string
+			if args_str, ok := args_str_opt.?; ok {
+				if !strings.has_suffix(args_str, ")") {
+					append(&res.errors, fmt.tprintf("Line %d: Missing ) in function call", line_num))
+					continue
+				}
+				args_str = trim(args_str[:len(args_str)-1])
+				for a in strings.split(args_str, ",") {
+					append(&args, trim(a))
+				}
+			}
+			params := func_.params
+			if len(args) > len(params) {
+				append(&res.errors, fmt.tprintf("Line %d: Too many arguments for %s", line_num, func_name))
+				continue
+			}
+			sub_map: map[string]string
+			defer delete(sub_map)
+			for param, i in params {
+				val: string
+				if i < len(args) {
+					val = args[i]
+				} else if def, ok := param.default.?; ok {
+					val = def
+				} else {
+					append(&res.errors, fmt.tprintf("Line %d: Missing argument %s for %s", line_num, param.name, func_name))
+					continue line_loop
+				}
+				valid: bool
+				#switch t in param.type_ {
+				case "int":  _, valid = strconv.parse_i64(val)
+				case "bool": valid = val == "true" || val == "false"
+				case "str":  valid = true
+				case "list": valid = strings.contains(val, " ") // rough check
+				case "dict": valid = strings.contains(val, "=")
+				case:        valid = true
+				}
+				if !valid {
+					append(&res.errors, fmt.tprintf("Line %d: Type mismatch for %s: expected %s, got %s", line_num, param.name, param.type_, val))
+					continue line_loop
+				}
+				sub_map[param.name] = val
+			}
+			body := func_.body
+			sub_body: [dynamic]string
+			defer delete(sub_body)
+			for cmd in body {
+				new_cmd := cmd
+				for name, val in sub_map {
+					new_cmd = strings.replace_all(new_cmd, fmt.tprintf("${%s}", name), val)
+				}
+				append(&sub_body, new_cmd)
+			}
+			if in_func, ok := in_function.?; ok {
+				target_func := &res.functions[in_func]
+				append(&target_func.body, ..sub_body[:])
+			} else {
+				append(&res.cmds, ..sub_body[:])
+			}
+			continue
+		}
+		if in_function != nil {
+			if !(strings.has_prefix(line, ">") ||
+				strings.has_prefix(line, "=") ||
+				strings.has_prefix(line, "?") ||
+				strings.has_prefix(line, "&") ||
+				strings.has_prefix(line, "!") ||
+				strings.has_prefix(line, "@") ||
+				strings.has_prefix(line, "$") ||
+				strings.has_prefix(line, "\\") ||
+				strings.has_prefix(line, ">>") ||
+				strings.has_prefix(line, ">>>") ||
+				strings.has_prefix(line, "%") ||
+				strings.has_prefix(line, "T>")) {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid in function", line_num))
+				continue
+			}
+		}
+		parsed := false
+		if strings.has_prefix(line, "//") {
+			parsed = true
+			if in_function != nil {
+				append(&res.errors, fmt.tprintf("Line %d: Deps not allowed in function", line_num))
+				continue
+			}
+			dep := trim(line[2:])
+			if dep != "" {
+				append(&res.deps, dep)
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Empty system dependency", line_num))
+			}
+		} else if strings.has_prefix(line, "#") {
+			parsed = true
+			if in_function != nil {
+				append(&res.errors, fmt.tprintf("Line %d: Libs not allowed in function", line_num))
+				continue
+			}
+			full_lib := trim(line[1:])
+			if full_lib == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty library/include", line_num))
+				continue
+			}
+			prefix: string = "bytes"
+			lib_name: string
+			colon_pos := strings.index(full_lib, ":")
+			if colon_pos != -1 {
+				prefix = trim(full_lib[:colon_pos])
+				lib_name = trim(full_lib[colon_pos+1:])
+			} else {
+				lib_name = full_lib
+			}
+			if lib_name == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty library name after prefix", line_num))
+				continue
+			}
+			#switch pre in prefix {
+			case "rust":   append(&res.rust_libs, lib_name)
+			case "python": append(&res.python_libs, lib_name)
+			case "java":   append(&res.java_libs, lib_name)
+			case "bytes":
+				lib_dir := filepath.join({hacker_dir, "libs", lib_name})
+				lib_hacker_path := filepath.join({lib_dir, "main.hacker"})
+				lib_bin_path := filepath.join({hacker_dir, "libs", lib_name})
+				if os.exists(lib_hacker_path) {
+					append(&res.includes, lib_name)
+					sub := parse_hacker_file(lib_hacker_path, verbose)
+					append(&res.deps, ..sub.deps[:])
+					append(&res.libs, ..sub.libs[:])
+					append(&res.rust_libs, ..sub.rust_libs[:])
+					append(&res.python_libs, ..sub.python_libs[:])
+					append(&res.java_libs, ..sub.java_libs[:])
+					for k, v in sub.vars_dict {
+						res.vars_dict[k] = v
+					}
+					for k, v in sub.local_vars {
+						res.local_vars[k] = v
+					}
+					append(&res.cmds, ..sub.cmds[:])
+					append(&res.cmds_with_vars, ..sub.cmds_with_vars[:])
+					append(&res.cmds_separate, ..sub.cmds_separate[:])
+					append(&res.includes, ..sub.includes[:])
+					append(&res.binaries, ..sub.binaries[:])
+					append(&res.plugins, ..sub.plugins[:])
+					for k, v in sub.functions {
+						res.functions[k] = v
+					}
+					for sub_err in sub.errors {
+						append(&res.errors, fmt.tprintf("In %s: %s", lib_name, sub_err))
+					}
+				}
+				file_info, err := os.stat(lib_bin_path)
+				if err == 0 {
+					mode_raw := u32(file_info.mode)
+					if mode_raw & 0o111 != 0 {
+						append(&res.binaries, lib_bin_path)
+					} else {
+						append(&res.libs, lib_name)
+					}
+				} else {
+					append(&res.libs, lib_name)
+				}
+			case:
+				append(&res.errors, fmt.tprintf("Line %d: Unknown library prefix: %s", line_num, prefix))
+			}
+		} else if strings.has_prefix(line, ">>>") {
+			parsed = true
+			cmd := trim(line[3:])
+			excl := strings.index(cmd, "!")
+			if excl != -1 {
+				cmd = trim(cmd[:excl])
+			}
+			mut_cmd := cmd
+			if is_super {
+				mut_cmd = fmt.tprintf("sudo %s", mut_cmd)
+			}
+			if mut_cmd == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty separate file command", line_num))
+			} else {
+				if in_func, ok := in_function.?; ok {
+					append(&res.functions[in_func].body, mut_cmd)
+				} else {
+					append(&res.cmds_separate, mut_cmd)
+				}
+			}
+		} else if strings.has_prefix(line, ">>") {
+			parsed = true
+			cmd := trim(line[2:])
+			excl := strings.index(cmd, "!")
+			if excl != -1 {
+				cmd = trim(cmd[:excl])
+			}
+			mut_cmd := cmd
+			if is_super {
+				mut_cmd = fmt.tprintf("sudo %s", mut_cmd)
+			}
+			if mut_cmd == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty command with vars", line_num))
+			} else {
+				if in_func, ok := in_function.?; ok {
+					append(&res.functions[in_func].body, mut_cmd)
+				} else {
+					append(&res.cmds_with_vars, mut_cmd)
+				}
+			}
+		} else if strings.has_prefix(line, ">") {
+			parsed = true
+			cmd := trim(line[1:])
+			excl := strings.index(cmd, "!")
+			if excl != -1 {
+				cmd = trim(cmd[:excl])
+			}
+			mut_cmd := cmd
+			if is_super {
+				mut_cmd = fmt.tprintf("sudo %s", mut_cmd)
+			}
+			if mut_cmd == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty command", line_num))
+			} else {
+				if in_func, ok := in_function.?; ok {
+					append(&res.functions[in_func].body, mut_cmd)
+				} else {
+					append(&res.cmds, mut_cmd)
+				}
+			}
+		} else if strings.has_prefix(line, "@") {
+			parsed = true
+			pos := 1
+			for pos < len(line) && (strings.is_ascii_alphanumeric(line[pos]) || line[pos] == '_') {
+				pos += 1
+			}
+			key_str := line[1:pos]
+			key: string
+			type_: string = "str"
+			col_pos := strings.index(key_str, ":")
+			if col_pos != -1 {
+				key = key_str[:col_pos]
+				type_ = key_str[col_pos+1:]
+			} else {
+				key = key_str
+			}
+			after := trim(line[pos:])
+			if !strings.has_prefix(after, "=") {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid variable", line_num))
+				continue
+			}
+			value := trim(after[1:])
+			if value == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid variable", line_num))
+				continue
+			}
+			// Handle list and dict
+			if type_ == "list" {
+				if strings.has_prefix(value, "[") && strings.has_suffix(value, "]") {
+					inner := value[1:len(value)-1]
+					items := strings.split(inner, ",")
+					defer delete(items)
+					value_items: [dynamic]string
+					for item in items {
+						append(&value_items, trim(item))
+					}
+					value = strings.join(value_items[:], " ")
+				} else {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid list format for %s", line_num, key))
+					continue
+				}
+			} else if type_ == "dict" {
+				if strings.has_prefix(value, "{") && strings.has_suffix(value, "}") {
+					inner := value[1:len(value)-1]
+					pairs := strings.split(inner, ",")
+					defer delete(pairs)
+					value_pairs: [dynamic]string
+					for p in pairs {
+						pp := strings.split_n(p, ":", 2)
+						defer delete(pp)
+						if len(pp) == 2 {
+							append(&value_pairs, fmt.tprintf("%s=%s", trim(pp[0]), trim(pp[1])))
+						}
+					}
+					value = strings.join(value_pairs[:], " ")
+				} else {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid dict format for %s", line_num, key))
+					continue
+				}
+			}
+			// Validate type
+			valid: bool
+			#switch t in type_ {
+			case "int":  _, valid = strconv.parse_i64(value)
+			case "bool": valid = value == "true" || value == "false"
+			case "str":  valid = true
+			case "list": valid = true
+			case "dict": valid = true
+			case:
+				append(&res.errors, fmt.tprintf("Line %d: Unknown type %s for variable %s", line_num, type_, key))
+				valid = false
+			}
+			if !valid {
+				append(&res.errors, fmt.tprintf("Line %d: Type validation failed for %s: %s", line_num, key, value))
+				continue
+			}
+			res.vars_dict[key] = value
+		} else if strings.has_prefix(line, "$") {
+			parsed = true
+			pos := 1
+			for pos < len(line) && (strings.is_ascii_alphanumeric(line[pos]) || line[pos] == '_') {
+				pos += 1
+			}
+			key_str := line[1:pos]
+			key: string
+			type_: string = "str"
+			col_pos := strings.index(key_str, ":")
+			if col_pos != -1 {
+				key = key_str[:col_pos]
+				type_ = key_str[col_pos+1:]
+			} else {
+				key = key_str
+			}
+			after := trim(line[pos:])
+			if !strings.has_prefix(after, "=") {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid local variable", line_num))
+				continue
+			}
+			value := trim(after[1:])
+			if value == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid local variable", line_num))
+				continue
+			}
+			// Handle list and dict
+			if type_ == "list" {
+				if strings.has_prefix(value, "[") && strings.has_suffix(value, "]") {
+					inner := value[1:len(value)-1]
+					items := strings.split(inner, ",")
+					defer delete(items)
+					value_items: [dynamic]string
+					for item in items {
+						append(&value_items, trim(item))
+					}
+					value = strings.join(value_items[:], " ")
+				} else {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid list format for %s", line_num, key))
+					continue
+				}
+			} else if type_ == "dict" {
+				if strings.has_prefix(value, "{") && strings.has_suffix(value, "}") {
+					inner := value[1:len(value)-1]
+					pairs := strings.split(inner, ",")
+					defer delete(pairs)
+					value_pairs: [dynamic]string
+					for p in pairs {
+						pp := strings.split_n(p, ":", 2)
+						defer delete(pp)
+						if len(pp) == 2 {
+							append(&value_pairs, fmt.tprintf("%s=%s", trim(pp[0]), trim(pp[1])))
+						}
+					}
+					value = strings.join(value_pairs[:], " ")
+				} else {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid dict format for %s", line_num, key))
+					continue
+				}
+			}
+			// Validate type
+			valid: bool
+			#switch t in type_ {
+			case "int":  _, valid = strconv.parse_i64(value)
+			case "bool": valid = value == "true" || value == "false"
+			case "str":  valid = true
+			case "list": valid = true
+			case "dict": valid = true
+			case:
+				append(&res.errors, fmt.tprintf("Line %d: Unknown type %s for local variable %s", line_num, type_, key))
+				valid = false
+			}
+			if !valid {
+				append(&res.errors, fmt.tprintf("Line %d: Type validation failed for local %s: %s", line_num, key, value))
+				continue
+			}
+			res.local_vars[key] = value
+		} else if strings.has_prefix(line, "\\") {
+			parsed = true
+			plugin_name := trim(line[1:])
+			if plugin_name == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty plugin name", line_num))
+				continue
+			}
+			plugin_dir := filepath.join({hacker_dir, "plugins", plugin_name})
+			file_info, err := os.stat(plugin_dir)
+			if err == 0 {
+				mode_raw := u32(file_info.mode)
+				if mode_raw & 0o111 != 0 {
+					append(&res.plugins, Plugin{path = plugin_dir, is_super = is_super})
+				} else {
+					append(&res.errors, fmt.tprintf("Line %d: Plugin %s not found or not executable", line_num, plugin_name))
+				}
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Plugin %s not found or not executable", line_num, plugin_name))
+			}
+		} else if strings.has_prefix(line, "=") {
+			parsed = true
+			gt_pos := strings.index(line, ">")
+			if gt_pos != -1 {
+				num_str := trim(line[1:gt_pos])
+				cmd_part := trim(line[gt_pos+1:])
+				excl := strings.index(cmd_part, "!")
+				if excl != -1 {
+					cmd_part = trim(cmd_part[:excl])
+				}
+				num, num_ok := strconv.parse_i64(num_str)
+				if !num_ok || num < 0 {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid loop count", line_num))
+					continue
+				}
+				if cmd_part == "" {
+					append(&res.errors, fmt.tprintf("Line %d: Empty loop command", line_num))
+					continue
+				}
+				cmd_base := cmd_part
+				if is_super {
+					cmd_base = fmt.tprintf("sudo %s", cmd_base)
+				}
+				if in_func, ok := in_function.?; ok {
+					for _ in 0..<num {
+						append(&res.functions[in_func].body, cmd_base)
+					}
+				} else {
+					for _ in 0..<num {
+						append(&res.cmds, cmd_base)
+					}
+				}
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid loop syntax", line_num))
+			}
+		} else if strings.has_prefix(line, "?") {
+			parsed = true
+			gt_pos := strings.index(line, ">")
+			if gt_pos != -1 {
+				condition := trim(line[1:gt_pos])
+				cmd_part := trim(line[gt_pos+1:])
+				excl := strings.index(cmd_part, "!")
+				if excl != -1 {
+					cmd_part = trim(cmd_part[:excl])
+				}
+				if condition == "" || cmd_part == "" {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid conditional", line_num))
+					continue
+				}
+				cmd := cmd_part
+				if is_super {
+					cmd = fmt.tprintf("sudo %s", cmd)
+				}
+				if_cmd := fmt.tprintf("if %s; then %s; fi", condition, cmd)
+				if in_func, ok := in_function.?; ok {
+					append(&res.functions[in_func].body, if_cmd)
+				} else {
+					append(&res.cmds, if_cmd)
+				}
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid conditional", line_num))
+			}
+		} else if strings.has_prefix(line, "&") {
+			parsed = true
+			cmd_part := trim(line[1:])
+			excl := strings.index(cmd_part, "!")
+			if excl != -1 {
+				cmd_part = trim(cmd_part[:excl])
+			}
+			if cmd_part == "" {
+				append(&res.errors, fmt.tprintf("Line %d: Empty background command", line_num))
+				continue
+			}
+			cmd := fmt.tprintf("%s &", cmd_part)
+			if is_super {
+				cmd = fmt.tprintf("sudo %s", cmd)
+			}
+			if in_func, ok := in_function.?; ok {
+				append(&res.functions[in_func].body, cmd)
+			} else {
+				append(&res.cmds, cmd)
+			}
+		} else if strings.has_prefix(line, "!") {
+			parsed = true
+			// ignore
+		} else if strings.has_prefix(line, "%") {
+			parsed = true
+			rest := trim(line[1:])
+			gt_pos := strings.index(rest, ">")
+			if gt_pos != -1 {
+				list_var := trim(rest[:gt_pos])
+				cmd_part := trim(rest[gt_pos+1:])
+				if list_var == "" || cmd_part == "" {
+					append(&res.errors, fmt.tprintf("Line %d: Invalid foreach syntax", line_num))
+					continue
+				}
+				foreach_cmd := fmt.tprintf("for item in %s; do %s; done", list_var, cmd_part)
+				if is_super {
+					foreach_cmd = fmt.tprintf("sudo %s", foreach_cmd)
+				}
+				if in_func, ok := in_function.?; ok {
+					append(&res.functions[in_func].body, foreach_cmd)
+				} else {
+					append(&res.cmds, foreach_cmd)
+				}
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid foreach syntax", line_num))
+			}
+		} else if strings.has_prefix(line, "T>") {
+			parsed = true
+			c_pos := strings.index(line, "C>")
+			if c_pos != -1 {
+				try_cmd := trim(line[2:c_pos])
+				rest_after_c := line[c_pos+2:]
+				f_pos := strings.index(rest_after_c, "F>")
+				catch_cmd: string
+				finally_cmd: string
+				if f_pos != -1 {
+					catch_cmd = trim(rest_after_c[:f_pos])
+					finally_cmd = trim(rest_after_c[f_pos+2:])
+				} else {
+					catch_cmd = trim(rest_after_c)
+					finally_cmd = ""
+				}
+				try_catch_cmd := fmt.tprintf("( %s ) || %s;", try_cmd, catch_cmd)
+				if finally_cmd != "" {
+					try_catch_cmd = fmt.tprintf("%s %s", try_catch_cmd, finally_cmd)
+				}
+				if is_super {
+					try_catch_cmd = fmt.tprintf("sudo %s", try_catch_cmd)
+				}
+				if in_func, ok := in_function.?; ok {
+					append(&res.functions[in_func].body, try_catch_cmd)
+				} else {
+					append(&res.cmds, try_catch_cmd)
+				}
+			} else {
+				append(&res.errors, fmt.tprintf("Line %d: Invalid try-catch syntax", line_num))
+			}
+		}
+		if !parsed {
+			append(&res.errors, fmt.tprintf("Line %d: Invalid syntax", line_num))
+		}
+	}
+	if in_config {
+		append(&res.errors, "Unclosed config section")
+	}
+	if in_comment {
+		append(&res.errors, "Unclosed comment block")
+	}
+	if in_function != nil {
+		append(&res.errors, "Unclosed function block")
+	}
+	// Sort
+	slice.sort(res.deps[:])
+	slice.sort(res.libs[:])
+	slice.sort(res.rust_libs[:])
+	slice.sort(res.python_libs[:])
+	slice.sort(res.java_libs[:])
+	return res
 }
-fn main() -> Result<()> {
-    env_logger::init();
-    info!("Starting hacker-plsa");
-    #[derive(Parser)]
-    #[command(version = "0.1.0")]
-    struct Args {
-        #[arg(long)]
-        verbose: bool,
-        file: String,
-    }
-    let args = Args::parse();
-    let res = parse_hacker_file(&args.file, args.verbose);
-    if args.verbose {
-        if !res.errors.is_empty() {
-            println!("\n{}", "Errors:".red().bold());
-            for e in &res.errors {
-                println!(" {} {}", "✖".red(), e);
-            }
-            println!();
-        } else {
-            println!("{}", "No errors found.".green());
-        }
-        println!("System Deps: [{}]", res.deps.join(", "));
-        println!("Custom Libs (Bytes): [{}]", res.libs.join(", "));
-        println!("Rust Libs: [{}]", res.rust_libs.join(", "));
-        println!("Python Libs: [{}]", res.python_libs.join(", "));
-        println!("Java Libs: [{}]", res.java_libs.join(", "));
-        let vars_str: Vec<String> = res.vars_dict.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
-        println!("Vars: {{{}}}", vars_str.join(", "));
-        let local_vars_str: Vec<String> = res.local_vars.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
-        println!("Local Vars: {{{}}}", local_vars_str.join(", "));
-        println!("Cmds: [{}]", res.cmds.join(", "));
-        println!("Cmds with Vars: [{}]", res.cmds_with_vars.join(", "));
-        println!("Separate Cmds: [{}]", res.cmds_separate.join(", "));
-        println!("Includes: [{}]", res.includes.join(", "));
-        println!("Binaries: [{}]", res.binaries.join(", "));
-        let plugins_str: Vec<String> = res.plugins.iter().map(|p| format!("{{path: {}, super: {}}}", p.path, p.is_super)).collect();
-        println!("Plugins: [{}]", plugins_str.join(", "));
-        let functions_str: Vec<String> = res.functions.iter().map(|(k, f)| {
-            let params_str: Vec<String> = f.params.iter().map(|p| format!("{}:{}={:?}", p.name, p.type_, p.default)).collect();
-            format!("{}: params[{}] body[{}]", k, params_str.join(","), f.body.join(", "))
-        }).collect();
-        println!("Functions: {{{}}}", functions_str.join(", "));
-        let config_str: Vec<String> = res.config_data.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
-        println!("Config: {{{}}}", config_str.join(", "));
-    }
-    let json = serde_json::to_string(&res)?;
-    println!("{}", json);
-    Ok(())
+
+copy_function :: proc(f: Function) -> Function {
+	res: Function
+	res.params = make([dynamic]Param, len(f.params))
+	copy(res.params[:], f.params[:])
+	res.body = make([dynamic]string, len(f.body))
+	copy(res.body[:], f.body[:])
+	return res
+}
+
+main :: proc() {
+	args := os.args[1:]
+	verbose := false
+	file: string
+	for arg in args {
+		if arg == "--verbose" {
+			verbose = true
+		} else if strings.has_prefix(arg, "--") {
+			// ignore other flags for simplicity
+		} else {
+			file = arg
+		}
+	}
+	if file == "" {
+		fmt.println("Usage: program [--verbose] <file>")
+		os.exit(1)
+	}
+	res := parse_hacker_file(file, verbose)
+	defer {
+		delete(res.deps)
+		delete(res.libs)
+		delete(res.rust_libs)
+		delete(res.python_libs)
+		delete(res.java_libs)
+		delete(res.cmds)
+		delete(res.cmds_with_vars)
+		delete(res.cmds_separate)
+		delete(res.includes)
+		delete(res.binaries)
+		delete(res.plugins)
+		delete(res.errors)
+		for _, f in res.functions {
+			delete(f.params)
+			delete(f.body)
+		}
+	}
+
+	if verbose {
+		RED :: "\e[31m"
+		GREEN :: "\e[32m"
+		BOLD :: "\e[1m"
+		RESET :: "\e[0m"
+		if len(res.errors) > 0 {
+			fmt.printf("\n%sErrors:%s\n", RED + BOLD, RESET)
+			for e in res.errors {
+				fmt.printf(" %s%s %s\n", RED, "✖", e)
+			}
+			fmt.println()
+		} else {
+			fmt.printf("%sNo errors found.%s\n", GREEN, RESET)
+		}
+		fmt.printf("System Deps: [%s]\n", strings.join(res.deps[:], ", "))
+		fmt.printf("Custom Libs (Bytes): [%s]\n", strings.join(res.libs[:], ", "))
+		fmt.printf("Rust Libs: [%s]\n", strings.join(res.rust_libs[:], ", "))
+		fmt.printf("Python Libs: [%s]\n", strings.join(res.python_libs[:], ", "))
+		fmt.printf("Java Libs: [%s]\n", strings.join(res.java_libs[:], ", "))
+		vars_str: [dynamic]string
+		defer delete(vars_str)
+		for k, v in res.vars_dict {
+			append(&vars_str, fmt.tprintf("%s: %s", k, v))
+		}
+		slice.sort(vars_str[:])
+		fmt.printf("Vars: {%s}\n", strings.join(vars_str[:], ", "))
+		local_vars_str: [dynamic]string
+		defer delete(local_vars_str)
+		for k, v in res.local_vars {
+			append(&local_vars_str, fmt.tprintf("%s: %s", k, v))
+		}
+		slice.sort(local_vars_str[:])
+		fmt.printf("Local Vars: {%s}\n", strings.join(local_vars_str[:], ", "))
+		fmt.printf("Cmds: [%s]\n", strings.join(res.cmds[:], ", "))
+		fmt.printf("Cmds with Vars: [%s]\n", strings.join(res.cmds_with_vars[:], ", "))
+		fmt.printf("Separate Cmds: [%s]\n", strings.join(res.cmds_separate[:], ", "))
+		fmt.printf("Includes: [%s]\n", strings.join(res.includes[:], ", "))
+		fmt.printf("Binaries: [%s]\n", strings.join(res.binaries[:], ", "))
+		plugins_str: [dynamic]string
+		defer delete(plugins_str)
+		for p in res.plugins {
+			append(&plugins_str, fmt.tprintf("{path: %s, super: %v}", p.path, p.is_super))
+		}
+		fmt.printf("Plugins: [%s]\n", strings.join(plugins_str[:], ", "))
+		functions_str: [dynamic]string
+		defer delete(functions_str)
+		func_names: [dynamic]string
+		defer delete(func_names)
+		for k in res.functions {
+			append(&func_names, k)
+		}
+		slice.sort(func_names[:])
+		for k in func_names {
+			f := res.functions[k]
+			params_str: [dynamic]string
+			for p in f.params {
+				append(&params_str, fmt.tprintf("%s:%s=%?", p.name, p.type_, p.default))
+			}
+			append(&functions_str, fmt.tprintf("%s: params[%s] body[%s]", k, strings.join(params_str[:], ","), strings.join(f.body[:], ", ")))
+			delete(params_str)
+		}
+		fmt.printf("Functions: {%s}\n", strings.join(functions_str[:], ", "))
+		config_str: [dynamic]string
+		defer delete(config_str)
+		for k, v in res.config_data {
+			append(&config_str, fmt.tprintf("%s: %s", k, v))
+		}
+		slice.sort(config_str[:])
+		fmt.printf("Config: {%s}\n", strings.join(config_str[:], ", "))
+	}
+
+	json_data, json_err := json.marshal(res)
+	if json_err != nil {
+		fmt.printf("JSON marshal error: %v\n", json_err)
+		os.exit(1)
+	}
+	defer delete(json_data)
+	fmt.println(string(json_data))
 }
