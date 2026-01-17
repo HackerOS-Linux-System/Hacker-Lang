@@ -1,224 +1,321 @@
 package main
 
-import (
-	"flag"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:path/filepath"
+import subprocess "vendor:subprocess"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/pterm/pterm"
-)
+// ANSI color codes for lots of colors as requested!
+Color_Reset      :: "\e[0m"
+Color_Bold       :: "\e[1m"
+Color_Red        :: "\e[31m"
+Color_Green      :: "\e[32m"
+Color_Yellow     :: "\e[33m"
+Color_Blue       :: "\e[34m"
+Color_Magenta    :: "\e[35m"
+Color_Cyan       :: "\e[36m"
+Color_White      :: "\e[37m"
+Color_Gray       :: "\e[90m"
+Color_LightGray  :: "\e[37m"  // Actually white, but for light gray feel
+Color_Purple     :: "\e[95m"  // Bright magenta as purple-ish
+Color_Orange     :: "\e[38;5;208m"  // Custom orange
+Color_Pink       :: "\e[38;5;205m"  // Custom pink
+Color_Lime       :: "\e[38;5;10m"   // Lime green
+Color_Teal       :: "\e[38;5;14m"   // Teal
+Color_Indigo     :: "\e[38;5;54m"   // Indigo
+Color_Gold       :: "\e[38;5;220m"  // Gold
 
-const (
-	Version      = "1.4"
-	HackerDir    = ".hackeros/hacker-lang"
-	BinDir       = "bin"
-	CompilerPath = "hacker-compiler"
-	RuntimePath  = "hacker-runtime"
-)
+// Background colors for headers
+Bg_Magenta       :: "\e[45m"
+Bg_Cyan          :: "\e[46m"
+Bg_Red           :: "\e[41m"
+Bg_Green         :: "\e[42m"
 
-var (
-	boldStyle      = lipgloss.NewStyle().Bold(true)
-	purpleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A020F0")).Bold(true)
-	grayStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
-	whiteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
-	cyanStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF"))
-	greenStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	redStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
-	yellowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
-	lightGrayStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D3D3D3"))
-	blueStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#0000FF")).Bold(true)
-	magentaStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF"))
-)
+// Constants
+Version          :: "1.4"
+Hacker_Dir       :: ".hackeros/hacker-lang"
+Bin_Dir          :: "bin"
+Compiler_Path    :: "hacker-compiler"
+Runtime_Path     :: "hacker-runtime"
 
-func ensureHackerDir() error {
-	fullBinDir := filepath.Join(os.Getenv("HOME"), HackerDir, BinDir)
-	return os.MkdirAll(fullBinDir, 0755)
-}
-
-func displayWelcome() {
-	header := pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgMagenta)).WithTextStyle(pterm.NewStyle(pterm.FgWhite))
-	header.Println("Welcome to Hacker Lang CLI v" + Version)
-	pterm.DefaultSection.WithStyle(pterm.NewStyle(pterm.FgCyan)).Println(grayStyle.Render("Simplified tool for running and compiling .hacker scripts"))
-	pterm.Println(whiteStyle.Render("Type 'hl help' for available commands."))
-	helpCommand(false)
-}
-
-func runCommand(file string, verbose bool) bool {
-	fullRuntimePath := filepath.Join(os.Getenv("HOME"), HackerDir, BinDir, RuntimePath)
-	if _, err := os.Stat(fullRuntimePath); os.IsNotExist(err) {
-		pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Hacker runtime not found at " + fullRuntimePath + ". Please install the Hacker Lang tools."))
+ensure_hacker_dir :: proc() -> bool {
+	home_dir := os.get_env("HOME")
+	if home_dir == "" {
+		fmt.eprintln(Color_Red, "Failed to get HOME environment variable.", Color_Reset)
 		return false
 	}
-	args := []string{file}
+	full_bin_dir := filepath.join(home_dir, Hacker_Dir, Bin_Dir)
+	err := os.make_directory(full_bin_dir, 0o755)
+	if err != 0 && !os.is_dir(full_bin_dir) {
+		fmt.eprintln(Color_Red, "Failed to create hacker directory: ", err, Color_Reset)
+		return false
+	}
+	return true
+}
+
+display_welcome :: proc() {
+	// Fancy header with background and colors
+	fmt.println(Bg_Magenta, Color_White, Color_Bold, "Welcome to Hacker Lang CLI v", Version, Color_Reset)
+	fmt.println(Color_Cyan, Color_Bold, "Simplified tool for running and compiling .hacker scripts", Color_Reset)
+	fmt.println(Color_White, "Type 'hl help' for available commands.", Color_Reset)
+	help_command(false)
+}
+
+run_command :: proc(file: string, verbose: bool) -> bool {
+	home_dir := os.get_env("HOME")
+	full_runtime_path := filepath.join(home_dir, Hacker_Dir, Bin_Dir, Runtime_Path)
+	if !os.exists(full_runtime_path) {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Hacker runtime not found at ", full_runtime_path, ". Please install the Hacker Lang tools.", Color_Reset)
+		return false
+	}
+
+	args: [dynamic]string
+	defer delete(args)
+	append(&args, file)
 	if verbose {
-		args = append(args, "--verbose")
+		append(&args, "--verbose")
 	}
-	pterm.Info.WithPrefix(pterm.Prefix{Text: "INFO", Style: pterm.NewStyle(pterm.FgCyan)}).Println(cyanStyle.Render("Executing script: " + file + func() string {
-		if verbose {
-			return " (verbose mode)"
-		}
-		return ""
-	}()))
-	cmd := exec.Command(fullRuntimePath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err != nil {
-		pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render(fmt.Sprintf("Execution failed with error: %v", err)))
+
+	verbose_str := verbose ? " (verbose mode)" : ""
+	fmt.println(Color_Cyan, Color_Bold, "INFO: Executing script: ", file, verbose_str, Color_Reset)
+
+	full_args: [dynamic]string
+	defer delete(full_args)
+	append(&full_args, full_runtime_path)
+	for a in args {
+		append(&full_args, a)
+	}
+
+	process, spawn_err := subprocess.spawn(full_args[:])
+	if spawn_err != nil {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Failed to spawn process: ", spawn_err, Color_Reset)
 		return false
 	}
-	pterm.Success.WithPrefix(pterm.Prefix{Text: "SUCCESS", Style: pterm.NewStyle(pterm.FgGreen)}).Println(greenStyle.Render("Execution completed successfully."))
+	defer subprocess.destroy(&process)
+
+	wait_err := subprocess.wait(&process)
+	if wait_err != nil {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Wait failed: ", wait_err, Color_Reset)
+		return false
+	}
+
+	if process.exit_code != 0 {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Execution failed with exit code: ", process.exit_code, Color_Reset)
+		return false
+	}
+
+	fmt.println(Color_Green, Color_Bold, "SUCCESS: Execution completed successfully.", Color_Reset)
 	return true
 }
 
-func compileCommand(file string, output string, verbose bool) bool {
-	fullCompilerPath := filepath.Join(os.Getenv("HOME"), HackerDir, BinDir, CompilerPath)
-	if _, err := os.Stat(fullCompilerPath); os.IsNotExist(err) {
-		pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Hacker compiler not found at " + fullCompilerPath + ". Please install the Hacker Lang tools."))
+compile_command :: proc(file: string, output: string, verbose: bool) -> bool {
+	home_dir := os.get_env("HOME")
+	full_compiler_path := filepath.join(home_dir, Hacker_Dir, Bin_Dir, Compiler_Path)
+	if !os.exists(full_compiler_path) {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Hacker compiler not found at ", full_compiler_path, ". Please install the Hacker Lang tools.", Color_Reset)
 		return false
 	}
-	args := []string{file, output}
+
+	args: [dynamic]string
+	defer delete(args)
+	append(&args, file)
+	append(&args, output)
 	if verbose {
-		args = append(args, "--verbose")
+		append(&args, "--verbose")
 	}
-	pterm.Info.WithPrefix(pterm.Prefix{Text: "INFO", Style: pterm.NewStyle(pterm.FgCyan)}).Println(cyanStyle.Render("Compiling script: " + file + " to " + output + func() string {
-		if verbose {
-			return " (verbose mode)"
-		}
-		return ""
-	}()))
-	cmd := exec.Command(fullCompilerPath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err != nil {
-		pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render(fmt.Sprintf("Compilation failed with error: %v", err)))
+
+	verbose_str := verbose ? " (verbose mode)" : ""
+	fmt.println(Color_Cyan, Color_Bold, "INFO: Compiling script: ", file, " to ", output, verbose_str, Color_Reset)
+
+	full_args: [dynamic]string
+	defer delete(full_args)
+	append(&full_args, full_compiler_path)
+	for a in args {
+		append(&full_args, a)
+	}
+
+	process, spawn_err := subprocess.spawn(full_args[:])
+	if spawn_err != nil {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Failed to spawn process: ", spawn_err, Color_Reset)
 		return false
 	}
-	pterm.Success.WithPrefix(pterm.Prefix{Text: "SUCCESS", Style: pterm.NewStyle(pterm.FgGreen)}).Println(greenStyle.Render("Compilation completed successfully."))
+	defer subprocess.destroy(&process)
+
+	wait_err := subprocess.wait(&process)
+	if wait_err != nil {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Wait failed: ", wait_err, Color_Reset)
+		return false
+	}
+
+	if process.exit_code != 0 {
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Compilation failed with exit code: ", process.exit_code, Color_Reset)
+		return false
+	}
+
+	fmt.println(Color_Green, Color_Bold, "SUCCESS: Compilation completed successfully.", Color_Reset)
 	return true
 }
 
-func helpCommand(showBanner bool) bool {
-	if showBanner {
-		header := pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgMagenta)).WithTextStyle(pterm.NewStyle(pterm.FgWhite))
-		header.Println("Hacker Lang CLI - Simplified Scripting Tool v" + Version)
+help_command :: proc(show_banner: bool) -> bool {
+	if show_banner {
+		fmt.println(Bg_Magenta, Color_White, Color_Bold, "Hacker Lang CLI - Simplified Scripting Tool v", Version, Color_Reset)
 	}
-	pterm.DefaultSection.WithStyle(pterm.NewStyle(pterm.FgBlue)).Println(blueStyle.Render("Available Commands:"))
-	tableData := pterm.TableData{
-		{lightGrayStyle.Render("Command"), lightGrayStyle.Render("Description"), lightGrayStyle.Render("Usage")},
-		{cyanStyle.Render("run"), whiteStyle.Render("Execute a .hacker script"), yellowStyle.Render("hl run <file> [--verbose]")},
-		{cyanStyle.Render("compile"), whiteStyle.Render("Compile to native executable"), yellowStyle.Render("hl compile <file> [-o output] [--verbose]")},
-		{cyanStyle.Render("help"), whiteStyle.Render("Show this help menu"), yellowStyle.Render("hl help")},
-	}
-	pterm.DefaultTable.WithHasHeader().WithBoxed(true).WithData(tableData).Render()
-	pterm.Println()
-	pterm.DefaultSection.WithStyle(pterm.NewStyle(pterm.FgGray)).Println(grayStyle.Render("Global options:"))
-	pterm.DefaultBulletList.WithItems([]pterm.BulletListItem{
-		{Level: 0, Text: magentaStyle.Render("-v, --version Display version")},
-		{Level: 0, Text: magentaStyle.Render("-h, --help Display help")},
-	}).Render()
+
+	fmt.println(Color_Blue, Color_Bold, "Available Commands:", Color_Reset)
+
+	// Table-like display with colors
+	fmt.println(Color_LightGray, "Command", "\t", "Description", "\t\t\t", "Usage", Color_Reset)
+	fmt.println(Color_Cyan, "run", Color_Reset, "\t", Color_White, "Execute a .hacker script", Color_Reset, "\t", Color_Yellow, "hl run <file> [--verbose]", Color_Reset)
+	fmt.println(Color_Cyan, "compile", Color_Reset, "\t", Color_White, "Compile to native executable", Color_Reset, "\t", Color_Yellow, "hl compile <file> [-o output] [--verbose]", Color_Reset)
+	fmt.println(Color_Cyan, "help", Color_Reset, "\t", Color_White, "Show this help menu", Color_Reset, "\t\t", Color_Yellow, "hl help", Color_Reset)
+
+	fmt.println()
+	fmt.println(Color_Gray, Color_Bold, "Global options:", Color_Reset)
+	fmt.println(Color_Magenta, "-v, --version Display version", Color_Reset)
+	fmt.println(Color_Magenta, "-h, --help Display help", Color_Reset)
+
 	return true
 }
 
-func versionCommand() bool {
-	pterm.Info.WithPrefix(pterm.Prefix{Text: "INFO", Style: pterm.NewStyle(pterm.FgCyan)}).Println(cyanStyle.Render("Hacker Lang CLI v" + Version))
+version_command :: proc() -> bool {
+	fmt.println(Color_Cyan, Color_Bold, "INFO: Hacker Lang CLI v", Version, Color_Reset)
 	return true
 }
 
-func main() {
-	if err := ensureHackerDir(); err != nil {
-		pterm.Fatal.WithPrefix(pterm.Prefix{Text: "FATAL", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Failed to create hacker directory: " + err.Error()))
+main :: proc() {
+	if !ensure_hacker_dir() {
+		os.exit(1)
 	}
-	if len(os.Args) == 1 {
-		displayWelcome()
-		os.Exit(0)
-	}
-	// Global flags
-	globalVersion := flag.Bool("v", false, "Display version")
-	globalVersionLong := flag.Bool("version", false, "Display version")
-	globalHelp := flag.Bool("h", false, "Display help")
-	globalHelpLong := flag.Bool("help", false, "Display help")
-	flag.Parse()
-	if *globalVersion || *globalVersionLong {
-		versionCommand()
-		os.Exit(0)
-	}
-	if *globalHelp || *globalHelpLong {
-		helpCommand(true)
-		os.Exit(0)
-	}
-	args := os.Args[1:]
+
+	args := os.args[1:]
 	if len(args) == 0 {
-		displayWelcome()
-		os.Exit(0)
+		display_welcome()
+		os.exit(0)
 	}
-	command := args[0]
-	args = args[1:]
+
+	// Parse global flags first
+	global_version := false
+	global_help := false
+	filtered_args: [dynamic]string
+	defer delete(filtered_args)
+
+	for arg in args {
+		switch arg {
+			case "-v", "--version":
+				global_version = true
+			case "-h", "--help":
+				global_help = true
+			case:
+				append(&filtered_args, arg)
+		}
+	}
+
+	if global_version {
+		version_command()
+		os.exit(0)
+	}
+	if global_help {
+		help_command(true)
+		os.exit(0)
+	}
+
+	if len(filtered_args) == 0 {
+		display_welcome()
+		os.exit(0)
+	}
+
+	command := filtered_args[0]
+	sub_args := filtered_args[1:]
+
 	success := true
 	switch command {
-	case "run":
-		var file string
-		var verbose bool
-		runFlags := flag.NewFlagSet("run", flag.ExitOnError)
-		runFlags.BoolVar(&verbose, "verbose", false, "Enable verbose output")
-		runFlags.Usage = func() {
-			pterm.Println(boldStyle.Render("Usage:") + " hl run <file> [options]\n\nExecute a .hacker script.")
-			runFlags.PrintDefaults()
-		}
-		if err := runFlags.Parse(args); err != nil {
-			pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Error parsing flags: " + err.Error()))
-			os.Exit(1)
-		}
-		remaining := runFlags.Args()
-		if len(remaining) != 1 {
-			pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Error: Expected exactly one argument: <file>"))
-			runFlags.Usage()
-			os.Exit(1)
-		}
-		file = remaining[0]
-		success = runCommand(file, verbose)
-	case "compile":
-		var file, output string
-		var verbose bool
-		compileFlags := flag.NewFlagSet("compile", flag.ExitOnError)
-		compileFlags.StringVar(&output, "o", "", "Specify output file")
-		compileFlags.StringVar(&output, "output", "", "Specify output file")
-		compileFlags.BoolVar(&verbose, "verbose", false, "Enable verbose output")
-		compileFlags.Usage = func() {
-			pterm.Println(boldStyle.Render("Usage:") + " hl compile <file> [options]\n\nCompile to native executable.")
-			compileFlags.PrintDefaults()
-		}
-		if err := compileFlags.Parse(args); err != nil {
-			pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Error parsing flags: " + err.Error()))
-			os.Exit(1)
-		}
-		remaining := compileFlags.Args()
-		if len(remaining) != 1 {
-			pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Error: Expected exactly one argument: <file>"))
-			compileFlags.Usage()
-			os.Exit(1)
-		}
-		file = remaining[0]
-		if output == "" {
-			ext := filepath.Ext(file)
-			output = strings.TrimSuffix(file, ext)
-		}
-		success = compileCommand(file, output, verbose)
-	case "help":
-		success = helpCommand(true)
-	default:
-		pterm.Error.WithPrefix(pterm.Prefix{Text: "ERROR", Style: pterm.NewStyle(pterm.FgRed)}).Println(redStyle.Render("Unknown command: " + command))
-		helpCommand(false)
-		success = false
+		case "run":
+			file := ""
+			verbose := false
+
+			i := 0
+			for i < len(sub_args) {
+				arg := sub_args[i]
+				if arg == "--verbose" {
+					verbose = true
+				} else if file == "" {
+					file = arg
+				} else {
+					fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unexpected argument: ", arg, Color_Reset)
+					success = false
+					break
+				}
+				i += 1
+			}
+
+			if file == "" {
+				fmt.eprintln(Color_Red, Color_Bold, "ERROR: Expected exactly one argument: <file>", Color_Reset)
+				fmt.println(Color_Bold, "Usage:", Color_Reset, " hl run <file> [options]\n\nExecute a .hacker script.")
+				fmt.println("  --verbose   Enable verbose output")
+				success = false
+			}
+
+			if success {
+				success = run_command(file, verbose)
+			}
+
+		case "compile":
+			file := ""
+			output := ""
+			verbose := false
+
+			i := 0
+			for i < len(sub_args) {
+				arg := sub_args[i]
+				switch arg {
+					case "-o", "--output":
+						i += 1
+						if i >= len(sub_args) {
+							fmt.eprintln(Color_Red, Color_Bold, "ERROR: Missing value for -o/--output", Color_Reset)
+							success = false
+							break
+						}
+						output = sub_args[i]
+					case "--verbose":
+						verbose = true
+					case:
+						if file == "" {
+							file = arg
+						} else {
+							fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unexpected argument: ", arg, Color_Reset)
+							success = false
+							break
+						}
+				}
+				i += 1
+			}
+
+			if file == "" {
+				fmt.eprintln(Color_Red, Color_Bold, "ERROR: Expected exactly one argument: <file>", Color_Reset)
+				fmt.println(Color_Bold, "Usage:", Color_Reset, " hl compile <file> [options]\n\nCompile to native executable.")
+				fmt.println("  -o, --output string   Specify output file")
+				fmt.println("  --verbose             Enable verbose output")
+				success = false
+			}
+
+			if output == "" {
+				ext := filepath.ext(file)
+				output = strings.trim_suffix(file, ext)
+			}
+
+			if success {
+				success = compile_command(file, output, verbose)
+			}
+
+					case "help":
+						success = help_command(true)
+
+					case:
+						fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unknown command: ", command, Color_Reset)
+						help_command(false)
+						success = false
 	}
-	if success {
-		os.Exit(0)
-	} else {
-		os.Exit(1)
-	}
+
+	os.exit(success ? 0 : 1)
 }
