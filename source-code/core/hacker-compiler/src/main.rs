@@ -14,7 +14,9 @@ use inkwell::passes::PassManager;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::OptimizationLevel;
 use inkwell::AddressSpace;
+
 const HACKER_DIR: &str = "~/.hackeros/hacker-lang";
+
 fn expand_home(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = env::var_os("HOME") {
@@ -23,18 +25,17 @@ fn expand_home(path: &str) -> String {
     }
     path.to_string()
 }
+
 #[derive(Debug, Clone)]
 struct Plugin {
     name: String,
     is_super: bool,
 }
+
 #[derive(Debug)]
 struct ParseResult {
     deps: Vec<String>,
-    libs: Vec<String>,
-    rust_libs: Vec<String>,
-    python_libs: Vec<String>,
-    java_libs: Vec<String>,
+    libs: Vec<String>, // Now paths to .a files for static linking
     vars: Vec<(String, String)>,
     local_vars: Vec<(String, String)>,
     cmds: Vec<String>,
@@ -45,19 +46,14 @@ struct ParseResult {
     plugins: Vec<Plugin>,
     functions: HashMap<String, Vec<String>>,
     errors: Vec<String>,
-    config: HashMap<String, String>,
-    built_in_libs: Vec<String>,
-    translator_blocks: Vec<(String, String)>, // lang, code
 }
+
 fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result<ParseResult> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().collect::<io::Result<_>>()?;
+    let lines: Vec<String> = reader.lines().collect::<io::Result<Vec<String>>>()?;
     let mut deps = Vec::new();
     let mut libs = Vec::new();
-    let mut rust_libs = Vec::new();
-    let mut python_libs = Vec::new();
-    let mut java_libs = Vec::new();
     let mut vars = Vec::new();
     let mut local_vars = Vec::new();
     let mut cmds = Vec::new();
@@ -68,11 +64,6 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     let mut plugins = Vec::new();
     let mut functions: HashMap<String, Vec<String>> = HashMap::new();
     let mut errors = Vec::new();
-    let mut config = HashMap::new();
-    let mut built_in_libs = Vec::new();
-    let mut translator_blocks = Vec::new();
-    let mut translator_enabled = false;
-    let mut in_config = false;
     let mut in_comment = false;
     let mut in_function: Option<String> = None;
     let mut i: usize = 0;
@@ -96,33 +87,6 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
         if line.starts_with('^') {
             is_super = true;
             line = line[1..].trim().to_string();
-        }
-        if line == "[" {
-            if in_config {
-                errors.push("Nested config section".to_string());
-            }
-            if in_function.is_some() {
-                errors.push("Config in function".to_string());
-            }
-            in_config = true;
-            i += 1;
-            continue;
-        } else if line == "]" {
-            if !in_config {
-                errors.push("Closing ] without [".to_string());
-            }
-            in_config = false;
-            i += 1;
-            continue;
-        }
-        if in_config {
-            if let Some(eq_idx) = line.find('=') {
-                let key = line[..eq_idx].trim().to_string();
-                let value = line[eq_idx + 1..].trim().to_string();
-                config.insert(key, value);
-            }
-            i += 1;
-            continue;
         }
         if line == ":" {
             if in_function.is_some() {
@@ -190,152 +154,61 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
             } else {
                 errors.push("Empty system dependency".to_string());
             }
-        } else if translator_enabled && line.starts_with("|> translator:") {
-            if in_function.is_some() {
-                errors.push("Translator blocks not allowed in function".to_string());
-                i += 1;
-                continue;
-            }
-            if in_config {
-                errors.push("Translator blocks not allowed in config".to_string());
-                i += 1;
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                let header = parts[1].trim();
-                let lang_opt = header.split('(').next().map(|s| s.trim().to_string());
-                if let Some(lang) = lang_opt {
-                    if !lang.is_empty() {
-                        let mut code = String::new();
-                        i += 1;
-                        let mut depth = 1;
-                        while i < lines.len() && depth > 0 {
-                            let code_line = &lines[i];
-                            code.push_str(code_line);
-                            code.push('\n');
-                            for c in code_line.chars() {
-                                if c == '(' {
-                                    depth += 1;
-                                } else if c == ')' {
-                                    depth -= 1;
-                                }
-                            }
-                            i += 1;
-                        }
-                        if depth == 0 {
-                            let code_trimmed = code.trim().to_string();
-                            if verbose {
-                                println!("Extracted {} block", lang);
-                            }
-                            translator_blocks.push((lang, code_trimmed));
-                            cmds.push(format!("__TRANSLATOR_BLOCK__{}", translator_blocks.len() - 1));
-                            continue;
-                        } else {
-                            if verbose {
-                                eprintln!("Unclosed block for {}", lang);
-                            }
-                            errors.push(format!("Unclosed block for {}", lang));
-                        }
-                        continue;
-                    }
-                }
-            }
-            errors.push("Invalid translator block syntax".to_string());
         } else if line.starts_with("#") {
             if in_function.is_some() {
                 errors.push("Libs not allowed in function".to_string());
                 i += 1;
                 continue;
             }
-            let full_lib = line[1..].trim().to_string();
-            if full_lib.starts_with(">") {
-                let lib_name = full_lib[1..].trim().to_string();
-                if !lib_name.is_empty() {
-                    built_in_libs.push(lib_name.clone());
-                    if lib_name == "translator" {
-                        translator_enabled = true;
-                    }
-                    i += 1;
-                    continue;
-                } else {
-                    errors.push("Empty built-in library name".to_string());
-                }
-            } else {
-                let (prefix, lib_name) = if let Some(colon_idx) = full_lib.find(':') {
-                    (full_lib[..colon_idx].trim().to_string(), full_lib[colon_idx + 1..].trim().to_string())
-                } else {
-                    ("bytes".to_string(), full_lib)
-                };
-                if lib_name.is_empty() {
-                    errors.push("Empty library name after prefix".to_string());
-                    i += 1;
-                    continue;
-                }
-                match prefix.as_str() {
-                    "rust" => {
-                        rust_libs.push(lib_name);
-                    }
-                    "python" => {
-                        python_libs.push(lib_name);
-                    }
-                    "java" => {
-                        java_libs.push(lib_name);
-                    }
-                    "bytes" => {
-                        let lib_dir = expand_home(&format!("{HACKER_DIR}/libs/{}", lib_name));
-                        let lib_hacker_path = format!("{}/main.hacker", lib_dir);
-                        let lib_bin_path = lib_dir;
-                        if Path::new(&lib_hacker_path).exists() {
-                            includes.push(lib_name.clone());
-                            let sub = parse_hacker_file(Path::new(&lib_hacker_path), verbose, bytes_mode)?;
-                            deps.extend(sub.deps);
-                            libs.extend(sub.libs);
-                            rust_libs.extend(sub.rust_libs);
-                            python_libs.extend(sub.python_libs);
-                            java_libs.extend(sub.java_libs);
-                            vars.extend(sub.vars);
-                            local_vars.extend(sub.local_vars);
-                            cmds.extend(sub.cmds);
-                            cmds_with_vars.extend(sub.cmds_with_vars);
-                            cmds_separate.extend(sub.cmds_separate);
-                            includes.extend(sub.includes);
-                            for (k, v) in sub.binaries {
-                                if binaries.contains_key(&k) {
-                                    errors.push(format!("Duplicate binary name {}", k));
-                                } else {
-                                    binaries.insert(k, v);
-                                }
-                            }
-                            plugins.extend(sub.plugins);
-                            functions.extend(sub.functions);
-                            config.extend(sub.config);
-                            for err in sub.errors {
-                                errors.push(format!("In {}: {}", lib_name, err));
-                            }
-                        }
-                        if Path::new(&lib_bin_path).exists() {
-                            let metadata = Path::new(&lib_bin_path).metadata()?;
-                            if metadata.permissions().mode() & 0o111 != 0 {
-                                if bytes_mode {
-                                    println!("Embedding library binary: {}", lib_bin_path);
-                                }
-                                if binaries.contains_key(&lib_name) {
-                                    errors.push(format!("Duplicate binary name {}", lib_name));
-                                } else {
-                                    binaries.insert(lib_name, lib_bin_path);
-                                }
-                            } else {
-                                libs.push(lib_name);
-                            }
-                        } else {
-                            libs.push(lib_name);
-                        }
-                    }
-                    _ => {
-                        errors.push(format!("Unknown library prefix {}", prefix));
+            let lib_name = line[1..].trim().to_string();
+            if lib_name.is_empty() {
+                errors.push("Empty library name".to_string());
+                i += 1;
+                continue;
+            }
+            let lib_dir = expand_home(&format!("{HACKER_DIR}/libs/{}", lib_name));
+            let lib_hacker_path = format!("{}/main.hacker", lib_dir);
+            let lib_bin_path = format!("{}/{}", lib_dir, lib_name);
+            let lib_a_path = format!("{}/{}.a", lib_dir, lib_name);
+            if Path::new(&lib_hacker_path).exists() {
+                includes.push(lib_name.clone());
+                let sub = parse_hacker_file(Path::new(&lib_hacker_path), verbose, bytes_mode)?;
+                deps.extend(sub.deps);
+                libs.extend(sub.libs);
+                vars.extend(sub.vars);
+                local_vars.extend(sub.local_vars);
+                cmds.extend(sub.cmds);
+                cmds_with_vars.extend(sub.cmds_with_vars);
+                cmds_separate.extend(sub.cmds_separate);
+                includes.extend(sub.includes);
+                for (k, v) in sub.binaries {
+                    if binaries.contains_key(&k) {
+                        errors.push(format!("Duplicate binary name {}", k));
+                    } else {
+                        binaries.insert(k, v);
                     }
                 }
+                plugins.extend(sub.plugins);
+                functions.extend(sub.functions);
+                for err in sub.errors {
+                    errors.push(format!("In {}: {}", lib_name, err));
+                }
+            }
+            if Path::new(&lib_bin_path).exists() {
+                let metadata = fs::metadata(&lib_bin_path)?;
+                if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                    if bytes_mode {
+                        println!("Embedding library binary: {}", lib_bin_path);
+                    }
+                    if binaries.contains_key(&lib_name) {
+                        errors.push(format!("Duplicate binary name {}", lib_name));
+                    } else {
+                        binaries.insert(lib_name, lib_bin_path.clone());
+                    }
+                }
+            }
+            if Path::new(&lib_a_path).exists() {
+                libs.push(lib_a_path);
             }
         } else if line.starts_with(">>>") {
             let cmd_part_str: String = line[3..].split('!').next().unwrap_or("").trim().to_string();
@@ -416,7 +289,7 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
             } else {
                 let plugin_path = expand_home(&format!("{}/plugins/{}", HACKER_DIR, plugin_name));
                 if Path::new(&plugin_path).exists() {
-                    let metadata = Path::new(&plugin_path).metadata()?;
+                    let metadata = fs::metadata(&plugin_path)?;
                     if metadata.permissions().mode() & 0o111 != 0 {
                         plugins.push(Plugin { name: plugin_name.clone(), is_super });
                         if verbose {
@@ -432,7 +305,7 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
         } else if line.starts_with("=") {
             let parts: Vec<String> = line[1..].split('>').map(|s| s.trim().to_string()).collect();
             if parts.len() == 2 {
-                if let Ok(num) = parts[0].parse::<usize>() {
+                if let Ok(num) = parts[0].parse::<u32>() {
                     let cmd_part_str = parts[1].split('!').next().unwrap_or("").trim().to_string();
                     let mut cmd = cmd_part_str.clone();
                     if is_super {
@@ -502,9 +375,6 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
         }
         i += 1;
     }
-    if in_config {
-        errors.push("Unclosed config section".to_string());
-    }
     if in_comment {
         errors.push("Unclosed comment block".to_string());
     }
@@ -513,10 +383,7 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     }
     if verbose {
         println!("System Deps: {:?}", deps);
-        println!("Custom Libs: {:?}", libs);
-        println!("Rust Libs: {:?}", rust_libs);
-        println!("Python Libs: {:?}", python_libs);
-        println!("Java Libs: {:?}", java_libs);
+        println!("Libs (.a paths): {:?}", libs);
         println!("Vars: {:?}", vars);
         println!("Local Vars: {:?}", local_vars);
         println!("Cmds (direct): {:?}", cmds);
@@ -526,9 +393,6 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
         println!("Binaries: {:?}", binaries);
         println!("Plugins: {:?}", plugins);
         println!("Functions: {:?}", functions);
-        println!("Config: {:?}", config);
-        println!("Built-in Libs: {:?}", built_in_libs);
-        println!("Translator Blocks: {:?}", translator_blocks);
         if !errors.is_empty() {
             println!("Errors: {:?}", errors);
         }
@@ -536,9 +400,6 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
     Ok(ParseResult {
         deps,
        libs,
-       rust_libs,
-       python_libs,
-       java_libs,
        vars,
        local_vars,
        cmds,
@@ -549,74 +410,16 @@ fn parse_hacker_file(path: &Path, verbose: bool, bytes_mode: bool) -> io::Result
        plugins,
        functions,
        errors,
-       config,
-       built_in_libs,
-       translator_blocks,
     })
 }
+
 fn generate_check_cmd(dep: &str) -> String {
     if dep == "sudo" {
         return String::new();
     }
     format!("command -v {} &> /dev/null || (sudo apt update && sudo apt install -y {})", dep, dep)
 }
-fn generate_exec_script(lang: &str, code: &str, verbose: bool) -> String {
-    let code_b64 = BASE64_STANDARD.encode(code);
-    let mut script = String::new();
-    if verbose {
-        script.push_str("echo \"Executing ");
-        script.push_str(lang);
-        script.push_str(" code\"\n");
-    }
-    match lang {
-        "rust" => {
-            script.push_str("dir=$(mktemp -d)\n");
-            if verbose {
-                script.push_str("echo \"Temp dir: $dir\"\n");
-            }
-            script.push_str(&format!("echo '{}' | base64 -d > $dir/main.rs\n", code_b64));
-            script.push_str("rustc $dir/main.rs -o $dir/a.out\n");
-            script.push_str("if [ $? -eq 0 ]; then\n $dir/a.out\nfi\n");
-            script.push_str("rm -rf $dir\n");
-        }
-        "java" => {
-            script.push_str("dir=$(mktemp -d)\n");
-            if verbose {
-                script.push_str("echo \"Temp dir: $dir\"\n");
-            }
-            script.push_str(&format!("echo '{}' | base64 -d > $dir/Main.java\n", code_b64));
-            script.push_str("javac $dir/Main.java\n");
-            script.push_str("if [ $? -eq 0 ]; then\n java -cp $dir Main\nfi\n");
-            script.push_str("rm -rf $dir\n");
-        }
-        "python" => {
-            script.push_str(&format!("python3 -c \"$(echo '{}' | base64 -d)\"\n", code_b64));
-        }
-        "go" => {
-            script.push_str("dir=$(mktemp -d)\n");
-            if verbose {
-                script.push_str("echo \"Temp dir: $dir\"\n");
-            }
-            script.push_str(&format!("echo '{}' | base64 -d > $dir/main.go\n", code_b64));
-            script.push_str("go run $dir/main.go\n");
-            script.push_str("rm -rf $dir\n");
-        }
-        "c" => {
-            script.push_str("dir=$(mktemp -d)\n");
-            if verbose {
-                script.push_str("echo \"Temp dir: $dir\"\n");
-            }
-            script.push_str(&format!("echo '{}' | base64 -d > $dir/main.c\n", code_b64));
-            script.push_str("gcc $(pkg-config --cflags dpdk) $dir/main.c $(pkg-config --libs dpdk) -o $dir/a.out\n");
-            script.push_str("if [ $? -eq 0 ]; then\n $dir/a.out\nfi\n");
-            script.push_str("rm -rf $dir\n");
-        }
-        _ => {
-            script.push_str(&format!("echo \"Unsupported language: {}\"\n", lang));
-        }
-    }
-    script
-}
+
 fn process_binary_cmd(cmd: &mut String, binary_data: &HashMap<String, Vec<u8>>) {
     for (name, data) in binary_data {
         if cmd.starts_with(name.as_str()) && (cmd.len() == name.len() || cmd.as_bytes()[name.len()] == b' ') {
@@ -628,6 +431,7 @@ fn process_binary_cmd(cmd: &mut String, binary_data: &HashMap<String, Vec<u8>>) 
         }
     }
 }
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     let mut bytes_mode = false;
@@ -650,74 +454,15 @@ fn main() -> io::Result<()> {
         i += 1;
     }
     if input_path_str.is_empty() || output_path_str.is_empty() {
-        eprintln!("Usage: hacker-compiler <input.hacker> <output> [--verbose] [--bytes]");
+        eprintln!("Usage: hacker-compiler [--verbose] [--bytes] <input.hacker> <output>");
         process::exit(1);
     }
     let input_path = Path::new(&input_path_str);
     let output_path = Path::new(&output_path_str);
-    let mut parse_result = parse_hacker_file(input_path, verbose, bytes_mode)?;
-    if parse_result.config.is_empty() {
-        let config_path = Path::new(".hacker-config");
-        if config_path.exists() {
-            let content = fs::read_to_string(config_path)?;
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with("!") {
-                    continue;
-                }
-                if let Some(eq_idx) = line.find('=') {
-                    let key = line[..eq_idx].trim().to_string();
-                    let value = line[eq_idx + 1..].trim().to_string();
-                    parse_result.config.insert(key, value);
-                }
-            }
-        }
-    }
-    let mut deps = parse_result.deps.clone();
-    if !parse_result.rust_libs.is_empty() {
-        if !deps.contains(&"cargo".to_string()) {
-            deps.push("cargo".to_string());
-        }
-    }
-    if !parse_result.python_libs.is_empty() {
-        if !deps.contains(&"python3-pip".to_string()) {
-            deps.push("python3-pip".to_string());
-        }
-    }
-    if !parse_result.java_libs.is_empty() {
-        if !deps.contains(&"maven".to_string()) {
-            deps.push("maven".to_string());
-        }
-    }
-    for (lang, _) in &parse_result.translator_blocks {
-        let dep_to_add = match lang.as_str() {
-            "rust" => Some("rustc"),
-            "java" => Some("default-jdk"),
-            "python" => Some("python3"),
-            "go" => Some("golang-go"),
-            "c" => {
-                if !deps.contains(&"gcc".to_string()) {
-                    deps.push("gcc".to_string());
-                }
-                Some("libdpdk-dev")
-            }
-            _ => None,
-        };
-        if let Some(d) = dep_to_add {
-            if !deps.contains(&d.to_string()) {
-                deps.push(d.to_string());
-            }
-        } else {
-            parse_result.errors.push(format!("Unsupported translator language: {}", lang));
-        }
-    }
-    parse_result.deps = deps;
+    let parse_result = parse_hacker_file(input_path, verbose, bytes_mode)?;
     let ParseResult {
         deps,
-        libs: _,
-        rust_libs,
-        python_libs,
-        java_libs,
+        libs,
         vars,
         local_vars,
         cmds,
@@ -728,9 +473,6 @@ fn main() -> io::Result<()> {
         plugins,
         functions: _,
         errors,
-        config: _,
-        built_in_libs: _,
-        translator_blocks,
     } = parse_result;
     if !errors.is_empty() {
         eprintln!("\x1b[31m\x1b[1mErrors:\x1b[0m");
@@ -762,19 +504,12 @@ fn main() -> io::Result<()> {
         }
         sub_cmd
     }).collect();
-    // Process binaries and translator blocks in commands
+    // Process binaries in commands
     for cmd in substituted_direct.iter_mut() {
         process_binary_cmd(cmd, &binary_data);
-        if cmd.starts_with("__TRANSLATOR_BLOCK__") {
-            let idx: usize = cmd[20..].parse().expect("Invalid block index");
-            let (lang, code) = &translator_blocks[idx];
-            let exec_script = generate_exec_script(lang, code, verbose);
-            *cmd = exec_script;
-        }
     }
     for cmd in substituted_separate.iter_mut() {
         process_binary_cmd(cmd, &binary_data);
-        // Assume no translator blocks in separate
     }
     // Build final command list
     let mut final_cmds: Vec<String> = Vec::new();
@@ -783,16 +518,6 @@ fn main() -> io::Result<()> {
         if !check.is_empty() {
             final_cmds.push(check);
         }
-    }
-    // Add install commands for language libs
-    for lib in rust_libs {
-        final_cmds.push(format!("cargo install {}", lib));
-    }
-    for lib in python_libs {
-        final_cmds.push(format!("pip3 install --user {}", lib));
-    }
-    for lib in java_libs {
-        final_cmds.push(format!("mvn dependency:get -Dartifact={}", lib));
     }
     final_cmds.extend(substituted_direct);
     final_cmds.extend(substituted_separate);
@@ -834,8 +559,8 @@ fn main() -> io::Result<()> {
         global.set_linkage(Linkage::Internal);
         global.set_initializer(&context.const_string(bytes, false));
         let zero = context.i64_type().const_int(0, false);
-        let ptr = unsafe { builder.build_in_bounds_gep(array_type, global.as_pointer_value(), &[zero, zero], "env_ptr") }.unwrap();
-        let cast_ptr = builder.build_bit_cast(ptr, i8_ptr_type, "cast_env_ptr").unwrap().into_pointer_value();
+        let ptr = unsafe { builder.build_gep(array_type, global.as_pointer_value(), &[zero, zero], "env_ptr") }.expect("GEP failed");
+        let cast_ptr = builder.build_bit_cast(ptr, i8_ptr_type, "cast_env_ptr").expect("Bitcast failed").into_pointer_value();
         builder.build_call(putenv_fn, &[cast_ptr.into()], "putenv_call");
     }
     // Embed commands
@@ -847,8 +572,8 @@ fn main() -> io::Result<()> {
         global.set_linkage(Linkage::Internal);
         global.set_initializer(&context.const_string(bytes, false));
         let zero = context.i64_type().const_int(0, false);
-        let ptr = unsafe { builder.build_in_bounds_gep(array_type, global.as_pointer_value(), &[zero, zero], "cmd_ptr") }.unwrap();
-        let cast_ptr = builder.build_bit_cast(ptr, i8_ptr_type, "cast_cmd_ptr").unwrap().into_pointer_value();
+        let ptr = unsafe { builder.build_gep(array_type, global.as_pointer_value(), &[zero, zero], "cmd_ptr") }.expect("GEP failed");
+        let cast_ptr = builder.build_bit_cast(ptr, i8_ptr_type, "cast_cmd_ptr").expect("Bitcast failed").into_pointer_value();
         builder.build_call(system_fn, &[cast_ptr.into()], "system_call");
     }
     let zero_val = i32_type.const_zero();
@@ -874,7 +599,7 @@ fn main() -> io::Result<()> {
         &triple,
         &cpu,
         &features,
-        OptimizationLevel::Default,
+        OptimizationLevel::Aggressive,
         RelocMode::PIC,
         CodeModel::Default,
     )
@@ -884,12 +609,16 @@ fn main() -> io::Result<()> {
     target_machine
     .write_to_file(&module, FileType::Object, temp_obj_path.as_path())
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-    // Link with gcc
-    let status = Exec::shell(format!(
+    // Link with gcc, including static libs
+    let mut link_cmd = format!(
         "gcc -o {} {}",
         output_path.display(),
-                                     temp_obj_path.display()
-    ))
+                               temp_obj_path.display()
+    );
+    if !libs.is_empty() {
+        link_cmd.push_str(&format!(" {}", libs.join(" ")));
+    }
+    let status = Exec::shell(link_cmd)
     .join()
     .map_err(|e: PopenError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     if !status.success() {
