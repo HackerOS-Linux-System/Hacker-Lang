@@ -1,6 +1,0 @@
-// sudo
-// apt 
-> echo "Starting Update"
-> sudo apt update ! refresh packages
-> sudo apt upgradee -y ! update system
-> echo "System updated"
