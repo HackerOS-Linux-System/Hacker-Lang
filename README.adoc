@@ -9,16 +9,16 @@
 
 == Opis
 
-**Hacker Lang** to lekki i wygodny język skryptowy stworzony dla *HackerOS*, zaprojektowany jako bezpośrednia alternatywa dla tradycyjnych skryptów `.sh` — zamiast skryptów shellowych używasz binarek skompilowanych z kodu `.hacker`.
+**Hacker Lang** to lekki i wygodny język skryptowy stworzony dla *HackerOS*, zaprojektowany jako bezpośrednia alternatywa dla tradycyjnych skryptów `.sh` — zamiast skryptów shellowych używasz binarek skompilowanych z kodu `.hl`. Jest on zaprojektowany tylko i wyłącznie dla HackerOS.
 
 Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium **bytes.io**.
 
 == Dlaczego Hacker Lang?
 
-* Zastępuje złożone skrypty `.sh` prostymi, czytelnymi plikami `.hacker`.
+* Zastępuje złożone skrypty `.sh` prostymi, czytelnymi plikami `.hl`.
 * Umożliwia kompilację do binarek, co przyśpiesza uruchamianie oraz ułatwia dystrybucję.
-* Integruje się z repozytorium bibliotek *bytes.io* — instalacja i aktualizacja bibliotek odbywa się przez `hackerc`.
-* Zaprojektowany do użytku wewnętrznego w ekosystemie HackerOS, ale nadaje się też do zastosowań zewnętrznych.
+* Integruje się z repozytorium bibliotek *bytes.io* — instalacja i aktualizacja bibliotek odbywa się przez `bytes`.
+* Zaprojektowany do użytku wewnętrznego w ekosystemie HackerOS.
 
 == Szybkie rozpoczęcie
 
@@ -45,9 +45,9 @@ Poniżej lista podstawowych komend dostępnych w narzędziu `hl`:
 * `bytes remove` Usuwa wybrana biblioteke wybrana biblioteke.
 * `bytes search` Szuka wybranej biblioteki.
 
-== Składnia i przykład prostego skryptu `.hacker`
+== Składnia i przykład prostego skryptu `.hl`
 
-Poniżej przykład prostego pliku `.hacker`.
+Poniżej przykład prostego pliku `.hl`.
 
 [source,hacker]
 ----
@@ -70,8 +70,8 @@ Poniżej przykład prostego pliku `.hacker`.
 | `// curl` → `sudo apt install curl`
 
 | `#`
-| **Biblioteka (lib)** – biblioteka z repozytorium bytes.io (zainstaluj ją za pomocą bytes install). Możesz również używać bibliotek z innych języków programowania
-| `# obsidian, # bytes:obsidian, # rust:serde, # python:rich`
+| **Biblioteka (lib)** – biblioteka z repozytorium bytes.io (zainstaluj ją za pomocą bytes install).
+| `# obsidian`
 
 | `@`
 | **Zmienna środowiskowa**
@@ -106,7 +106,7 @@ Poniżej przykład prostego pliku `.hacker`.
 | `[`
 
 | `]`
-| **Koniec sekcji konfiguracyjnej**
+| **Koniec sekcji konfiguracyjnej tzw. plik .hacker**
 | `]`
 
 | `\\`
@@ -133,12 +133,12 @@ Poniżej przykład prostego pliku `.hacker`.
 
 == Integracja z bytes.io
 
-Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `bytes install <nazwa>` aby pobrać paczkę; `bytes update` aby ją zaktualizować. Jeżeli nie masz zainstalowanego narzędzia cli bytes użyj komendy hackerc unpack bytes.
+Hacker Lang używa repozytorium bibliotek *bytes.io*. Użyj `bytes install <nazwa>` aby pobrać paczkę; `bytes update` aby ją zaktualizować. Jeżeli nie masz zainstalowanego narzędzia cli bytes użyj komendy hacker unpack hl-utils.
 
 == FAQ (krótkie)
 
-* Jak debugować? Użyj `hackerc check` oraz `hackerc run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hackerc` znajdują się w domyślnym katalogu cache.
-* Czy `.hacker` może wywoływać polecenia systemowe? Tak — użyj `>` aby wykonać komendę shellową.
+* Jak debugować? Użyj `hl check` oraz `hl run` z dodatkowymi flagami debug (jeśli dostępne). Logi `hl` znajdują się w domyślnym katalogu cache.
+* Czy `.hl` może wywoływać polecenia systemowe? Tak — użyj `>` aby wykonać komendę shellową.
 * Gdzie znaleźć dokumentację? Pełna dokumentacja i wiki: link:https://github.com/HackerOS-Linux-System/Hacker-Lang/wiki[Wiki na GitHubie].
 * Gdzie znajde repozytorium bytes.io ? link:https://github.com/Bytes-Repository[Repozytorium bytes.io]
 * Zgłoś błąd link:https://github.com/HackerOS-Linux-System/Hacker-Lang/issues[Issues na GitHubie]
