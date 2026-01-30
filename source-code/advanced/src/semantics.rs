@@ -1,4 +1,4 @@
-use crate::ast_parser::{Node, BinaryOp};
+use crate::ast_parser::Node;
 use indextree::{Arena, NodeId};
 use miette::{miette, Result};
 use std::collections::HashMap;
@@ -109,6 +109,58 @@ impl<'a> Analyzer<'a> {
                 self.define_var(name.clone(), val_type.clone());
                 val_type
             },
+            Node::Assign { name, value_id } => {
+                let var_type = self.lookup_var(name).ok_or_else(|| miette!("Próba przypisania do niezdefiniowanej zmiennej: {}", name))?;
+                let val_type = self.analyze(*value_id)?;
+
+                if var_type != val_type && var_type != Type::Unknown && val_type != Type::Unknown {
+                    // Wyjątek: Int i Unknown (z C) są kompatybilne w uproszczonym modelu
+                    return Err(miette!("Niezgodność typów przy przypisaniu do '{}'. Oczekiwano {}, otrzymano {}", name, var_type, val_type));
+                }
+                Type::Void
+            },
+            Node::FieldAccess { object, field } => {
+                let obj_type = self.lookup_var(object).ok_or_else(|| miette!("Niezdefiniowany obiekt: {}", object))?;
+
+                if let Type::Object(struct_name) = obj_type {
+                    if let Some(fields) = self.structs.get(&struct_name) {
+                        if let Some(field_type) = fields.get(field) {
+                            field_type.clone()
+                        } else {
+                            return Err(miette!("Struktura '{}' nie ma pola '{}'", struct_name, field));
+                        }
+                    } else {
+                        return Err(miette!("Nieznana struktura '{}'", struct_name));
+                    }
+                } else {
+                    return Err(miette!("Próba dostępu do pola '{}' na czymś co nie jest obiektem (typ: {})", field, obj_type));
+                }
+            },
+            Node::FieldAssign { object, field, value_id } => {
+                let obj_type = self.lookup_var(object).ok_or_else(|| miette!("Niezdefiniowany obiekt: {}", object))?;
+
+                // Pobieramy typ pola i nazwę struktury przed analizą wartości, aby uniknąć konfliktu borrow checkera
+                let (expected_type, struct_name) = if let Type::Object(name) = &obj_type {
+                    let t = self.structs.get(name)
+                    .and_then(|fields| fields.get(field))
+                    .cloned();
+
+                    match t {
+                        Some(t) => (t, name.clone()),
+                        None => return Err(miette!("Struktura '{}' nie ma pola '{}'", name, field)),
+                    }
+                } else {
+                    return Err(miette!("Próba przypisania pola '{}' na czymś co nie jest obiektem (typ: {})", field, obj_type));
+                };
+
+                // Teraz możemy bezpiecznie wywołać self.analyze, bo nie trzymamy już referencji do self.structs
+                let val_type = self.analyze(*value_id)?;
+
+                if expected_type != val_type && expected_type != Type::Unknown && val_type != Type::Unknown {
+                    return Err(miette!("Niezgodność typów przy przypisaniu do pola '{}.{}'. Oczekiwano {}, otrzymano {}", struct_name, field, expected_type, val_type));
+                }
+                Type::Void
+            },
             Node::BinaryOp { lhs, rhs, .. } => {
                 let l_ty = self.analyze(*lhs)?;
                 let r_ty = self.analyze(*rhs)?;
@@ -139,10 +191,48 @@ impl<'a> Analyzer<'a> {
                     Type::Int
                 }
             },
+            Node::MethodCall { object, method, args_ids } => {
+                // 1. Znajdź obiekt i jego typ
+                let obj_type = self.lookup_var(object).ok_or_else(|| miette!("Niezdefiniowany obiekt: {}", object))?;
+
+                if let Type::Object(struct_name) = obj_type {
+                    // 2. Skonstruuj nazwę funkcji manglowanej: StructName_MethodName
+                    let mangled_name = format!("{}_{}", struct_name, method);
+
+                    // 3. Sprawdź czy taka funkcja istnieje
+                    if let Some((ret_ty, arg_tys)) = self.functions.get(&mangled_name).cloned() {
+                        // Argumenty: oczekujemy (self, arg1, arg2...).
+                        // W wywołaniu user.hello(x) mamy tylko x. Kompilator dodaje user automatycznie.
+                        // Więc arg_tys.len() powinno być args_ids.len() + 1
+
+                        if arg_tys.len() != args_ids.len() + 1 {
+                            return Err(miette!("Metoda '{}' (jako {}) oczekuje {} argumentów (w tym self), podano {} + self", method, mangled_name, arg_tys.len(), args_ids.len()));
+                        }
+
+                        // Sprawdź argumenty (z pominięciem self, który jest weryfikowany przez typ obiektu)
+                        for (i, arg_id) in args_ids.iter().enumerate() {
+                            let t = self.analyze(*arg_id)?;
+                            let expected = &arg_tys[i+1]; // +1 bo pomijamy self
+                            if t == Type::String && *expected == Type::Int {
+                                return Err(miette!("Argument {} metody '{}' ma zły typ. Oczekiwano {}, otrzymano {}", i+1, method, expected, t));
+                            }
+                        }
+                        ret_ty
+                    } else {
+                        return Err(miette!("Obiekt typu '{}' nie posiada metody '{}' (szukano funkcji '{}')", struct_name, method, mangled_name));
+                    }
+                } else {
+                    return Err(miette!("Notacja kropkowa dozwolona tylko dla obiektów. Zmienna '{}' ma typ {}", object, obj_type));
+                }
+            },
             Node::Func { args, body, .. } => {
                 self.enter_scope();
                 for arg in args {
-                    self.define_var(arg.clone(), Type::Int); // Domyślnie argumenty to Int
+                    // Tutaj bardzo prosta heurystyka dla prototypu "User_metoda"
+                    // Jeśli argument nazywa się "self" lub nazwa funkcji zawiera "_",
+                    // moglibyśmy zgadywać typ obiektu, ale obecny system typów AST
+                    // nie ma deklaracji typów argumentów. Zakładamy Int/Pointer.
+                    self.define_var(arg.clone(), Type::Int);
                 }
                 for child in body.children(self.arena) {
                     self.analyze(child)?;
@@ -151,8 +241,6 @@ impl<'a> Analyzer<'a> {
                 Type::Void
             },
             Node::Object { name, body } => {
-                // Analizuj pola structa
-                // W tym uproszczonym modelu, Var wewnątrz Object traktujemy jako definicję pola
                 let mut fields = HashMap::new();
                 for child in body.children(self.arena) {
                     if let Node::Var { name: field_name, value_id, .. } = self.arena.get(child).unwrap().get() {
@@ -164,7 +252,6 @@ impl<'a> Analyzer<'a> {
                 Type::Void
             },
             Node::Block => {
-                // Blok nie tworzy scope w tym prostym parserze, chyba że dodamy obsługę
                 for child in node_id.children(self.arena) {
                     self.analyze(child)?;
                 }
