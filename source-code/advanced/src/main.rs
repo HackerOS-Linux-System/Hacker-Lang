@@ -1,8 +1,10 @@
 use clap::Parser as ClapParser;
 use miette::{miette, IntoDiagnostic, Result, NamedSource};
-use std::fs::{read_to_string, write};
+use std::fs::{read_to_string, write, remove_file};
 use std::path::PathBuf;
 use std::process::Command;
+use std::env;
+use std::time::{SystemTime, UNIX_EPOCH};
 use indextree::Arena;
 use logos::Logos;
 use chumsky::prelude::*;
@@ -19,11 +21,13 @@ use semantics::analyze_semantics;
 use optimizer::optimize_ast;
 
 #[derive(ClapParser)]
-#[command(name = "hl-advanced", about = "Transpilator HLA -> C (v2.0)")]
+#[command(name = "hl-advanced", about = "Kompilator HLA -> Native Binary")]
 struct Cli {
     input: PathBuf,
+    /// Ścieżka do pliku wyjściowego (binarki)
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Uruchom program po kompilacji
     #[arg(short, long)]
     run: bool,
 }
@@ -68,46 +72,80 @@ fn main() -> Result<()> {
     let mut arena = Arena::new();
     let root = build_arena(pre_ast, &mut arena);
 
-    // 4. Analiza Semantyczna (Type Inference & Checking)
-    // Zwraca mapę typów dla węzłów, która będzie potrzebna w Codegen
+    // 4. Analiza Semantyczna
     println!("Analiza semantyczna...");
     let type_map = analyze_semantics(&arena, root)?;
 
-    // 5. Optymalizacja AST (Constant Folding, Dead Code Elimination)
+    // 5. Optymalizacja AST
     println!("Optymalizacja AST...");
     optimize_ast(&mut arena, root);
 
-    // 6. Generowanie C (z wykorzystaniem wnioskowanych typów)
+    // 6. Generowanie C
     println!("Generowanie kodu C...");
     let c_code = generate_c(&arena, root, &type_map)?;
 
-    // 7. Zapis wyniku
-    let out_path = cli.output.unwrap_or_else(|| cli.input.with_extension("c"));
-    write(&out_path, &c_code).into_diagnostic()?;
+    // 7. Obsługa pliku tymczasowego
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let temp_c_path = env::temp_dir().join(format!("hla_build_{}.c", timestamp));
 
-    println!("Transpilacja zakończona sukcesem: {}", out_path.display());
+    // Zapisz kod C do katalogu tymczasowego (niewidoczny dla użytkownika w katalogu roboczym)
+    write(&temp_c_path, &c_code).into_diagnostic()?;
 
-    // 8. Uruchomienie (opcjonalne)
+    // Określenie ścieżki wyjściowej dla binarki
+    let output_bin_path = cli.output.unwrap_or_else(|| {
+        let mut p = cli.input.clone();
+        p.set_extension(""); // Usuń rozszerzenie .hl, np. script.hl -> script (lub script.exe na Win)
+
+    // Na Windows warto dodać .exe jeśli nie ma
+    #[cfg(target_os = "windows")]
+    if p.extension().is_none() {
+        p.set_extension("exe");
+    }
+    p
+    });
+
+    println!("Kompilacja natywna (GCC) -> {}", output_bin_path.display());
+
+    // 8. Kompilacja GCC
+    let gcc_status = Command::new("gcc")
+    .arg(&temp_c_path)      // Wejście: plik tymczasowy
+    .arg("-o")
+    .arg(&output_bin_path)  // Wyjście: binarka
+    .arg("-Wall")           // Ostrzeżenia
+    .arg("-O2")             // Optymalizacja poziomu 2
+    .status()
+    .into_diagnostic();
+
+    // 9. Sprzątanie (Usuń plik tymczasowy C)
+    if let Err(e) = remove_file(&temp_c_path) {
+        // Logujemy tylko jako warning, nie przerywamy programu
+        eprintln!("Warning: Nie udało się usunąć pliku tymczasowego {:?}: {}", temp_c_path, e);
+    }
+
+    // Sprawdzenie wyniku GCC po posprzątaniu
+    let status = gcc_status?;
+    if !status.success() {
+        return Err(miette!("Błąd kompilacji GCC. Upewnij się, że masz zainstalowane gcc."));
+    }
+
+    println!("Sukces! Utworzono plik wykonywalny.");
+
+    // 10. Uruchomienie (opcjonalne)
     if cli.run {
-        let bin_path = cli.input.with_extension("out");
+        println!("\n=== URUCHAMIANIE ===\n");
+        // Konwersja ścieżki na absolutną lub dodanie ./ dla obecnego katalogu (dla systemów Unix)
+        let exec_path = if output_bin_path.is_relative() && !output_bin_path.starts_with(".") {
+            std::path::Path::new(".").join(&output_bin_path)
+        } else {
+            output_bin_path
+        };
 
-        // Wykrycie systemu operacyjnego dla flag linkera (opcjonalnie)
-        let status = Command::new("gcc")
-        .arg(&out_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .arg("-Wall") // Pokaż warningi C
+        let run_status = Command::new(&exec_path)
         .status()
         .into_diagnostic()?;
 
-        if status.success() {
-            println!("\n=== URUCHAMIANIE PROGRAMU ===\n");
-            let run_status = Command::new(bin_path).status().into_diagnostic()?;
-            if !run_status.success() {
-                println!("\nProgram zakończył się błędem.");
-            }
-        } else {
-            return Err(miette!("Błąd kompilacji C (gcc)"));
+        if !run_status.success() {
+            println!("\nProgram zakończył się błędem (kod: {:?}).", run_status.code());
         }
     }
 
