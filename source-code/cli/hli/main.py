@@ -14,11 +14,11 @@ from rich.tree import Tree
 
 console = Console()
 
-VERSION = "1.4"
+VERSION = "1.6.1"
 HACKER_DIR = ".hackeros/hacker-lang"
 BIN_DIR = "bin"
-COMPILER_PATH = "hacker-compiler"
-RUNTIME_PATH = "hacker-runtime"
+COMPILER_PATH = "hl-compiler"
+RUNTIME_PATH = "hl-runtime"
 
 commands = [
     "run", "compile", "help", "version", "exit",
