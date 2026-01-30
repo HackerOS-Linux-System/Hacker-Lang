@@ -5,6 +5,11 @@ use chumsky::prelude::*;
 // ==========================================
 // 1. AST NODES
 // ==========================================
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinaryOp {
+    Add, Sub, Mul, Div
+}
+
 #[derive(Debug, Clone)]
 pub enum Node {
     Program(String), // tryb pamięci
@@ -18,13 +23,16 @@ pub enum Node {
     Func { name: String, args: Vec<String>, body: NodeId },
     Call { name: String, args_ids: Vec<NodeId> },
 
+    // Matematyka
+    BinaryOp { op: BinaryOp, lhs: NodeId, rhs: NodeId },
+
     Block,
     StringLit(String),
     IntLit(i64),
     Ident(String),
 }
 
-// Struktura pośrednia dla parsera (aby ominąć ograniczenia typów w recursive closure)
+// Struktura pośrednia dla parsera
 #[derive(Debug, Clone)]
 pub enum PreNode {
     Require(String),
@@ -35,6 +43,7 @@ pub enum PreNode {
     Func(String, Vec<String>, Vec<PreNode>),
     Call(String, Vec<PreNode>),
     Block(Vec<PreNode>),
+    BinaryOp(BinaryOp, Box<PreNode>, Box<PreNode>),
     ValString(String),
     ValInt(i64),
     ValIdent(String),
@@ -47,41 +56,32 @@ pub enum PreNode {
 #[derive(Logos, Debug, PartialEq, Eq, Hash, Clone)]
 #[logos(skip r"[ \t\n\f]+")]
 pub enum Token {
-    #[token("[")]
-    OpenBracket,
-    #[token("]")]
-    CloseBracket,
-    #[token("(")]
-    OpenParen,
-    #[token(")")]
-    CloseParen,
-    #[token(",")]
-    Comma,
-    #[token("=")]
-    Equals,
-    #[token("log")]
-    Log,
-    #[token("object")]
-    Object,
-    #[token("func")]
-    Func,
-    #[token("var")]
-    Var,
-    #[token("require")]
-    Require,
-    #[token("import")]
-    Import,
+    #[token("[")] OpenBracket,
+    #[token("]")] CloseBracket,
+    #[token("(")] OpenParen,
+    #[token(")")] CloseParen,
+    #[token(",")] Comma,
+    #[token("=")] Equals,
 
-    #[regex(r"!.*", logos::skip)]
-    Comment,
+    // Operatory
+    #[token("+")] Plus,
+    #[token("-")] Minus,
+    #[token("*")] Star,
+    #[token("/")] Slash,
 
-    #[regex(r#""([^"\\]|\\.)*""#, |lex| lex.slice().trim_matches('"').to_string())]
-    StringLit(String),
+    #[token("log")] Log,
+    #[token("object")] Object,
+    #[token("func")] Func,
+    #[token("var")] Var,
+    #[token("require")] Require,
+    #[token("import")] Import,
 
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
-    IntLit(i64),
+    #[regex(r"!.*", logos::skip)] Comment,
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| lex.slice().trim_matches('"').to_string())] StringLit(String),
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())] IntLit(i64),
 
-    #[regex(r"---.*tryb.*pamieci.*---\s*(auto|automatic|manual|safe)", |lex| {
+    // Obsługa MemoryMode
+    #[regex(r"---.*(auto|automatic|manual|safe).*---", |lex| {
     let s = lex.slice();
     if s.contains("manual") { "manual".to_string() }
     else if s.contains("safe") { "safe".to_string() }
@@ -89,11 +89,8 @@ pub enum Token {
     })]
     MemoryMode(String),
 
-    #[regex(r"<[^>]+>", |lex| lex.slice().trim_matches(|c| c == '<' || c == '>').to_string())]
-    BracketedContent(String),
-
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
-    Ident(String),
+    #[regex(r"<[^>]+>", |lex| lex.slice().trim_matches(|c| c == '<' || c == '>').to_string())] BracketedContent(String),
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())] Ident(String),
 
     Error,
 }
@@ -118,21 +115,39 @@ pub fn parser() -> impl Parser<Token, Vec<PreNode>, Error = Simple<Token>> {
                                    _ => Err(Simple::custom(span, "Expected identifier")),
         });
 
+        // Wyrażenia z priorytetami
         let expr = recursive(|expr| {
-            let call = ident_str.clone()
-            .then(
-                expr.clone()
-                .separated_by(just(Token::Comma))
-                .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-            )
-            .map(|(name, args)| PreNode::Call(name, args));
+            let atom = choice((
+                // Wywołanie funkcji wewnątrz wyrażenia: foo(x)
+                ident_str.clone()
+                .then(
+                    expr.clone()
+                    .separated_by(just(Token::Comma))
+                    .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+                )
+                .map(|(name, args)| PreNode::Call(name, args)),
 
-            choice((
-                call,
-                int_lit.clone(),
-                    str_lit.clone(),
-                    ident_str.clone().map(PreNode::ValIdent),
-            ))
+                               int_lit.clone(),
+                               str_lit.clone(),
+                               ident_str.clone().map(PreNode::ValIdent),
+                               expr.clone().delimited_by(just(Token::OpenParen), just(Token::CloseParen)),
+            ));
+
+            let product = atom.clone()
+            .then(choice((just(Token::Star), just(Token::Slash))).then(atom).repeated())
+            .foldl(|lhs, (op, rhs)| {
+                let bin_op = match op { Token::Star => BinaryOp::Mul, _ => BinaryOp::Div };
+                PreNode::BinaryOp(bin_op, Box::new(lhs), Box::new(rhs))
+            });
+
+            let sum = product.clone()
+            .then(choice((just(Token::Plus), just(Token::Minus))).then(product).repeated())
+            .foldl(|lhs, (op, rhs)| {
+                let bin_op = match op { Token::Plus => BinaryOp::Add, _ => BinaryOp::Sub };
+                PreNode::BinaryOp(bin_op, Box::new(lhs), Box::new(rhs))
+            });
+
+            sum
         });
 
         let block = stmt.clone()
@@ -148,7 +163,7 @@ pub fn parser() -> impl Parser<Token, Vec<PreNode>, Error = Simple<Token>> {
         .map(|(name, val)| PreNode::Var(name, Box::new(val)));
 
         let log = just(Token::Log)
-        .ignore_then(choice((expr.clone(), block.clone())))
+        .ignore_then(expr.clone())
         .map(|v| PreNode::Log(Box::new(v)));
 
         let object = just(Token::Object)
@@ -194,7 +209,7 @@ pub fn parser() -> impl Parser<Token, Vec<PreNode>, Error = Simple<Token>> {
                              _ => Err(Simple::custom(span, "Not mode")),
         });
 
-        // Samodzielne wywołanie np. foo(x)
+        // Standalone call (jako instrukcja)
         let stand_alone_call = ident_str.clone()
         .then(
             expr.clone()
@@ -203,13 +218,16 @@ pub fn parser() -> impl Parser<Token, Vec<PreNode>, Error = Simple<Token>> {
         )
         .map(|(name, args)| PreNode::Call(name, args));
 
+        // KOLEJNOŚĆ JEST WAŻNA!
+        // Najpierw słowa kluczowe (mem, require, import, var, log, func, object), potem ogólne (stand_alone_call, block)
         choice((
             mem, require, import, var, log, object, func, block, stand_alone_call
         ))
-    }).repeated()
+    })
+    .repeated()
+    .then_ignore(end()) // KLUCZOWE: Wymusza parsowanie do końca pliku. Jeśli coś zostanie, rzuci błędem.
 }
 
-// Konwersja PreNode -> Indextree
 pub fn build_arena(nodes: Vec<PreNode>, arena: &mut Arena<Node>) -> NodeId {
     let mut mode = "automatic".to_string();
     for n in &nodes {
@@ -228,9 +246,9 @@ fn append_node(pn: PreNode, parent: NodeId, arena: &mut Arena<Node>) -> NodeId {
     match pn {
         PreNode::MemoryDecl(_) => parent,
         PreNode::Require(f) => { let n = arena.new_node(Node::Require(f)); parent.append(n, arena); n },
-        PreNode::Import(s,n,d) => { let node = arena.new_node(Node::Import{source:s, name:n, details:d}); parent.append(node, arena); node },
+        PreNode::Import(s, n, d) => { let node = arena.new_node(Node::Import{source:s, name:n, details:d}); parent.append(node, arena); node },
         PreNode::Log(val) => {
-            let l = arena.new_node(Node::Log(parent)); // ID tymczasowe
+            let l = arena.new_node(Node::Log(parent));
             let val_id = append_node(*val, l, arena);
             *arena.get_mut(l).unwrap().get_mut() = Node::Log(val_id);
             parent.append(l, arena);
@@ -242,6 +260,14 @@ fn append_node(pn: PreNode, parent: NodeId, arena: &mut Arena<Node>) -> NodeId {
             *arena.get_mut(v).unwrap().get_mut() = Node::Var{name, value_id: val_id};
             parent.append(v, arena);
             v
+        },
+        PreNode::BinaryOp(op, lhs, rhs) => {
+            let b = arena.new_node(Node::BinaryOp { op: op.clone(), lhs: parent, rhs: parent });
+            let l = append_node(*lhs, b, arena);
+            let r = append_node(*rhs, b, arena);
+            *arena.get_mut(b).unwrap().get_mut() = Node::BinaryOp { op, lhs: l, rhs: r };
+            parent.append(b, arena);
+            b
         },
         PreNode::Object(name, body) => {
             let o = arena.new_node(Node::Object{name: name.clone(), body: parent});
