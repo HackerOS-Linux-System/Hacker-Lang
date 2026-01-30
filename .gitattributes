@@ -1,21 +1,12 @@
-*.yml linguist-detectable=true
-*.yml linguist-language=YAML
-
-*.yaml linguist-detectable=true
-*.yaml linguist-language=YAML
-
-*.hackerfile linguist-detectable=true
-*.hackerfile linguist-documentation=false
-*.hackerfile linguist-language=Hacker
-
-*.hacker-config linguist-detectable=true
-*.hacker-config linguist-documentation=false
-*.hacker-config linguist-language=Hacker
-
 *.hacker linguist-detectable=true
 *.hacker linguist-documentation=false
-*.hacker linguist-language=Hacker
+*.hacker linguist-language=Hacker Lang
 
 *.hk linguist-detectable=true
 *.hk linguist-documentation=false
-*.hk linguist-language=Hacker
+*.hk linguist-language=Hacker Lang
+
+
+*.hl linguist-detectable=true
+*.hl linguist-documentation=false
+*.hl linguist-language=Hacker Lang
