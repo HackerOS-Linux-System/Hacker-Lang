@@ -1,6 +1,5 @@
 use crate::ast_parser::{Node, BinaryOp};
 use indextree::{Arena, NodeId};
-use std::collections::HashSet;
 
 // Constant Folding: Zamienia wyrażenia typu 2 + 2 na 4 bezpośrednio w drzewie AST
 pub fn optimize_ast(arena: &mut Arena<Node>, root: NodeId) {
