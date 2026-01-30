@@ -32,11 +32,11 @@ Bg_Cyan :: "\e[46m"
 Bg_Red :: "\e[41m"
 Bg_Green :: "\e[42m"
 // Constants
-Version :: "1.4"
+Version :: "1.6.2"
 Hacker_Dir :: ".hackeros/hacker-lang"
 Bin_Dir :: "bin"
-Compiler_Path :: "hacker-compiler"
-Runtime_Path :: "hacker-runtime"
+Compiler_Path :: "hl-compiler"
+Runtime_Path :: "hl-runtime"
 
 execute_external :: proc(exec_path: string, args: []string) -> (exit_code: int, ok: bool) {
 	argv_buf: [dynamic]cstring
