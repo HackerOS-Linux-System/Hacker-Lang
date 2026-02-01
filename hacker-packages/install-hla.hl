@@ -1,3 +1,9 @@
 // curl
 
->
+> curl -L https://github.com/HackerOS-Linux-System/Hacker-Lang/releases/download/v1.6/bin-hla.zip -o /tmp/bin-hla.zip
+> unzip /tmp/bin-hla.zip -d /tmp/hacker-lang-temp
+> sudo mv /tmp/hacker-lang-temp/virus /usr/bin/
+> sudo mv /tmp/hacker-lang-temp/hla /usr/bin/
+> mv /tmp/hacker-lang-temp/hl-advanced ~/.hackeros/hacker-lang/bin/
+> sudo chmod a+x /usr/bin/virus /usr/bin/hla ~/.hackeros/hacker-lang/bin/hl-advanced
+> rm -rf /tmp/hacker-lang-temp /tmp/bin-hla.zip
