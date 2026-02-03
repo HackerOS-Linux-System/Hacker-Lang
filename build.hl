@@ -1,13 +1,12 @@
-// crystal
+// golang
 // odin
 // cargo
 // pyhon3.13
-// gcc
 
 > cd source-code
 > cd core
->>> cd hacker-compiler && cargo build --release && cd .. && cd hacker-runtime && cargo build --release && cd .. && cd hacker-plsa && odin build . && cd hacker-network && gcc main.c -o hacker-network $(pkg-config --cflags --libs libdpdk)
+>>> cd hl-compiler && cargo build --release && cd .. && cd hl-runtime && cargo build --release && cd .. && cd hl-plsa && cargo build --release && cd .. && cd hl-containers && go get hl-containers && go build
 
 > cd ..
 > cd cli
->>> cd hli && cargo build --release && cd .. && cd hl && odin build . && cd .. && cd hlh && crystal build src/main.cr --release
+>>> cd hli && cargo build --release && cd .. && cd hl && odin build . && cd .. && cd hlh && odin build . && cd .. && cd hla && odin build .
