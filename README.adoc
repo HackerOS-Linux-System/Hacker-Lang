@@ -25,7 +25,7 @@ Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium 
 === Wymagania
 
 * Dystrybucja HackerOS.
-* `hl` — uruchamiaj kompiluj skrypty .hacker.
+* `hl` — uruchamiaj kompiluj skrypty .hl.
 * `hli` — interaktywna wersja narzędzia hl.
 * `bytes` — narzędzie do instalacji bibliotek, pluginów dla hacker lang.
 * `hlh` — skrót od hacker lang help - narzedzie pokazuje szczegółowe informacje o narzędziach hackerc, bytes, hli.
