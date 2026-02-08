@@ -3,9 +3,8 @@
     <mime-type type="text/hacker-lang">
         <comment>Hacker Lang Source Code</comment>
         <glob pattern="*.hacker"/>
-        <glob pattern="*.hacker-config"/>
-        <glob pattern="*.hackerfile"/>
+        <glob pattern="*.hl"/>
         <glob pattern="*.hk"/>
-        <glob pattern="*.hfx*"/>
+        <glob pattern="*.virus"/>
     </mime-type>
 </mime-info>
