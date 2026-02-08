@@ -1,6 +1,6 @@
 use std::env;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use clap::{Parser, Subcommand};
@@ -75,22 +75,24 @@ fn build() -> Result<()> {
 
     // Assume src/main.hla
     let home = env::var("HOME")?;
-    let transpiler_path = PathBuf::from(home).join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
+    // FIX: Clone home to avoid "use of moved value" error
+    let transpiler_path = PathBuf::from(home.clone()).join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
 
     let mut cmd = Command::new("python3");
     cmd.arg(transpiler_path)
-       .arg("src/main.hla")
-       .arg("build/main.rs")
-       .stdout(Stdio::inherit())
-       .stderr(Stdio::inherit());
+    .arg("src/main.hla")
+    .arg("build/main.rs")
+    .stdout(Stdio::inherit())
+    .stderr(Stdio::inherit());
 
     let status = cmd.status()?;
     if !status.success() {
         if Path::new("error.json").exists() {
+            // FIX: home is now available here because we cloned it earlier
             let errors_path = PathBuf::from(home).join(".hackeros/hacker-lang/bin/hla/hla-errors");
             Command::new(errors_path)
-                .arg("error.json")
-                .status()?;
+            .arg("error.json")
+            .status()?;
         }
         return Err(anyhow::anyhow!("Transpile failed"));
     }
@@ -98,11 +100,11 @@ fn build() -> Result<()> {
     // Compile with rustc or cargo
     // Assume simple rustc for now
     Command::new("rustc")
-        .arg("-o")
-        .arg("build/main")
-        .arg("build/main.rs")
-        .status()
-        .context("Compile failed")?;
+    .arg("-o")
+    .arg("build/main")
+    .arg("build/main.rs")
+    .status()
+    .context("Compile failed")?;
 
     println!("Build complete.");
     Ok(())
@@ -130,7 +132,8 @@ fn docs() -> Result<()> {
     // Simple TUI
     loop {
         terminal.draw(|f| {
-            let size = f.area();
+            // FIX: Prefix with underscore to silence unused variable warning
+            let _size = f.area();
             // Render docs text, placeholder
             // Use ratatui widgets to show docs
         })?;
@@ -150,7 +153,7 @@ fn docs() -> Result<()> {
 fn run() -> Result<()> {
     build()?;
     Command::new("./build/main")
-        .status()
-        .context("Run failed")?;
+    .status()
+    .context("Run failed")?;
     Ok(())
 }
