@@ -1,15 +1,15 @@
-# hla-transpiler/main.py
 import sys
 import os
 import json
 from lark import Lark, Transformer, v_args, LarkError
-from lark.indenter import Indenter
+from lark.exceptions import VisitError
 
-# Updated grammar with new features
+# Updated grammar with whitespace ignoring, robust import paths, fixed statement declarations, and direct function calls
 hla_grammar = r"""
     ?start: program
 
-    program: (directive | import | alloc_mode | link_mode | global_decl | declaration | function | class | statement)*
+    # FIX: Removed 'declaration' from program to avoid collision with 'statement' (which includes declaration)
+    program: (directive | import | global_decl | function | class | statement)*
 
     directive: /---/ MODE /---/  -> alloc_directive
              | /===/ LINK_MODE /===/  -> link_directive
@@ -17,13 +17,12 @@ hla_grammar = r"""
     MODE: "auto" | "automatic" | "fast" | "manual" | "safe" | "gc"
     LINK_MODE: "full-static" | "static" | "dynamic"
 
-    import: "#" "<" IMPORT_TYPE ":" NAME ">"  -> library_import
+    # Allow complex paths in imports (e.g. rust:std::process)
+    import: "#" "<" IMPORT_TYPE ":" NAME (("::"|".") NAME)* ">"  -> library_import
 
     IMPORT_TYPE: "rust" | "python" | "core" | "bytes" | "virus"
 
-    alloc_mode: directive
-    link_mode: directive
-
+    # FIX: Use string literals for keywords to prevent NAME tokenizing them
     global_decl: "global" ("def" | "mut") NAME ":" type "=" expression ";"  -> global_var
 
     declaration: ("def" | "mut") NAME ":" type "=" expression ";"  -> var_decl
@@ -36,13 +35,14 @@ hla_grammar = r"""
 
     method: function  -> class_method
 
-    statement: assignment
+    statement: declaration
+             | assignment
              | log_stmt
              | if_stmt
              | loop_stmt
              | return_stmt
              | del_stmt
-             | expression ";" 
+             | expression ";"
 
     assignment: NAME "=" expression ";"  -> assign
 
@@ -68,36 +68,32 @@ hla_grammar = r"""
               | expression "!"  -> propagate_error
               | "(" expression ")"
 
-    atom: NUMBER -> number
+    atom: func_call
+        | NUMBER -> number
         | STRING -> string
         | NAME -> var
         | "true" -> true
         | "false" -> false
-        | func_call
 
-    func_call: NAME "." NAME "(" (expression ("," expression)*)? ")"
+    # FIX: Added simple_call for direct function calls like calculate_hash(APP_ID)
+    func_call: NAME "." NAME "(" (expression ("," expression)*)? ")"  -> qualified_call
+             | NAME "(" (expression ("," expression)*)? ")"           -> simple_call
 
     type: "i32" | "u32" | "f64" | "bool" | "String" | NAME
 
-    COMMENT: "!" /[^\n]/*
+    # Keywords removed here as they are now literals in rules
+
+    COMMENT: "!" /[^\n]*/
            | "!!" /.+?/ "!!"
 
     %import common.CNAME -> NAME
     %import common.INT -> NUMBER
     %import common.ESCAPED_STRING -> STRING
-    %import common.WS_INLINE
-    %ignore WS_INLINE
+    %import common.WS
+    %ignore WS
     %ignore COMMENT
 
 """
-
-class HLAIndenter(Indenter):
-    NL_type = '_NEWLINE'
-    OPEN_PAREN_types = ['LPAR', 'LSQB', 'LBRACE']
-    CLOSE_PAREN_types = ['RPAR', 'RSQB', 'RBRACE']
-    INDENT_type = '_INDENT'
-    DEDENT_type = '_DEDENT'
-    tab_len = 4
 
 class RustTransformer(Transformer):
     def __init__(self):
@@ -134,8 +130,8 @@ class RustTransformer(Transformer):
         return f"{prelude}{rust_imports}\nfn main(){main_ret} {{\n{body}\n}}\n"
 
     @v_args(inline=True)
-    def alloc_directive(self, mode):
-        self.alloc_mode = mode.lower()
+    def alloc_directive(self, _1, mode, _2):
+        self.alloc_mode = str(mode).lower()
         if self.alloc_mode in ["auto", "automatic"]:
             self.alloc_mode = "arc"
         elif self.alloc_mode == "fast":
@@ -150,12 +146,13 @@ class RustTransformer(Transformer):
         return None
 
     @v_args(inline=True)
-    def link_directive(self, mode):
-        self.link_mode = mode.lower()
+    def link_directive(self, _1, mode, _2):
+        self.link_mode = str(mode).lower()
         return None
 
     @v_args(inline=True)
-    def library_import(self, imp_type, name):
+    def library_import(self, imp_type, *parts):
+        name = "".join(str(p) for p in parts)
         if imp_type == "rust":
             self.imports.append(f"use {name}::*;")
         elif imp_type == "python":
@@ -168,15 +165,15 @@ class RustTransformer(Transformer):
 
     @v_args(inline=True)
     def global_var(self, mutability, name, typ, expr):
-        mut = "mut " if mutability == "mut" else ""
+        mut = "mut " if str(mutability) == "mut" else ""
         self.imports.append("use lazy_static::lazy_static;")
         return f"lazy_static! {{ static ref {mut}{name}: {typ} = {expr}; }}"
 
     @v_args(inline=True)
     def var_decl(self, mutability, name, typ, expr):
-        mut = "mut " if mutability == "mut" else ""
+        mut = "mut " if str(mutability) == "mut" else ""
         if self.alloc_mode == "arc":
-            if typ in ["String", "Vec"]:  # Assume complex
+            if str(typ) in ["String", "Vec"]:  # Assume complex
                 return f"let {mut}{name}: std::sync::Arc<{typ}> = std::sync::Arc::new({expr});"
         if self.use_arena:
             return f"let {mut}{name}: &{typ} = arena.alloc({expr});"
@@ -196,7 +193,7 @@ class RustTransformer(Transformer):
         fields = []
         methods = []
         for m in members:
-            if isinstance(m, str) and m.startswith("pub"):  
+            if isinstance(m, str) and m.startswith("pub"):
                 fields.append(m)
             else:
                 methods.append(str(m))
@@ -248,11 +245,16 @@ class RustTransformer(Transformer):
         return f"{expr}?"
 
     @v_args(inline=True)
-    def func_call(self, mod, func, *args):
+    def qualified_call(self, mod, func, *args):
         args_str = ", ".join(str(a) for a in args)
         if mod in self.python_imports:
             return f"Python::with_gil(|py| {{ py.import(\"{mod}\")?.getattr(\"{func}\")?.call(({args_str},))?.extract()? }})"
         return f"{mod}::{func}({args_str})"
+
+    @v_args(inline=True)
+    def simple_call(self, func, *args):
+        args_str = ", ".join(str(a) for a in args)
+        return f"{func}({args_str})"
 
     @v_args(inline=True)
     def params(self, *params):
@@ -289,12 +291,12 @@ class RustTransformer(Transformer):
         return str(children[0])
 
 # Parser
-parser = Lark(hla_grammar, parser='lalr', postlex=HLAIndenter())
+parser = Lark(hla_grammar, parser='lalr')
 
 def transpile_hla_to_rust(file_path, output_path):
     with open(file_path, 'r') as f:
         source = f.read()
-    
+
     try:
         tree = parser.parse(source)
         transformer = RustTransformer()
@@ -304,9 +306,24 @@ def transpile_hla_to_rust(file_path, output_path):
         return True
     except LarkError as e:
         # Generate error.json
-        context = e.get_context(source, 50)
-        line = source[:e.pos_in_stream].count('\n') + 1
-        col = e.column
+        if hasattr(e, 'get_context'):
+            context = e.get_context(source, 50)
+            try:
+                line = source[:e.pos_in_stream].count('\n') + 1
+                col = e.column
+            except:
+                line = getattr(e, 'line', 0)
+                col = getattr(e, 'column', 0)
+        elif isinstance(e, VisitError):
+            # Transformation error, e.orig_exc contains the actual error
+            context = str(e.orig_exc)
+            line = 1
+            col = 1
+        else:
+            context = str(e)
+            line = 1
+            col = 1
+
         error_data = {
             "line": line,
             "column": col,
@@ -321,10 +338,10 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: hla-transpiler <input.hla> [output.rs]")
         sys.exit(1)
-    
+
     input_file = sys.argv[1]
     output_file = sys.argv[2] if len(sys.argv) > 2 else input_file.replace('.hla', '.rs')
-    
+
     success = transpile_hla_to_rust(input_file, output_file)
     if success:
         print(f"Transpiled {input_file} to {output_file}")
