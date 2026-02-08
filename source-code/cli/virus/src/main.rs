@@ -1,17 +1,25 @@
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::os::unix::fs::PermissionsExt; // For setting executable permissions
 use clap::{Parser, Subcommand};
 use hk_parser::{HkConfig, load_hk_file, HkValue};
 use hcl::from_str as hcl_from_str;
 use hcl::Body;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use crossterm::event::{self, KeyCode};
 use crossterm::{execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
+use flate2::read::GzDecoder;
+use tar::Archive;
+
+const VENV_PATH: &str = "/usr/lib/Hacker-Lang/venv";
+const VENV_PYTHON: &str = "/usr/lib/Hacker-Lang/venv/bin/python3";
+const VENV_PIP: &str = "/usr/lib/Hacker-Lang/venv/bin/pip";
+const DOWNLOAD_URL: &str = "https://github.com/HackerOS-Linux-System/Hacker-Lang/releases/download/v1.6.3/hla.tar.gz";
 
 #[derive(Parser)]
 #[command(version = "0.1.0")]
@@ -27,6 +35,7 @@ enum Commands {
     Info,
     Docs,
     Run,
+    Init,
 }
 
 fn main() -> Result<()> {
@@ -38,6 +47,7 @@ fn main() -> Result<()> {
         Commands::Info => info(),
         Commands::Docs => docs()?,
         Commands::Run => run()?,
+        Commands::Init => init()?,
     }
 
     Ok(())
@@ -70,41 +80,136 @@ fn load_config() -> Result<HkConfig> {
     }
 }
 
-fn build() -> Result<()> {
-    let _config = load_config()?;  // Use for versions, etc.
+fn init() -> Result<()> {
+    println!("Initializing Hacker Lang Environment...");
 
-    // Assume src/main.hla
-    let home = env::var("HOME")?;
-    // FIX: Clone home to avoid "use of moved value" error
-    let transpiler_path = PathBuf::from(home.clone()).join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
-
-    let mut cmd = Command::new("python3");
-    cmd.arg(transpiler_path)
-    .arg("src/main.hla")
-    .arg("build/main.rs")
-    .stdout(Stdio::inherit())
-    .stderr(Stdio::inherit());
-
-    let status = cmd.status()?;
-    if !status.success() {
-        if Path::new("error.json").exists() {
-            // FIX: home is now available here because we cloned it earlier
-            let errors_path = PathBuf::from(home).join(".hackeros/hacker-lang/bin/hla/hla-errors");
-            Command::new(errors_path)
-            .arg("error.json")
-            .status()?;
+    // 1. Setup Virtual Environment
+    if !Path::new(VENV_PATH).exists() {
+        println!("Creating virtual environment at {}...", VENV_PATH);
+        // Ensure parent directory exists (requires sudo/root usually)
+        if let Some(parent) = Path::new(VENV_PATH).parent() {
+            fs::create_dir_all(parent).context("Failed to create directory structure. Run with sudo?")?;
         }
-        return Err(anyhow::anyhow!("Transpile failed"));
+        
+        let status = Command::new("python3")
+            .arg("-m")
+            .arg("venv")
+            .arg(VENV_PATH)
+            .status()
+            .context("Failed to create python venv")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to create virtual environment."));
+        }
+
+        // Install dependencies needed for transpiler (e.g., lark)
+        println!("Installing python dependencies...");
+        let pip_status = Command::new(VENV_PIP)
+            .args(["install", "lark"])
+            .status()
+            .context("Failed to install pip dependencies")?;
+        
+        if !pip_status.success() {
+            return Err(anyhow!("Failed to install dependencies via pip."));
+        }
+    } else {
+        println!("Virtual environment already exists.");
     }
 
-    // Compile with rustc or cargo
-    // Assume simple rustc for now
+    // 2. Download and Extract Binaries
+    println!("Downloading release from {}...", DOWNLOAD_URL);
+    let response = reqwest::blocking::get(DOWNLOAD_URL)
+        .context("Failed to download HLA release")?;
+    
+    let bytes = response.bytes().context("Failed to read response bytes")?;
+    let cursor = Cursor::new(bytes);
+    let tar = GzDecoder::new(cursor);
+    let mut archive = Archive::new(tar);
+
+    println!("Extracting to /tmp/...");
+    archive.unpack("/tmp/").context("Failed to unpack archive to /tmp/")?;
+
+    // 3. Move binaries to User Home
+    let home = env::var("HOME")?;
+    let hla_bin_path = PathBuf::from(&home).join(".hackeros/hacker-lang/bin/hla/");
+    
+    println!("Setting up {}...", hla_bin_path.display());
+    fs::create_dir_all(&hla_bin_path).context("Failed to create user bin directory")?;
+
+    let files_to_move = vec!["hla-transpiler", "hla-errors"];
+    
+    for filename in files_to_move {
+        let src = PathBuf::from("/tmp/").join(filename);
+        let dest = hla_bin_path.join(filename);
+
+        if src.exists() {
+            // Copy instead of rename to avoid cross-device link errors
+            fs::copy(&src, &dest).context(format!("Failed to copy {}", filename))?;
+            
+            // Set executable permission
+            let mut perms = fs::metadata(&dest)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms)?;
+            
+            println!("Installed {}", filename);
+        } else {
+            eprintln!("Warning: {} not found in extracted archive.", filename);
+        }
+    }
+
+    println!("Initialization complete.");
+    Ok(())
+}
+
+fn check_environment() -> Result<(String, PathBuf, PathBuf)> {
+    // Check for venv python
+    if !Path::new(VENV_PYTHON).exists() {
+        return Err(anyhow!("Environment missing. Please use 'virus init'"));
+    }
+
+    let home = env::var("HOME")?;
+    let transpiler_path = PathBuf::from(&home).join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
+    let errors_path = PathBuf::from(&home).join(".hackeros/hacker-lang/bin/hla/hla-errors");
+
+    if !transpiler_path.exists() || !errors_path.exists() {
+        return Err(anyhow!("HLA binaries missing. Please use 'virus init'"));
+    }
+
+    Ok((VENV_PYTHON.to_string(), transpiler_path, errors_path))
+}
+
+fn build() -> Result<()> {
+    // Validate environment first
+    let (python_path, transpiler_path, errors_path) = check_environment()?;
+    
+    let _config = load_config()?;
+
+    // Use python from venv to run the transpiler
+    let mut cmd = Command::new(python_path);
+    cmd.arg(transpiler_path)
+       .arg("src/main.hla")
+       .arg("build/main.rs")
+       .stdout(Stdio::inherit())
+       .stderr(Stdio::inherit());
+
+    let status = cmd.status().context("Failed to execute transpiler")?;
+    
+    if !status.success() {
+        if Path::new("error.json").exists() {
+            Command::new(errors_path)
+                .arg("error.json")
+                .status()?;
+        }
+        return Err(anyhow!("Transpile failed"));
+    }
+
+    // Compile with rustc
     Command::new("rustc")
-    .arg("-o")
-    .arg("build/main")
-    .arg("build/main.rs")
-    .status()
-    .context("Compile failed")?;
+        .arg("-o")
+        .arg("build/main")
+        .arg("build/main.rs")
+        .status()
+        .context("Compile failed")?;
 
     println!("Build complete.");
     Ok(())
@@ -132,10 +237,8 @@ fn docs() -> Result<()> {
     // Simple TUI
     loop {
         terminal.draw(|f| {
-            // FIX: Prefix with underscore to silence unused variable warning
             let _size = f.area();
             // Render docs text, placeholder
-            // Use ratatui widgets to show docs
         })?;
 
         if let event::Event::Key(key) = event::read()? {
@@ -153,7 +256,7 @@ fn docs() -> Result<()> {
 fn run() -> Result<()> {
     build()?;
     Command::new("./build/main")
-    .status()
-    .context("Run failed")?;
+        .status()
+        .context("Run failed")?;
     Ok(())
 }
