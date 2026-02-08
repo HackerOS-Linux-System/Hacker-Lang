@@ -1,0 +1,14 @@
+---
+language: Hacker Lang
+type: programming
+extensions:
+  - .hk
+  - .hacker
+  - .hl
+  - .hla
+color: "#D3D3D3"  # Jasnoszary
+tm_scope: source.hack
+ace_mode: text
+group: Custom
+aliases:
+  - Hacker-Lang
