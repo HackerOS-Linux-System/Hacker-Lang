@@ -10,3 +10,7 @@
 *.hl linguist-detectable=true
 *.hl linguist-documentation=false
 *.hl linguist-language=Hacker-Lang
+
+*.hla linguist-detectable=true
+*.hla linguist-documentation=false
+*.hla linguist-language=Hacker-Lang
