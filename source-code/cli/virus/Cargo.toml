@@ -4,8 +4,9 @@ version = "1.6.3"
 edition = "2021"
 
 [dependencies]
-hk-parser = "0.0.1"
-hcl-rs = "0.19.4"
+hk-parser = "0.1.0"
+hcl-rs = "0.19"
+indexmap = "2"
 clap = { version = "4.5.18", features = ["derive"] }
 ratatui = "0.28.1"
 crossterm = "0.28.1"
@@ -15,3 +16,4 @@ anyhow = "1.0.89"
 reqwest = { version = "0.12", features = ["blocking"] }
 flate2 = "1.0"
 tar = "0.4"
+
