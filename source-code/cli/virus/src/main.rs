@@ -1,25 +1,12 @@
 use std::env;
 use std::fs;
-use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::os::unix::fs::PermissionsExt; // For setting executable permissions
 use clap::{Parser, Subcommand};
-use hk_parser::{HkConfig, load_hk_file, HkValue};
-use hcl::from_str as hcl_from_str;
-use hcl::Body;
-use anyhow::{Context, Result, anyhow};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-use crossterm::event::{self, KeyCode};
-use crossterm::{execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
-use flate2::read::GzDecoder;
-use tar::Archive;
-
-const VENV_PATH: &str = "/usr/lib/Hacker-Lang/venv";
-const VENV_PYTHON: &str = "/usr/lib/Hacker-Lang/venv/bin/python3";
-const VENV_PIP: &str = "/usr/lib/Hacker-Lang/venv/bin/pip";
-const DOWNLOAD_URL: &str = "https://github.com/HackerOS-Linux-System/Hacker-Lang/releases/download/v1.6.3/hla.tar.gz";
+use anyhow::{Context, Result};
+use hk_parser::{HkConfig, HkValue, load_hk_file, resolve_interpolations};
+use hcl::{from_str as hcl_from_str, Body, Expression, ObjectKey, Structure};
+use indexmap::IndexMap;
 
 #[derive(Parser)]
 #[command(version = "0.1.0")]
@@ -30,187 +17,266 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Start,
+    Run { file: String },
+    Compile { file: String },
     Build,
     Clean,
     Info,
     Docs,
-    Run,
-    Init,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    match &cli.command {
+    match cli.command {
+        Commands::Start => start()?,
+        Commands::Run { file } => run_file(&file)?,
+        Commands::Compile { file } => compile_file(&file)?,
         Commands::Build => build()?,
         Commands::Clean => clean()?,
         Commands::Info => info(),
         Commands::Docs => docs()?,
-        Commands::Run => run()?,
-        Commands::Init => init()?,
     }
-
     Ok(())
 }
 
 fn load_config() -> Result<HkConfig> {
+    let mut config: HkConfig;
+    let mut is_hk = false;
+
     if Path::new("Virus.hk").exists() {
-        load_hk_file("Virus.hk").map_err(|e| anyhow::anyhow!("HK parse error: {}", e))
+        config = load_hk_file("Virus.hk")
+        .map_err(|e| anyhow::anyhow!("HK parse error: {}", e))?;
+        is_hk = true;
     } else if Path::new("Virus.hcl").exists() {
         let contents = fs::read_to_string("Virus.hcl")?;
         let body: Body = hcl_from_str(&contents)?;
-        // Convert HCL Body to HkConfig (simplified)
-        let mut config = HkConfig::new();
-        for structure in body.into_iter() {
-            if let hcl::Structure::Attribute(attr) = structure {
-                config.insert(attr.key.to_string(), HkValue::String(attr.expr.to_string()));
-            } else if let hcl::Structure::Block(block) = structure {
-                let mut map = HkConfig::new();
-                for sub in block.body.into_iter() {
-                    if let hcl::Structure::Attribute(sub_attr) = sub {
-                        map.insert(sub_attr.key.to_string(), HkValue::String(sub_attr.expr.to_string()));
-                    }
-                }
-                config.insert(block.identifier.to_string(), HkValue::Map(map));
+        config = body_to_hkconfig(&body)?;
+    } else {
+        config = HkConfig::new();
+    }
+
+    if is_hk {
+        resolve_interpolations(&mut config)
+        .map_err(|e| anyhow::anyhow!("Interpolation error: {}", e))?;
+    }
+
+    generate_cargo_toml(&config)?;
+    Ok(config)
+}
+
+fn body_to_hkconfig(body: &Body) -> Result<HkConfig> {
+    let mut config = IndexMap::new();
+
+    for structure in body.iter() {
+        match structure {
+            Structure::Attribute(attr) => {
+                let key = attr.key().to_string();
+                let value = hcl_to_hkvalue(attr.expr())?;
+                config.insert(key, value);
+            }
+            Structure::Block(block) => {
+                let key = block.identifier().to_string();
+                let sub_config = body_to_hkconfig(block.body())?;
+                config.insert(key, HkValue::Map(sub_config));
             }
         }
-        Ok(config)
-    } else {
-        Ok(HkConfig::new())
+    }
+    Ok(config)
+}
+
+fn hcl_to_hkvalue(expr: &Expression) -> Result<HkValue> {
+    match expr {
+        Expression::String(s) => Ok(HkValue::String(s.clone())),
+        Expression::Bool(b) => Ok(HkValue::Bool(*b)),
+        Expression::Number(n) => Ok(HkValue::Number(n.as_f64().unwrap_or(0.0))),
+        Expression::Array(a) => {
+            let vec: Vec<HkValue> = a
+            .iter()
+            .map(hcl_to_hkvalue)
+            .collect::<Result<_, _>>()?;
+            Ok(HkValue::Array(vec))
+        }
+        Expression::Object(o) => {
+            let mut map = IndexMap::new();
+            for (key, val) in o.iter() {
+                let key_str = match key {
+                    ObjectKey::Identifier(id) => id.to_string(),
+                    ObjectKey::Expression(e) => {
+                        if let Expression::String(s) = e {
+                            s.clone()
+                        } else {
+                            format!("{:?}", e)
+                        }
+                    }
+                    _ => format!("{:?}", key),
+                };
+                map.insert(key_str, hcl_to_hkvalue(val)?);
+            }
+            Ok(HkValue::Map(map))
+        }
+        Expression::Null => Ok(HkValue::String("null".to_string())),
+        Expression::Variable(v) => Err(anyhow::anyhow!("Variables not supported: {:?}", v)),
+        _ => Err(anyhow::anyhow!("Unsupported expression type: {:?}", expr)),
     }
 }
 
-fn init() -> Result<()> {
-    println!("Initializing Hacker Lang Environment...");
+fn generate_cargo_toml(config: &HkConfig) -> Result<()> {
+    let empty_map = IndexMap::new();
+    let metadata = config
+    .get("metadata")
+    .and_then(|v| v.as_map().ok())
+    .unwrap_or(&empty_map);
 
-    // 1. Setup Virtual Environment
-    if !Path::new(VENV_PATH).exists() {
-        println!("Creating virtual environment at {}...", VENV_PATH);
-        // Ensure parent directory exists (requires sudo/root usually)
-        if let Some(parent) = Path::new(VENV_PATH).parent() {
-            fs::create_dir_all(parent).context("Failed to create directory structure. Run with sudo?")?;
-        }
-        
-        let status = Command::new("python3")
-            .arg("-m")
-            .arg("venv")
-            .arg(VENV_PATH)
-            .status()
-            .context("Failed to create python venv")?;
-        
-        if !status.success() {
-            return Err(anyhow!("Failed to create virtual environment."));
-        }
+    let name = metadata
+    .get("name")
+    .and_then(|v| v.as_string().ok())
+    .unwrap_or_else(|| "project".to_string());
 
-        // Install dependencies needed for transpiler (e.g., lark)
-        println!("Installing python dependencies...");
-        let pip_status = Command::new(VENV_PIP)
-            .args(["install", "lark"])
-            .status()
-            .context("Failed to install pip dependencies")?;
-        
-        if !pip_status.success() {
-            return Err(anyhow!("Failed to install dependencies via pip."));
-        }
-    } else {
-        println!("Virtual environment already exists.");
-    }
-
-    // 2. Download and Extract Binaries
-    println!("Downloading release from {}...", DOWNLOAD_URL);
-    let response = reqwest::blocking::get(DOWNLOAD_URL)
-        .context("Failed to download HLA release")?;
-    
-    let bytes = response.bytes().context("Failed to read response bytes")?;
-    let cursor = Cursor::new(bytes);
-    let tar = GzDecoder::new(cursor);
-    let mut archive = Archive::new(tar);
-
-    println!("Extracting to /tmp/...");
-    archive.unpack("/tmp/").context("Failed to unpack archive to /tmp/")?;
-
-    // 3. Move binaries to User Home
-    let home = env::var("HOME")?;
-    let hla_bin_path = PathBuf::from(&home).join(".hackeros/hacker-lang/bin/hla/");
-    
-    println!("Setting up {}...", hla_bin_path.display());
-    fs::create_dir_all(&hla_bin_path).context("Failed to create user bin directory")?;
-
-    let files_to_move = vec!["hla-transpiler", "hla-errors"];
-    
-    for filename in files_to_move {
-        let src = PathBuf::from("/tmp/").join(filename);
-        let dest = hla_bin_path.join(filename);
-
-        if src.exists() {
-            // Copy instead of rename to avoid cross-device link errors
-            fs::copy(&src, &dest).context(format!("Failed to copy {}", filename))?;
-            
-            // Set executable permission
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-            
-            println!("Installed {}", filename);
+    let version_str = metadata
+    .get("version")
+    .and_then(|v| {
+        if let Ok(n) = v.as_number() {
+            Some(n.to_string())
+        } else if let Ok(s) = v.as_string() {
+            Some(s)
         } else {
-            eprintln!("Warning: {} not found in extracted archive.", filename);
+            None
+        }
+    })
+    .unwrap_or_else(|| "0.1.0".to_string());
+
+    let edition = metadata
+    .get("edition")
+    .and_then(|v| v.as_string().ok())
+    .unwrap_or_else(|| "2021".to_string());
+
+    let mut toml = format!(
+        "[package]\nname = \"{name}\"\nversion = \"{version_str}\"\nedition = \"{edition}\"\n\n[dependencies]\n"
+    );
+
+    if let Some(deps_val) = config.get("dependencies") {
+        if let Ok(deps) = deps_val.as_map() {
+            for (dep_name, dep_config) in deps {
+                match dep_config {
+                    HkValue::String(ver) => {
+                        toml.push_str(&format!("{dep_name} = \"{ver}\"\n"));
+                    }
+                    HkValue::Map(m) => {
+                        toml.push_str(&format!("{dep_name} = {{ "));
+                        let mut parts: Vec<String> = Vec::new();
+                        if let Some(ver) = m.get("version").and_then(|v| {
+                            if let Ok(s) = v.as_string() {
+                                Some(s)
+                            } else if let Ok(n) = v.as_number() {
+                                Some(n.to_string())
+                            } else {
+                                None
+                            }
+                        }) {
+                            parts.push(format!("version = \"{ver}\""));
+                        }
+                        if let Some(features) = m.get("features").and_then(|f| f.as_array().ok()) {
+                            let feats: Vec<String> = features
+                            .iter()
+                            .map(|f| {
+                                if let HkValue::String(s) = f {
+                                    format!("\"{s}\"")
+                                } else {
+                                    format!("{:?}", f)
+                                }
+                            })
+                            .collect();
+                            parts.push(format!("features = [{}]", feats.join(", ")));
+                        }
+                        toml.push_str(&parts.join(", "));
+                        toml.push_str(" }\n");
+                    }
+                    _ => {}
+                }
+            }
         }
     }
-
-    println!("Initialization complete.");
+    fs::write("Cargo.toml", toml)?;
     Ok(())
 }
 
-fn check_environment() -> Result<(String, PathBuf, PathBuf)> {
-    // Check for venv python
-    if !Path::new(VENV_PYTHON).exists() {
-        return Err(anyhow!("Environment missing. Please use 'virus init'"));
+fn start() -> Result<()> {
+    println!("virus start not implemented yet.");
+    Ok(())
+}
+
+fn run_file(_file: &str) -> Result<()> {
+    println!("virus run not implemented yet.");
+    Ok(())
+}
+
+fn compile_file(file: &str) -> Result<()> {
+    if !Path::new("Virus.hk").exists() && !Path::new("Virus.hcl").exists() {
+        // Single file mode
+        let home = env::var("HOME")?;
+        let transpiler_path = PathBuf::from(home.clone())
+        .join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
+        let mut cmd = Command::new("python3");
+        cmd.arg(transpiler_path)
+        .arg(file)
+        .arg("out.rs")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+        let status = cmd.status()?;
+        if !status.success() {
+            if Path::new("error.json").exists() {
+                let errors_path = PathBuf::from(home)
+                .join(".hackeros/hacker-lang/bin/hla/hla-errors");
+                Command::new(errors_path)
+                .arg("error.json")
+                .status()?;
+            }
+            return Err(anyhow::anyhow!("Transpile failed"));
+        }
+        Command::new("rustc").arg("out.rs").status()?;
+        println!("Compiled single file.");
+    } else {
+        build()?;
     }
-
-    let home = env::var("HOME")?;
-    let transpiler_path = PathBuf::from(&home).join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
-    let errors_path = PathBuf::from(&home).join(".hackeros/hacker-lang/bin/hla/hla-errors");
-
-    if !transpiler_path.exists() || !errors_path.exists() {
-        return Err(anyhow!("HLA binaries missing. Please use 'virus init'"));
-    }
-
-    Ok((VENV_PYTHON.to_string(), transpiler_path, errors_path))
+    Ok(())
 }
 
 fn build() -> Result<()> {
-    // Validate environment first
-    let (python_path, transpiler_path, errors_path) = check_environment()?;
-    
     let _config = load_config()?;
-
-    // Use python from venv to run the transpiler
-    let mut cmd = Command::new(python_path);
+    let home = env::var("HOME")?;
+    let transpiler_path = PathBuf::from(home.clone())
+    .join(".hackeros/hacker-lang/bin/hla/hla-transpiler");
+    let mut cmd = Command::new("python3");
     cmd.arg(transpiler_path)
-       .arg("src/main.hla")
-       .arg("build/main.rs")
-       .stdout(Stdio::inherit())
-       .stderr(Stdio::inherit());
-
-    let status = cmd.status().context("Failed to execute transpiler")?;
-    
+    .arg("src/main.hla")
+    .arg("build/main.rs")
+    .stdout(Stdio::inherit())
+    .stderr(Stdio::inherit());
+    let status = cmd.status()?;
     if !status.success() {
         if Path::new("error.json").exists() {
+            let errors_path = PathBuf::from(home)
+            .join(".hackeros/hacker-lang/bin/hla/hla-errors");
             Command::new(errors_path)
-                .arg("error.json")
-                .status()?;
+            .arg("error.json")
+            .status()?;
         }
-        return Err(anyhow!("Transpile failed"));
+        return Err(anyhow::anyhow!("Transpile failed"));
     }
-
-    // Compile with rustc
-    Command::new("rustc")
+    if Path::new("Cargo.toml").exists() {
+        Command::new("cargo")
+        .arg("build")
+        .status()
+        .context("Cargo build failed")?;
+    } else {
+        Command::new("rustc")
         .arg("-o")
         .arg("build/main")
         .arg("build/main.rs")
         .status()
         .context("Compile failed")?;
-
+    }
     println!("Build complete.");
     Ok(())
 }
@@ -228,35 +294,6 @@ fn info() {
 }
 
 fn docs() -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Simple TUI
-    loop {
-        terminal.draw(|f| {
-            let _size = f.area();
-            // Render docs text, placeholder
-        })?;
-
-        if let event::Event::Key(key) = event::read()? {
-            if key.code == KeyCode::Esc {
-                break;
-            }
-        }
-    }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    Ok(())
-}
-
-fn run() -> Result<()> {
-    build()?;
-    Command::new("./build/main")
-        .status()
-        .context("Run failed")?;
+    Command::new("hla-docs").status()?;
     Ok(())
 }
