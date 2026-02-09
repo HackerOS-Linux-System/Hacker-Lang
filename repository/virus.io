@@ -1,11 +1,10 @@
 ! Repozytorium bibliotek virus
 
-[lib.std_core]
--> description => Standardowa biblioteka rdzeniowa HLA
+[hk-parser]
+-> description => Parser dla języka programownia Hacker Lang (część konfiguracyjna)
 -> owner => HackerOS Team
 -> versions
---> 1.6.0 => https://repo.hackeros.org/libs/std_core-1.6.0.tar.gz
---> 1.6.3 => https://repo.hackeros.org/libs/std_core-1.6.3.tar.gz
+--> 0.1.0 => https://github.com/Bytes-Repository/hk-parser/releases/download/v0.1.0/libhk_parser.rlib
 
 [lib.net_utils]
 -> description => Rozszerzone narzędzia sieciowe (TCP/UDP/SSL)
