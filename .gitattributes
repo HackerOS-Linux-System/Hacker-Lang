@@ -14,3 +14,7 @@
 *.hla linguist-detectable=true
 *.hla linguist-documentation=false
 *.hla linguist-language=Hacker-Lang
+
+*.hla linguist-detectable=true
+*.hla linguist-documentation=false
+*.io linguist-language=Hacker-Lang
