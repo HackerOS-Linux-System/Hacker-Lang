@@ -1,0 +1,64 @@
+! Biblioteka FS - Zarządzanie Strukturą Systemu Plików
+---auto---
+#<core:std, fs, path>
+
+obj Directory [
+    !! Tworzy pojedynczy folder !!
+    sub create(name: String) [
+        fs.create_dir(name)!;
+    ]
+
+    !! Tworzy całą ścieżkę folderów (np. "a/b/c") !!
+    sub create_all(path: String) [
+        fs.create_dir_all(path)!;
+    ]
+
+    !! Usuwa pusty folder !!
+    sub remove(name: String) [
+        fs.remove_dir(name)!;
+    ]
+
+    !! Usuwa folder wraz z całą zawartością !!
+    sub remove_all(name: String) [
+        fs.remove_dir_all(name)!;
+    ]
+
+    !! Listuje zawartość folderu !!
+    sub list(path: String) -> Vec<String> [
+        def entries: Vec<String> = ();
+        loop entry in fs.read_dir(path)! [
+            def p: String = entry!.path().to_str()!;
+            entries.push(p);
+        ]
+        return entries;
+    ]
+]
+
+obj FSInfo [
+    !! Sprawdza czy podana ścieżka to folder !!
+    sub is_dir(path: String) -> bool [
+        def meta: Metadata = fs.metadata(path)!;
+        return meta.is_dir();
+    ]
+
+    !! Sprawdza czy podana ścieżka to plik !!
+    sub is_file(path: String) -> bool [
+        def meta: Metadata = fs.metadata(path)!;
+        return meta.is_file();
+    ]
+
+    !! Pobiera rozmiar pliku w bajtach !!
+    sub size(path: String) -> u32 [
+        def meta: Metadata = fs.metadata(path)!;
+        return meta.len();
+    ]
+]
+
+obj Permissions [
+    !! Ustawia plik jako "tylko do odczytu" !!
+    sub set_readonly(path: String, readonly: bool) [
+        def perms: Permissions = fs.metadata(path)!.permissions();
+        perms.set_readonly(readonly);
+        fs.set_permissions(path, perms)!;
+    ]
+]
