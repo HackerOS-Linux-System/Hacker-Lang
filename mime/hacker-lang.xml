@@ -5,6 +5,5 @@
         <glob pattern="*.hacker"/>
         <glob pattern="*.hl"/>
         <glob pattern="*.hk"/>
-        <glob pattern="*.hla"/>
     </mime-type>
 </mime-info>
