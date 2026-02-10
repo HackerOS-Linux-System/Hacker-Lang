@@ -1,0 +1,50 @@
+! Biblioteka Net - Komunikacja Sieciowa (TCP/UDP)
+---auto---
+#<core:std, net, io>
+
+!!
+   TCP Listener - Służy do tworzenia serwerów
+!!
+obj TcpServer [
+    sub listen(address: String) -> TcpListener [
+        ! address np. "127.0.0.1:8080"
+        return TcpListener.bind(address)!;
+    ]
+
+    sub accept(mut listener: TcpListener) -> TcpStream [
+        def stream: TcpStream = listener.accept()!.0;
+        return stream;
+    ]
+]
+
+!!
+   TCP Stream - Zarządzanie połączeniem klienta i serwera
+!!
+obj TcpClient [
+    sub connect(address: String) -> TcpStream [
+        return TcpStream.connect(address)!;
+    ]
+
+    sub send(mut stream: TcpStream, message: String) [
+        stream.write_all(message.as_bytes())!;
+    ]
+
+    sub read(mut stream: TcpStream) -> String [
+        def buffer: Vec<u8> = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0); ! Przykładowy bufor
+        def n: u32 = stream.read(mut buffer)!;
+        return String.from_utf8_lossy(buffer);
+    ]
+]
+
+!!
+   UDP - Szybka komunikacja bezpołączeniowa
+!!
+obj Udp [
+    sub bind(address: String) -> UdpSocket [
+        return UdpSocket.bind(address)!;
+    ]
+
+    sub send_to(socket: UdpSocket, target: String, data: String) [
+        socket.send_to(data.as_bytes(), target)!;
+    ]
+]
