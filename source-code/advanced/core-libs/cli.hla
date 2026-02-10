@@ -1,1 +1,68 @@
+! CLI Library dla HLA
+! Obsługuje argumenty wejściowe i formatowanie terminala
 
+---auto---
+#<core:std, env, process>
+
+!! 
+   Obiekt Args zarządza dostępem do argumentów programu.
+   Mapuje się na std::env::args() w Rust.
+!!
+obj Args [
+    sub all() -> Vec<String> [
+        ! Pobiera wszystkie argumenty jako wektor
+        def arguments: Vec<String> = env.args().collect();
+        return arguments;
+    ]
+
+    sub get(index: i32) -> Option<String> [
+        def a: Vec<String> = env.args().collect();
+        return a.get(index);
+    ]
+
+    sub count() -> i32 [
+        return env.args().count();
+    ]
+]
+
+!!
+   Terminal zapewnia proste narzędzia do kolorowania tekstu
+   Wykorzystuje kody ANSI.
+!!
+obj Term [
+    global def RESET: String = "\x1b[0m";
+    global def RED: String = "\x1b[31m";
+    global def GREEN: String = "\x1b[32m";
+    global def YELLOW: String = "\x1b[33m";
+
+    sub info(msg: String) [
+        log "[INFO] " + msg;
+    ]
+
+    sub success(msg: String) [
+        log "\x1b[32m[SUCCESS]\x1b[0m " + msg;
+    ]
+
+    sub error(msg: String) [
+        log "\x1b[31m[ERROR]\x1b[0m " + msg;
+    ]
+]
+
+!!
+   Parser dla flag typu --help lub -v
+!!
+obj FlagParser [
+    sub is_present(flag: String) -> bool [
+        loop arg in env.args() [
+            if arg == flag [
+                return true;
+            ]
+        ]
+        return false;
+    ]
+]
+
+sub exit_with_error(msg: String) [
+    Term.error(msg);
+    process.exit(1);
+]
