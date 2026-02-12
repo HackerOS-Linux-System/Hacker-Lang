@@ -1,13 +1,13 @@
 [package]
 name = "hl-compiler"
-version = "1.6.2"
+version = "1.6.3"
 edition = "2021"
 
 [dependencies]
-inkwell = { version = "0.5.0", features = ["llvm18-0"] }
+# Use git version to ensure access to 0.5.0 which supports llvm16
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm16-0"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 colored = "2.0"
-subprocess = "0.2.9"
 dirs = "5.0"
