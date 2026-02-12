@@ -4,8 +4,10 @@ use miette::{Diagnostic, NamedSource, SourceSpan};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::PathBuf;
 use std::process::exit;
 use thiserror::Error;
+use colored::*;
 
 const HACKER_DIR_SUFFIX: &str = ".hackeros/hacker-lang";
 
@@ -20,18 +22,13 @@ struct Args {
     /// Output mode: print JSON to stdout
     #[arg(long)]
     json: bool,
-    /// Check safety only
+    /// If true, parse imported libraries and merge their AST (Run mode).
+    /// If false, just list libraries for linking (Compile mode).
     #[arg(long)]
-    check_safety: bool,
+    resolve_libs: bool,
 }
 
 // --- AST Structures ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Plugin {
-    pub name: String,
-    pub is_super: bool,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandType {
@@ -56,15 +53,13 @@ pub struct ProgramNode {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnalysisResult {
     pub deps: Vec<String>,
+    // Libraries explicitly imported via #
     pub libs: Vec<String>,
-    pub binaries: HashMap<String, String>,
     pub functions: HashMap<String, Vec<ProgramNode>>,
     pub main_body: Vec<ProgramNode>,
-    pub includes: Vec<String>,
-    // Safety Analysis
-    pub is_safe: bool,
+    // Information regarding safety
+    pub is_potentially_unsafe: bool,
     pub safety_warnings: Vec<String>,
-    pub requires_unsafe_flag: bool,
 }
 
 // --- Parser Logic ---
@@ -90,79 +85,73 @@ enum LineOp {
 }
 
 fn line_parser() -> impl Parser<char, LineOp, Error = Simple<char>> {
-    // Helper to convert Vec<char> to String
     let to_string = |chars: Vec<char>| chars.into_iter().collect::<String>().trim().to_string();
 
-    // just('!') produces char, end() produces (). We must align them to use .or().
-    // just('!').ignored() produces ().
-    let cmd_content = take_until(just('!').ignored().or(end()))
+    // Reusable parser for content that ends at a comment (!) or end of line
+    let content = take_until(just('!').ignored().or(end()))
     .map(move |(chars, _)| to_string(chars));
 
-    let func_end = just(':').then(end()).to(LineOp::FuncEnd);
+    // Combined parser for Function Start (:name) and Function End (:)
+    // If the content after ':' is empty (after stripping comments/whitespace), it's a FuncEnd.
+    // This correctly handles ": ! comment" as a FuncEnd.
+    let func_decl = just(':').ignore_then(content.clone()).map(|name| {
+        if name.is_empty() {
+            LineOp::FuncEnd
+        } else {
+            LineOp::FuncStart(name)
+        }
+    });
 
-    let func_start = just(':')
-    .ignore_then(take_until(end()))
-    .map(move |(chars, _)| LineOp::FuncStart(to_string(chars)));
+    let func_call = just('.').ignore_then(content.clone()).map(LineOp::FuncCall);
+    let sys_dep = just("//").ignore_then(content.clone()).map(LineOp::SysDep);
+    let lib = just('#').ignore_then(content.clone()).map(LineOp::Lib);
+    let separate_cmd = just(">>>").ignore_then(content.clone()).map(LineOp::SeparateCmd);
+    let var_cmd = just(">>").ignore_then(content.clone()).map(LineOp::VarCmd);
 
-    let func_call = just('.')
-    .ignore_then(take_until(end()))
-    .map(move |(chars, _)| LineOp::FuncCall(to_string(chars)));
+    // Explicit command with >
+    let cmd = just(">").ignore_then(content.clone()).map(LineOp::Cmd);
 
-    let sys_dep = just("//")
-    .ignore_then(take_until(end()))
-    .map(move |(chars, _)| LineOp::SysDep(to_string(chars)));
+    // Implicit command (fallback for lines like "apt-get install" which lack > prefix but are commands)
+    let implicit_cmd = content.clone().map(LineOp::Cmd);
 
-    let lib = just('#')
-    .ignore_then(take_until(end()))
-    .map(move |(chars, _)| LineOp::Lib(to_string(chars)));
-
-    let separate_cmd = just(">>>").ignore_then(cmd_content.clone()).map(LineOp::SeparateCmd);
-    let var_cmd = just(">>").ignore_then(cmd_content.clone()).map(LineOp::VarCmd);
-    let cmd = just(">").ignore_then(cmd_content.clone()).map(LineOp::Cmd);
-
-    // take_until(just('=')) consumes the '='. We don't need another then_ignore(just('=')).
     let global_var = just('@')
     .ignore_then(take_until(just('=')))
-    .then(take_until(end()))
-    .map(move |((k_chars, _), (v_chars, _))| LineOp::GlobalVar(to_string(k_chars), to_string(v_chars)));
+    .then(content.clone())
+    .map(move |((k_chars, _), v_str)| LineOp::GlobalVar(to_string(k_chars), v_str));
 
     let local_var = just('$')
     .ignore_then(take_until(just('=')))
-    .then(take_until(end()))
-    .map(move |((k_chars, _), (v_chars, _))| LineOp::LocalVar(to_string(k_chars), to_string(v_chars)));
+    .then(content.clone())
+    .map(move |((k_chars, _), v_str)| LineOp::LocalVar(to_string(k_chars), v_str));
 
-    let plugin = just('\\')
-    .ignore_then(take_until(end()))
-    .map(move |(chars, _)| LineOp::Plugin(to_string(chars)));
+    let plugin = just('\\').ignore_then(content.clone()).map(LineOp::Plugin);
 
     let loop_op = just('=')
     .ignore_then(text::int(10))
     .then_ignore(just('>'))
-    .then(cmd_content.clone())
+    .then(content.clone())
     .map(|(num_str, cmd)| {
         let num: u64 = num_str.parse().unwrap_or(0);
         LineOp::Loop(num, cmd)
     });
 
-    // take_until(just('>')) consumes the '>'.
     let cond_op = just('?')
     .ignore_then(take_until(just('>')))
-    .then(cmd_content.clone())
+    .then(content.clone())
     .map(move |((cond_chars, _), cmd)| {
         LineOp::Cond(to_string(cond_chars), cmd)
     });
 
-    let bg = just('&').ignore_then(cmd_content.clone()).map(LineOp::Bg);
-
+    let bg = just('&').ignore_then(content.clone()).map(LineOp::Bg);
     let comment_line = just('!').to(LineOp::CommentLine);
 
     choice((
-        func_end, func_start, func_call, sys_dep, lib, separate_cmd, var_cmd, cmd,
+        func_decl, func_call, sys_dep, lib, separate_cmd, var_cmd, cmd,
         global_var, local_var, plugin, loop_op, cond_op, bg, comment_line
-    )).or(any().to(LineOp::Invalid))
+    ))
+    .or(implicit_cmd) // Fallback: Treat as command if it doesn't match others
+    .or(any().to(LineOp::Invalid))
 }
-
-// --- Errors ---
 
 #[derive(Error, Debug, Diagnostic)]
 enum ParseError {
@@ -187,44 +176,36 @@ enum ParseError {
     }
 }
 
-// --- Analyzer ---
-
 fn is_dangerous(cmd: &str) -> bool {
-    let dangerous_patterns = [
-        "rm -rf", "mkfs", "dd if=", ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda"
-    ];
+    let dangerous_patterns = ["rm -rf", "mkfs", "dd if=", ":(){:|:&};:", "> /dev/sda"];
     for pat in dangerous_patterns {
-        if cmd.contains(pat) {
-            return true;
-        }
+        if cmd.contains(pat) { return true; }
     }
     false
 }
 
-fn parse_file(path: &str, verbose: bool, seen_libs: &mut HashSet<String>) -> Result<AnalysisResult, Vec<ParseError>> {
+fn parse_file(path: &str, resolve_libs: bool, verbose: bool, seen_libs: &mut HashSet<String>) -> Result<AnalysisResult, Vec<ParseError>> {
     let mut result = AnalysisResult::default();
-    result.is_safe = true;
 
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Ok(result), // Return empty if file not found (handled by caller mostly)
+        Err(_) => return Ok(result),
     };
 
-    // Note: NamedSource is not Clone in miette 5.10+, so we construct it on demand for errors.
     let parser = line_parser();
-
     let mut errors = Vec::new();
     let mut in_comment_block = false;
     let mut current_func: Option<String> = None;
+
     let home = dirs::home_dir().expect("No HOME");
-    let hacker_dir = home.join(HACKER_DIR_SUFFIX);
+    // Libs path: ~/.hackeros/hacker-lang/libs/
+    let libs_dir = home.join(HACKER_DIR_SUFFIX).join("libs");
 
     for (idx, line) in content.lines().enumerate() {
         let line_offset = content.lines().take(idx).map(|l| l.len() + 1).sum::<usize>();
         let trim_line = line.trim();
 
         if trim_line.is_empty() { continue; }
-
         if trim_line == "!!" {
             in_comment_block = !in_comment_block;
             continue;
@@ -238,18 +219,16 @@ fn parse_file(path: &str, verbose: bool, seen_libs: &mut HashSet<String>) -> Res
         };
 
         if is_sudo {
-            result.requires_unsafe_flag = true;
+            result.is_potentially_unsafe = true;
             result.safety_warnings.push(format!("Line {}: Uses superuser privileges (^)", idx + 1));
         }
 
         let op = parser.parse(clean_line).unwrap_or(LineOp::Invalid);
         let span = (line_offset, clean_line.len());
 
-        // Safety check helper
         let mut check_cmd_safety = |cmd: &str| {
             if is_dangerous(cmd) {
-                result.is_safe = false;
-                result.requires_unsafe_flag = true;
+                result.is_potentially_unsafe = true;
                 result.safety_warnings.push(format!("Line {}: Potential destructive command detected: {}", idx + 1, cmd));
             }
         };
@@ -287,7 +266,7 @@ fn parse_file(path: &str, verbose: bool, seen_libs: &mut HashSet<String>) -> Res
                 let node = ProgramNode {
                     line_num: idx + 1,
                     is_sudo,
-                    content: CommandType::Raw(format!("call:{}", name)), // Marker for runtime
+                    content: CommandType::Raw(format!("call:{}", name)),
                     original_text: format!(".{}", name),
                     span
                 };
@@ -301,21 +280,27 @@ fn parse_file(path: &str, verbose: bool, seen_libs: &mut HashSet<String>) -> Res
             LineOp::Lib(name) => {
                 if seen_libs.contains(&name) { continue; }
                 seen_libs.insert(name.clone());
-                result.includes.push(name.clone());
+                result.libs.push(name.clone());
 
-                let lib_path = hacker_dir.join("libs").join(&name).join("main.hacker");
-                if let Ok(lib_res) = parse_file(lib_path.to_str().unwrap(), verbose, seen_libs) {
-                    // Merge results
-                    result.deps.extend(lib_res.deps);
-                    result.libs.extend(lib_res.libs);
-                    // result.functions.extend(lib_res.functions); // Functions are namespaced or merged? Assuming merged for now
-                    for (k, v) in lib_res.functions {
-                        result.functions.insert(k, v);
-                    }
-                    if !lib_res.is_safe {
-                        result.is_safe = false;
-                        result.requires_unsafe_flag = true;
-                        result.safety_warnings.push(format!("Imported library {} contains unsafe code", name));
+                if resolve_libs {
+                    let lib_path = libs_dir.join(&name).join(format!("{}.hl", name));
+
+                    if verbose { println!("{} Resolving library: {:?}", "[*]".blue(), lib_path); }
+
+                    if lib_path.exists() {
+                        if let Ok(lib_res) = parse_file(lib_path.to_str().unwrap(), resolve_libs, verbose, seen_libs) {
+                            result.deps.extend(lib_res.deps);
+                            result.libs.extend(lib_res.libs);
+                            for (k, v) in lib_res.functions {
+                                result.functions.insert(k, v);
+                            }
+                            if lib_res.is_potentially_unsafe {
+                                result.is_potentially_unsafe = true;
+                                result.safety_warnings.push(format!("Imported library {} contains unsafe code", name));
+                            }
+                        }
+                    } else if verbose {
+                        eprintln!("{} Library source not found at {:?}", "[!]".yellow(), lib_path);
                     }
                 }
             },
@@ -378,7 +363,7 @@ fn parse_file(path: &str, verbose: bool, seen_libs: &mut HashSet<String>) -> Res
                     result.main_body.push(node);
                 }
             },
-            _ => {} // Vars etc implemented similarly, omitted for brevity but conceptually the same
+            _ => {}
         }
     }
 
@@ -393,19 +378,10 @@ fn main() {
     let args = Args::parse();
     let mut seen = HashSet::new();
 
-    match parse_file(&args.file, args.verbose, &mut seen) {
+    match parse_file(&args.file, args.resolve_libs, args.verbose, &mut seen) {
         Ok(res) => {
-            if args.check_safety {
-                if !res.is_safe || res.requires_unsafe_flag {
-                    println!("UNSAFE");
-                    for w in res.safety_warnings {
-                        eprintln!("Warning: {}", w);
-                    }
-                    exit(1);
-                } else {
-                    println!("SAFE");
-                    exit(0);
-                }
+            if args.verbose && res.is_potentially_unsafe {
+                eprintln!("{} Scripts contains potentially unsafe commands.", "[!]".yellow());
             }
             if args.json {
                 println!("{}", serde_json::to_string(&res).unwrap());
@@ -414,7 +390,7 @@ fn main() {
         Err(errors) => {
             let _s = fs::read_to_string(&args.file).unwrap_or("".to_string());
             for e in errors {
-                println!("{:?}", e); // Miette pretty print via Debug
+                eprintln!("{:?}", e);
             }
             exit(1);
         }
