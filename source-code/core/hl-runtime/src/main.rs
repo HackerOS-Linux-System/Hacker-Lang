@@ -17,11 +17,8 @@ struct Args {
     file: String,
     #[arg(long)]
     verbose: bool,
-    #[arg(long)]
-    unsafe_mode: bool,
 }
 
-// Mirroring PLSA structures for Deserialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandType {
     Raw(String),
@@ -47,8 +44,7 @@ pub struct AnalysisResult {
     pub libs: Vec<String>,
     pub functions: HashMap<String, Vec<ProgramNode>>,
     pub main_body: Vec<ProgramNode>,
-    pub is_safe: bool,
-    pub requires_unsafe_flag: bool,
+    pub is_potentially_unsafe: bool,
     pub safety_warnings: Vec<String>,
 }
 
@@ -59,8 +55,6 @@ enum OpCode {
     Exec { cmd: String, sudo: bool },
     SetEnv { key: String, val: String },
     SetLocal { key: String, val: String },
-    Jump { target: usize },
-    JumpIfFalse { cond: String, target: usize },
     Call { func_name: String },
     Plugin { name: String, sudo: bool },
     Return,
@@ -203,7 +197,6 @@ impl VM {
                 OpCode::Plugin { name, .. } => {
                     if verbose { println!("Running plugin: {}", name); }
                 },
-                _ => {}
             }
             ip += 1;
         }
@@ -221,57 +214,68 @@ fn main() {
     let args = Args::parse();
 
     // 1. Check Cache
-    fs::create_dir_all(CACHE_DIR).unwrap();
+    if let Err(_) = fs::create_dir_all(CACHE_DIR) {
+        // Ignored, fallback to non-cached if tmp is unwritable
+    }
     let hash = get_file_hash(&args.file);
     let bc_path = PathBuf::from(CACHE_DIR).join(format!("{}.bc", hash));
 
     let program: BytecodeProgram;
 
+    // Rudimentary cache check
     if bc_path.exists() {
         if args.verbose { println!("{} Cache hit. Loading bytecode.", "[*]".green()); }
-        let data = fs::read(bc_path).unwrap();
-        program = bincode::deserialize(&data).expect("Corrupt bytecode");
+        match fs::read(&bc_path) {
+            Ok(data) => {
+                match bincode::deserialize(&data) {
+                    Ok(p) => program = p,
+                    Err(_) => {
+                        // Corrupt cache, regenerate
+                        program = generate_bytecode(&args.file, args.verbose);
+                    }
+                }
+            },
+            Err(_) => program = generate_bytecode(&args.file, args.verbose)
+        }
     } else {
-        if args.verbose { println!("{} Cache miss. Analyzing source.", "[*]".yellow()); }
-
-        // 2. Call HL-PLSA (absolute path)
-        let plsa_path = get_plsa_path();
-        let output = Command::new(&plsa_path)
-        .arg(&args.file)
-        .arg("--json")
-        .output()
-        .expect(&format!("Failed to run hl-plsa at {:?}", plsa_path));
-
-        if !output.status.success() {
-            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-            std::process::exit(1);
+        program = generate_bytecode(&args.file, args.verbose);
+        // Save Cache
+        if let Ok(bc_data) = bincode::serialize(&program) {
+            let _ = fs::write(bc_path, bc_data);
         }
-
-        let ast: AnalysisResult = serde_json::from_slice(&output.stdout).expect("Invalid JSON from PLSA");
-
-        // Safety check
-        if ast.requires_unsafe_flag && !args.unsafe_mode {
-            eprintln!("{} ERROR: Unsafe commands detected.", "[x]".red().bold());
-            for w in ast.safety_warnings {
-                eprintln!("  - {}", w);
-            }
-            eprintln!("Use --unsafe to run this script.");
-            std::process::exit(1);
-        }
-
-        // 3. Compile to Bytecode
-        program = compile_to_bytecode(&ast);
-
-        // 4. Save Cache
-        let bc_data = bincode::serialize(&program).unwrap();
-        fs::write(bc_path, bc_data).unwrap();
     }
 
-    // 5. Run VM
+    // 2. Run VM
     let mut vm = VM::new();
     let start = Instant::now();
     vm.run(program, args.verbose);
     if args.verbose {
         println!("{} Execution time: {:?}", "[INFO]".blue(), start.elapsed());
     }
+}
+
+fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
+    if verbose { println!("{} Cache miss. Analyzing source.", "[*]".yellow()); }
+
+    let plsa_path = get_plsa_path();
+    let output = Command::new(&plsa_path)
+    .arg(file_path)
+    .arg("--json")
+    .arg("--resolve-libs") // Pass flag to recursively parse lib sources
+    .output()
+    .expect(&format!("Failed to run hl-plsa at {:?}", plsa_path));
+
+    if !output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    let ast: AnalysisResult = serde_json::from_slice(&output.stdout).expect("Invalid JSON from PLSA");
+
+    // Note: We removed the check that exited on unsafe code.
+    if verbose && ast.is_potentially_unsafe {
+        println!("{} Warning: Script contains privileged commands.", "[!]".yellow());
+    }
+
+    compile_to_bytecode(&ast)
 }
