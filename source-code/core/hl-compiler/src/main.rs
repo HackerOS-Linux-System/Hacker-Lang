@@ -42,6 +42,7 @@ pub struct ProgramNode {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnalysisResult {
     pub deps: Vec<String>,
+    pub libs: Vec<String>,
     pub main_body: Vec<ProgramNode>,
     pub functions: HashMap<String, Vec<ProgramNode>>,
 }
@@ -59,13 +60,13 @@ fn get_plsa_path() -> PathBuf {
 fn main() {
     let args = Args::parse();
 
-    // 1. Get AST from PLSA
+    // 1. Get AST from PLSA (Compile mode: resolve_libs = false)
     let plsa_path = get_plsa_path();
-    let output = Command::new(&plsa_path)
-    .arg(&args.file)
-    .arg("--json")
-    .output()
-    .expect(&format!("Failed to run hl-plsa at {:?}", plsa_path));
+    let mut cmd = Command::new(&plsa_path);
+    cmd.arg(&args.file).arg("--json");
+    // We do NOT add --resolve-libs here, because we want to link .so, not merge .hl code
+
+    let output = cmd.output().expect(&format!("Failed to run hl-plsa at {:?}", plsa_path));
 
     if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
@@ -93,7 +94,6 @@ fn main() {
         for node in ops {
             match &node.content {
                 CommandType::Raw(cmd) | CommandType::Background(cmd) => {
-                    // Create global string const
                     let final_cmd = if node.is_sudo { format!("sudo {}", cmd) } else { cmd.clone() };
                     let cmd_str = context.const_string(final_cmd.as_bytes(), true);
                     let global_cmd = module.add_global(cmd_str.get_type(), None, "cmd_str");
@@ -117,6 +117,18 @@ fn main() {
                         let ptr = unsafe { builder.build_gep(cmd_str.get_type(), global_cmd.as_pointer_value(), &[zero, zero], "") }.unwrap();
                         builder.build_call(system_fn, &[ptr.into()], "");
                     }
+                },
+                CommandType::If { cond, cmd } => {
+                    // Simple implementation using shell 'if' via system()
+                    let final_cmd = format!("if {}; then {}; fi", cond, cmd);
+                    let exec_cmd = if node.is_sudo { format!("sudo sh -c '{}'", final_cmd) } else { format!("sh -c '{}'", final_cmd) };
+
+                    let cmd_str = context.const_string(exec_cmd.as_bytes(), true);
+                    let global_cmd = module.add_global(cmd_str.get_type(), None, "if_cmd_str");
+                    global_cmd.set_initializer(&cmd_str);
+                    let zero = context.i64_type().const_int(0, false);
+                    let ptr = unsafe { builder.build_gep(cmd_str.get_type(), global_cmd.as_pointer_value(), &[zero, zero], "") }.unwrap();
+                    builder.build_call(system_fn, &[ptr.into()], "");
                 },
                 _ => { }
             }
@@ -147,14 +159,34 @@ fn main() {
 
     tm.write_to_file(&module, FileType::Object, std::path::Path::new(&obj_path)).unwrap();
 
-    // 5. Link
+    // 5. Link with gcc, including dynamic libraries
     if args.verbose { println!("{} Linking...", "[*]".green()); }
-    let status = Command::new("gcc")
-    .arg(&obj_path)
-    .arg("-o")
-    .arg(&output_path)
-    .status()
-    .expect("Failed to run gcc linker");
+
+    let mut linker = Command::new("gcc");
+    linker.arg(&obj_path).arg("-o").arg(&output_path);
+
+    // Link dependencies/libraries
+    let home = dirs::home_dir().unwrap();
+    let libs_base = home.join(".hackeros/hacker-lang/libs");
+
+    for lib in ast.libs {
+        // Assume structure: ~/.hackeros/hacker-lang/libs/<libname>/<libname>.so
+        // GCC needs path (-L) and name (-l)
+        let lib_dir = libs_base.join(&lib);
+
+        if args.verbose { println!("{} Linking library: {}", "[+]".blue(), lib); }
+
+        // Add search path
+        linker.arg(format!("-L{}", lib_dir.to_string_lossy()));
+        // Add rpath so the binary finds the so at runtime
+        linker.arg(format!("-Wl,-rpath,{}", lib_dir.to_string_lossy()));
+        // Link specific file. Assuming file is named `lib<name>.so` or just `<name>.so`
+        // Standard convention is -l<name> looks for lib<name>.so
+        // If the user file is just "mylib.so", we might need -l:mylib.so
+        linker.arg(format!("-l:{}", format!("{}.so", lib)));
+    }
+
+    let status = linker.status().expect("Failed to run gcc linker");
 
     if status.success() {
         if args.verbose { println!("{} Compilation successful: {}", "[+]".green(), output_path); }
