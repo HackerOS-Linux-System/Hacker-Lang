@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 
-VERSION :: "1.6"
+VERSION :: "1.6.3"
 
 // Funkcja wyświetlająca informacje o narzędziach CLI (domyślna)
 display_cli_info :: proc() {
