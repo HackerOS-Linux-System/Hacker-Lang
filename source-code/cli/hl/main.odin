@@ -26,11 +26,13 @@ Color_Lime :: "\e[38;5;10m" // Lime green
 Color_Teal :: "\e[38;5;14m" // Teal
 Color_Indigo :: "\e[38;5;54m" // Indigo
 Color_Gold :: "\e[38;5;220m" // Gold
+
 // Background colors for headers
 Bg_Magenta :: "\e[45m"
 Bg_Cyan :: "\e[46m"
 Bg_Red :: "\e[41m"
 Bg_Green :: "\e[42m"
+
 // Constants
 Version :: "1.6.2"
 Hacker_Dir :: ".hackeros/hacker-lang"
@@ -46,7 +48,6 @@ execute_external :: proc(exec_path: string, args: []string) -> (exit_code: int, 
 		append(&argv_buf, cstring(raw_data(a)))
 	}
 	append(&argv_buf, cstring(nil))
-
 	pid, ferr := linux.fork()
 	if ferr != .NONE {
 		return -1, false
@@ -85,10 +86,13 @@ ensure_hacker_dir :: proc() -> bool {
 }
 
 display_welcome :: proc() {
-	// Fancy header with background and colors
-	fmt.println(Bg_Magenta, Color_White, Color_Bold, "Welcome to Hacker Lang CLI v", Version, Color_Reset)
+	// Fancy header with background and colors, plus simple ASCII art border
+	fmt.println(Bg_Magenta, Color_White, Color_Bold, "┌──────────────────────────────────────────────┐", Color_Reset)
+	fmt.println(Bg_Magenta, Color_White, Color_Bold, "│     Welcome to Hacker Lang CLI v", Version, "     │", Color_Reset)
+	fmt.println(Bg_Magenta, Color_White, Color_Bold, "└──────────────────────────────────────────────┘", Color_Reset)
 	fmt.println(Color_Cyan, Color_Bold, "Simplified tool for running and compiling .hacker scripts", Color_Reset)
 	fmt.println(Color_White, "Type 'hl help' for available commands.", Color_Reset)
+	fmt.println()
 	help_command(false)
 }
 
@@ -107,7 +111,6 @@ run_command :: proc(file: string, verbose: bool) -> bool {
 	}
 	verbose_str := verbose ? " (verbose mode)" : ""
 	fmt.println(Color_Cyan, Color_Bold, "INFO: Executing script: ", file, verbose_str, Color_Reset)
-
 	exit_code, ok := execute_external(full_runtime_path, args[:])
 	if !ok {
 		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Failed to execute process.", Color_Reset)
@@ -137,7 +140,6 @@ compile_command :: proc(file: string, output: string, verbose: bool) -> bool {
 	}
 	verbose_str := verbose ? " (verbose mode)" : ""
 	fmt.println(Color_Cyan, Color_Bold, "INFO: Compiling script: ", file, " to ", output, verbose_str, Color_Reset)
-
 	exit_code, ok := execute_external(full_compiler_path, args[:])
 	if !ok {
 		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Failed to execute process.", Color_Reset)
@@ -153,18 +155,24 @@ compile_command :: proc(file: string, output: string, verbose: bool) -> bool {
 
 help_command :: proc(show_banner: bool) -> bool {
 	if show_banner {
-		fmt.println(Bg_Magenta, Color_White, Color_Bold, "Hacker Lang CLI - Simplified Scripting Tool v", Version, Color_Reset)
+		fmt.println(Bg_Magenta, Color_White, Color_Bold, "┌──────────────────────────────────────────────┐", Color_Reset)
+		fmt.println(Bg_Magenta, Color_White, Color_Bold, "│  Hacker Lang CLI - Simplified Scripting Tool │", Color_Reset)
+		fmt.println(Bg_Magenta, Color_White, Color_Bold, "│                 v", Version, "                  │", Color_Reset)
+		fmt.println(Bg_Magenta, Color_White, Color_Bold, "└──────────────────────────────────────────────┘", Color_Reset)
+		fmt.println()
 	}
 	fmt.println(Color_Blue, Color_Bold, "Available Commands:", Color_Reset)
-	// Table-like display with colors
-	fmt.println(Color_LightGray, "Command", "\t", "Description", "\t\t\t", "Usage", Color_Reset)
-	fmt.println(Color_Cyan, "run", Color_Reset, "\t", Color_White, "Execute a .hacker script", Color_Reset, "\t", Color_Yellow, "hl run <file> [--verbose]", Color_Reset)
-	fmt.println(Color_Cyan, "compile", Color_Reset, "\t", Color_White, "Compile to native executable", Color_Reset, "\t", Color_Yellow, "hl compile <file> [-o output] [--verbose]", Color_Reset)
-	fmt.println(Color_Cyan, "help", Color_Reset, "\t", Color_White, "Show this help menu", Color_Reset, "\t\t", Color_Yellow, "hl help", Color_Reset)
+	fmt.println(Color_Gray, "─────────────────────────────────────────────────────────────", Color_Reset)
+	// Aligned table display with colors and fixed widths
+	fmt.printf("%s%-10s %-30s %-40s%s\n", Color_LightGray, "Command", "Description", "Usage", Color_Reset)
+	fmt.printf("%s%-10s%s %s%-30s%s %s%-40s%s\n", Color_Cyan, "run", Color_Reset, Color_White, "Execute a .hacker script", Color_Reset, Color_Yellow, "hl run <file> [--verbose]", Color_Reset)
+	fmt.printf("%s%-10s%s %s%-30s%s %s%-40s%s\n", Color_Cyan, "compile", Color_Reset, Color_White, "Compile to native executable", Color_Reset, Color_Yellow, "hl compile <file> [-o output] [--verbose]", Color_Reset)
+	fmt.printf("%s%-10s%s %s%-30s%s %s%-40s%s\n", Color_Cyan, "help", Color_Reset, Color_White, "Show this help menu", Color_Reset, Color_Yellow, "hl help", Color_Reset)
+	fmt.println(Color_Gray, "─────────────────────────────────────────────────────────────", Color_Reset)
 	fmt.println()
 	fmt.println(Color_Gray, Color_Bold, "Global options:", Color_Reset)
-	fmt.println(Color_Magenta, "-v, --version Display version", Color_Reset)
-	fmt.println(Color_Magenta, "-h, --help Display help", Color_Reset)
+	fmt.println(Color_Magenta, "-v, --version    Display version", Color_Reset)
+	fmt.println(Color_Magenta, "-h, --help       Display help", Color_Reset)
 	return true
 }
 
@@ -189,12 +197,12 @@ _main :: proc() -> int {
 	defer delete(filtered_args)
 	for arg in args {
 		switch arg {
-			case "-v", "--version":
-				global_version = true
-			case "-h", "--help":
-				global_help = true
-			case:
-				append(&filtered_args, arg)
+		case "-v", "--version":
+			global_version = true
+		case "-h", "--help":
+			global_help = true
+		case:
+			append(&filtered_args, arg)
 		}
 	}
 	if global_version {
@@ -213,81 +221,81 @@ _main :: proc() -> int {
 	sub_args := filtered_args[1:]
 	success := true
 	switch command {
-		case "run":
-			file := ""
-			verbose := false
-			i := 0
-			for i < len(sub_args) {
-				arg := sub_args[i]
-				if arg == "--verbose" {
-					verbose = true
-				} else if file == "" {
+	case "run":
+		file := ""
+		verbose := false
+		i := 0
+		for i < len(sub_args) {
+			arg := sub_args[i]
+			if arg == "--verbose" {
+				verbose = true
+			} else if file == "" {
+				file = arg
+			} else {
+				fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unexpected argument: ", arg, Color_Reset)
+				success = false
+				break
+			}
+			i += 1
+		}
+		if file == "" {
+			fmt.eprintln(Color_Red, Color_Bold, "ERROR: Expected exactly one argument: <file>", Color_Reset)
+			fmt.println(Color_Bold, "Usage:", Color_Reset, " hl run <file> [options]\n\nExecute a .hacker script.")
+			fmt.println(" --verbose    Enable verbose output")
+			success = false
+		}
+		if success {
+			success = run_command(file, verbose)
+		}
+	case "compile":
+		file := ""
+		output := ""
+		verbose := false
+		i := 0
+		for i < len(sub_args) {
+			arg := sub_args[i]
+			switch arg {
+			case "-o", "--output":
+				i += 1
+				if i >= len(sub_args) {
+					fmt.eprintln(Color_Red, Color_Bold, "ERROR: Missing value for -o/--output", Color_Reset)
+					success = false
+					break
+				}
+				output = sub_args[i]
+			case "--verbose":
+				verbose = true
+			case:
+				if file == "" {
 					file = arg
 				} else {
 					fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unexpected argument: ", arg, Color_Reset)
 					success = false
 					break
 				}
-				i += 1
 			}
-			if file == "" {
-				fmt.eprintln(Color_Red, Color_Bold, "ERROR: Expected exactly one argument: <file>", Color_Reset)
-				fmt.println(Color_Bold, "Usage:", Color_Reset, " hl run <file> [options]\n\nExecute a .hacker script.")
-				fmt.println(" --verbose Enable verbose output")
-				success = false
-			}
-			if success {
-				success = run_command(file, verbose)
-			}
-		case "compile":
-			file := ""
-			output := ""
-			verbose := false
-			i := 0
-			for i < len(sub_args) {
-				arg := sub_args[i]
-				switch arg {
-					case "-o", "--output":
-						i += 1
-						if i >= len(sub_args) {
-							fmt.eprintln(Color_Red, Color_Bold, "ERROR: Missing value for -o/--output", Color_Reset)
-							success = false
-							break
-						}
-						output = sub_args[i]
-					case "--verbose":
-						verbose = true
-					case:
-						if file == "" {
-							file = arg
-						} else {
-							fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unexpected argument: ", arg, Color_Reset)
-							success = false
-							break
-						}
-				}
-				i += 1
-			}
-			if file == "" {
-				fmt.eprintln(Color_Red, Color_Bold, "ERROR: Expected exactly one argument: <file>", Color_Reset)
-				fmt.println(Color_Bold, "Usage:", Color_Reset, " hl compile <file> [options]\n\nCompile to native executable.")
-				fmt.println(" -o, --output string Specify output file")
-				fmt.println(" --verbose Enable verbose output")
-				success = false
-			}
-			if output == "" {
-				ext := filepath.ext(file)
-				output = strings.trim_suffix(file, ext)
-			}
-			if success {
-				success = compile_command(file, output, verbose)
-			}
-					case "help":
-						success = help_command(true)
-					case:
-						fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unknown command: ", command, Color_Reset)
-						help_command(false)
-						success = false
+			i += 1
+		}
+		if file == "" {
+			fmt.eprintln(Color_Red, Color_Bold, "ERROR: Expected exactly one argument: <file>", Color_Reset)
+			fmt.println(Color_Bold, "Usage:", Color_Reset, " hl compile <file> [options]\n\nCompile to native executable.")
+			fmt.println(" -o, --output string    Specify output file")
+			fmt.println(" --verbose              Enable verbose output")
+			success = false
+		}
+		if output == "" {
+			ext := filepath.ext(file)
+			output = strings.trim_suffix(file, ext)
+		}
+		if success {
+			success = compile_command(file, output, verbose)
+		}
+	case "help":
+		success = help_command(true)
+	case:
+		fmt.eprintln(Color_Red, Color_Bold, "ERROR: Unknown command: ", command, Color_Reset)
+		help_command(false)
+		success = false
 	}
 	return success ? 0 : 1
 }
