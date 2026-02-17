@@ -13,4 +13,4 @@
 --> description => Twórz ładne interfejsy cli
 --> authors => ["HackerOS Team <hackeros068@gmail.com>"]
 --> so-download => https://github.com/Bytes-Repository/yuy-lib/releases/download/v0.2/libyuy_lib.so
---> .hl-download => https://github.com/Bytes-Repository/yuy-lib/blob/main/yuy.hl
+--> .hl-download => https://raw.githubusercontent.com/Bytes-Repository/yuy-lib/main/yuy.hl
