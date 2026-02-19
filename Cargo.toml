@@ -1,1 +1,15 @@
+[workspace]
+members = [
+    "source-code/core/hl-runtime",
+    "source-code/core/hl-plsa",
+    "source-code/core/hl-compiler",
+    "source-code/cli/virus",
+    "source-code/cli/hl",
+]
+resolver = "2"
 
+[profile.release]
+lto = false
+opt-level = "z"
+codegen-units = 1
+strip = true
