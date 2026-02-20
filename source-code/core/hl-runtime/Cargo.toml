@@ -1,6 +1,6 @@
 [package]
 name = "hl-runtime"
-version = "1.6.3"
+version = "1.7.0"
 edition = "2021"
 
 [dependencies]
@@ -13,3 +13,5 @@ hex = "0.4"
 dirs = "5.0"
 bincode = "1.3"
 anyhow = "1.0"
+gc = "0.5"
+dynasmrt = "2.0"
