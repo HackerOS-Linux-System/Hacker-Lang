@@ -1,0 +1,10 @@
+[package]
+name = "hl"
+version = "1.7.0"
+edition = "2021"
+
+[dependencies]
+hl-compiler = { path = "../hl-compiler" }
+hl-runtime = { path = "../hl-runtime" }
+lexopt = "0.3"
+owo-colors = "4.0"
