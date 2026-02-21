@@ -58,6 +58,8 @@ pub enum Stmt {
     Break,
     Continue,
     Import { prefix: String, name: String, version: Option<String> },
+    Expr(Expr),
+    Block(Vec<Stmt>),
 }
 
 impl Default for Stmt {
@@ -114,9 +116,12 @@ pub enum ParseError {
 
 // --- Parser ---
 
-fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
+fn parser() -> impl Parser<char, Vec<ProgramNode>, Error = Simple<char>> {
+    let comment = just('!').then(take_until(just('\n').ignored().or(end()))).ignored();
+    let whitespace = choice((comment, text::whitespace().at_least(1).ignored())).repeated().ignored();
+
     recursive(|stmt| {
-        let ident = text::ident().padded();
+        let ident = text::ident().padded_by(whitespace.clone());
         let ty = ident.clone().labelled("type");
 
         let literal = choice((
@@ -136,139 +141,186 @@ fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
         ))
         .map(Expr::Lit);
 
-        let expr: Recursive<char, Expr, Simple<char>> = recursive(|expr| {
+        let expr = recursive(|expr| {
             let atom = choice((
                 literal,
-                ident.map(Expr::Var),
-                               expr.clone().delimited_by(just('('), just(')')),
-            ));
+                ident
+                .clone()
+                .then(
+                    expr.clone()
+                    .separated_by(just(',').padded_by(whitespace.clone()))
+                    .delimited_by(
+                        just('(').padded_by(whitespace.clone()),
+                                  just(')').padded_by(whitespace.clone()),
+                    ),
+                )
+                .map(|(name, args)| Expr::Call { name, args }),
+                               ident.clone().map(Expr::Var),
+                               expr.clone().delimited_by(
+                                   just('(').padded_by(whitespace.clone()),
+                                                         just(')').padded_by(whitespace.clone()),
+                               ),
+            ))
+            .padded_by(whitespace.clone());
 
-            let pipe = atom
-            .clone()
-            .then(just("|>").padded().ignore_then(expr.clone()).repeated())
-            .foldl(|left, right| Expr::Pipe {
+            let pipe = atom.clone().then(just("|>").padded_by(whitespace.clone()).ignore_then(expr.clone()).repeated()).foldl(|left, right| Expr::Pipe {
                 left: Box::new(left),
-                   right: Box::new(right),
+                                                                                                                              right: Box::new(right),
             });
 
-            let binop = pipe
-            .clone()
-            .then(
-                choice((just("+"), just("-"), just("*"), just("/")))
-                .padded()
-                .then(pipe)
-                .repeated(),
-            )
-            .foldl(|left, (op, right)| Expr::BinOp {
+            let product = pipe.clone().then(choice((just('*'), just('/'))).padded_by(whitespace.clone()).then(pipe).repeated()).foldl(|left, (op, right): (char, Expr)| Expr::BinOp {
                 op: op.to_string(),
-                   left: Box::new(left),
-                   right: Box::new(right),
+                                                                                                                                      left: Box::new(left),
+                                                                                                                                      right: Box::new(right),
             });
 
-            let call = ident
-            .then(
-                expr.clone()
-                .separated_by(just(','))
-                .delimited_by(just('('), just(')')),
-            )
-            .map(|(name, args)| Expr::Call { name, args });
+            let sum = product.clone().then(choice((just('+'), just('-'))).padded_by(whitespace.clone()).then(product).repeated()).foldl(|left, (op, right): (char, Expr)| Expr::BinOp {
+                op: op.to_string(),
+                                                                                                                                        left: Box::new(left),
+                                                                                                                                        right: Box::new(right),
+            });
 
-            choice((call, binop))
+            let comparison = sum.clone().then(
+                choice((
+                    just("=="), just("!="), just("<="), just(">="), just("<"), just(">")
+                )).padded_by(whitespace.clone()).then(sum).repeated()
+            ).foldl(|left, (op, right)| Expr::BinOp {
+                op: op.to_string(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+            });
+
+            let logical_and = comparison.clone().then(just("&&").padded_by(whitespace.clone()).then(comparison).repeated()).foldl(|left, (op, right)| Expr::BinOp {
+                op: op.to_string(),
+                                                                                                                                  left: Box::new(left),
+                                                                                                                                  right: Box::new(right),
+            });
+
+            let logical_or = logical_and.clone().then(just("||").padded_by(whitespace.clone()).then(logical_and).repeated()).foldl(|left, (op, right)| Expr::BinOp {
+                op: op.to_string(),
+                                                                                                                                   left: Box::new(left),
+                                                                                                                                   right: Box::new(right),
+            });
+
+            logical_or
         });
 
         let assign_global = just('@')
         .ignore_then(ident.clone())
-        .then(just(':').ignore_then(ty.clone()).or_not())
-        .then_ignore(just('='))
+        .then(just(':').padded_by(whitespace.clone()).ignore_then(ty.clone()).or_not())
+        .then_ignore(just('=').padded_by(whitespace.clone()))
         .then(expr.clone())
         .map(|((key, ty), val)| Stmt::AssignGlobal { key, ty, val });
 
         let assign_local = just('$')
         .ignore_then(ident.clone())
-        .then(just(':').ignore_then(ty.clone()).or_not())
-        .then_ignore(just('='))
+        .then(just(':').padded_by(whitespace.clone()).ignore_then(ty.clone()).or_not())
+        .then_ignore(just('=').padded_by(whitespace.clone()))
         .then(expr.clone())
         .map(|((key, ty), val)| Stmt::AssignLocal { key, ty, val });
 
-        let param = ident.clone().then_ignore(just(':')).then(ty.clone());
+        let param = ident.clone().then_ignore(just(':').padded_by(whitespace.clone())).then(ty.clone());
         let params = param
-        .separated_by(just(','))
+        .separated_by(just(',').padded_by(whitespace.clone()))
         .allow_trailing()
-        .delimited_by(just('('), just(')'));
+        .delimited_by(
+            just('(').padded_by(whitespace.clone()),
+                      just(')').padded_by(whitespace.clone()),
+        );
 
         let func_def = just(':')
         .ignore_then(ident.clone())
         .then(params.clone())
-        .then(just("->").ignore_then(ty.clone()).or_not())
+        .then(just("->").padded_by(whitespace.clone()).ignore_then(ty.clone()).or_not())
         .then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
-        .map(|(((name, params), ret_ty), body)| Stmt::Function {
+        .map(|(((name, params), ret_ty), body): (((String, Vec<(String, String)>), Option<String>), Vec<ProgramNode>)| Stmt::Function {
             name,
             params,
             ret_ty,
-            body,
+            body: body.into_iter().map(|n| n.content).collect(),
         });
 
         let ret = just("<-")
+        .padded_by(whitespace.clone())
         .ignore_then(expr.clone())
         .map(|expr| Stmt::Return { expr });
 
         let field = just("mut")
+        .padded_by(whitespace.clone())
         .or_not()
-        .map(|m| m.is_some())
+        .map(|m: Option<&str>| m.is_some())
         .then(ident.clone())
-        .then_ignore(just(':'))
+        .then_ignore(just(':').padded_by(whitespace.clone()))
         .then(ty.clone())
-        .then(just('=').ignore_then(expr.clone()).or_not())
+        .then(just('=').padded_by(whitespace.clone()).ignore_then(expr.clone()).or_not())
         .map(|(((mut_, name), ty), init)| (mut_, name, ty, init));
 
         let method = just(':')
         .ignore_then(ident.clone())
         .then(params.clone())
-        .then(just("->").ignore_then(ty.clone()).or_not())
+        .then(just("->").padded_by(whitespace.clone()).ignore_then(ty.clone()).or_not())
         .then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
-        .map(|(((name, params), ret_ty), body)| (name, (params, ret_ty, body)));
+        .map(|(((name, params), ret_ty), body): (((String, Vec<(String, String)>), Option<String>), Vec<ProgramNode>)| (name, (params, ret_ty, body.into_iter().map(|n| n.content).collect())));
 
         let obj_def = just("obj")
         .ignore_then(ident.clone())
         .then(
             field
-            .separated_by(just(','))
+            .separated_by(just(',').padded_by(whitespace.clone()))
             .then(method.repeated())
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
-        .map(|(name, (fields, methods))| Stmt::Object {
+        .map(|(name, (fields, methods)): (String, (Vec<(bool, String, String, Option<Expr>)>, Vec<(String, (Vec<(String, String)>, Option<String>, Vec<Stmt>))>))| Stmt::Object {
             name,
             fields,
             methods: methods.into_iter().collect(),
         });
 
         let catch = just("catch")
+        .padded_by(whitespace.clone())
         .ignore_then(
             just('(')
+            .padded_by(whitespace.clone())
             .ignore_then(ident.clone())
-            .then_ignore(just(':'))
+            .then_ignore(just(':').padded_by(whitespace.clone()))
             .then(ident.clone())
-            .then_ignore(just(')')),
+            .then_ignore(just(')').padded_by(whitespace.clone())),
         )
         .then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         );
 
         let finally = just("finally")
+        .padded_by(whitespace.clone())
         .ignore_then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
         .or_not();
 
@@ -276,61 +328,83 @@ fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
         .ignore_then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
         .then(catch.repeated())
         .then(finally)
-        .map(|((body, catches), finally)| Stmt::Try {
-            body,
-            catches: catches
-            .into_iter()
-            .map(|((var, ty), body)| (var, ty, body))
-            .collect(),
-             finally,
+        .map(|((body, catches), finally): ((Vec<ProgramNode>, Vec<((String, String), Vec<ProgramNode>)>), Option<Vec<ProgramNode>>)| Stmt::Try {
+            body: body.into_iter().map(|n| n.content).collect(),
+             catches: catches
+             .into_iter()
+             .map(|((var, ty), body)| (var, ty, body.into_iter().map(|n| n.content).collect()))
+             .collect(),
+             finally: finally.map(|f| f.into_iter().map(|n| n.content).collect()),
         });
 
         let arm = expr
         .clone()
-        .then_ignore(just('>'))
         .then(stmt.clone().repeated())
-        .padded();
+        .padded_by(whitespace.clone());
 
         let match_stmt = just("match")
         .ignore_then(expr.clone())
-        .then(arm.repeated().delimited_by(just('['), just(']')))
-        .map(|(expr, arms)| Stmt::Match { expr, arms });
+        .then(
+            arm.repeated()
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
+        )
+        .map(|(expr, arms): (Expr, Vec<(Expr, Vec<ProgramNode>)>)| Stmt::Match {
+            expr,
+            arms: arms.into_iter().map(|(e, b)| (e, b.into_iter().map(|n| n.content).collect())).collect(),
+        });
 
         let for_stmt = just("loop")
         .ignore_then(ident.clone())
-        .then_ignore(just("in"))
+        .then_ignore(just("in").padded_by(whitespace.clone()))
         .then(expr.clone())
         .then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
-        .map(|((var, iter), body)| Stmt::For { var, iter, body });
+        .map(|((var, iter), body): ((String, Expr), Vec<ProgramNode>)| Stmt::For {
+            var,
+            iter,
+            body: body.into_iter().map(|n| n.content).collect(),
+        });
 
         let for_indexed = just("loop")
         .ignore_then(ident.clone())
-        .then_ignore(just(','))
+        .then_ignore(just(',').padded_by(whitespace.clone()))
         .then(ident.clone())
-        .then_ignore(just("in"))
+        .then_ignore(just("in").padded_by(whitespace.clone()))
         .then(
             just("enumerate(")
+            .padded_by(whitespace.clone())
             .ignore_then(expr.clone())
-            .then_ignore(just(')')),
+            .then_ignore(just(')').padded_by(whitespace.clone())),
         )
         .then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
-        .map(|(((idx, var), iter), body)| Stmt::ForIndexed {
+        .map(|(((idx, var), iter), body): (((String, String), Expr), Vec<ProgramNode>)| Stmt::ForIndexed {
             idx,
-            var,
-            iter,
-            body,
+             var,
+             iter,
+             body: body.into_iter().map(|n| n.content).collect(),
         });
 
         let while_stmt = just("loop")
@@ -338,12 +412,50 @@ fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
         .then(
             stmt.clone()
             .repeated()
-            .delimited_by(just('['), just(']')),
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
         )
-        .map(|(cond, body)| Stmt::While { cond, body });
+        .map(|(cond, body): (Expr, Vec<ProgramNode>)| Stmt::While {
+            cond,
+            body: body.into_iter().map(|n| n.content).collect(),
+        });
 
-        let break_stmt = just("break").to(Stmt::Break);
-        let continue_stmt = just("continue").to(Stmt::Continue);
+        let if_stmt = just("if")
+        .padded_by(whitespace.clone())
+        .ignore_then(expr.clone())
+        .then(
+            stmt.clone()
+            .repeated()
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
+        )
+        .map(|(cond, body): (Expr, Vec<ProgramNode>)| Stmt::If {
+            cond,
+            body: body.into_iter().map(|n| n.content).collect(),
+        });
+
+        let loop_times = just("loop")
+        .padded_by(whitespace.clone())
+        .ignore_then(text::int(10).padded_by(whitespace.clone()))
+        .then(
+            stmt.clone()
+            .repeated()
+            .delimited_by(
+                just('[').padded_by(whitespace.clone()),
+                          just(']').padded_by(whitespace.clone()),
+            ),
+        )
+        .map(|(count, body): (String, Vec<ProgramNode>)| Stmt::LoopTimes {
+            count: count.parse().unwrap(),
+             body: body.into_iter().map(|n| n.content).collect(),
+        });
+
+        let break_stmt = just("break").padded_by(whitespace.clone()).to(Stmt::Break);
+        let continue_stmt = just("continue").padded_by(whitespace.clone()).to(Stmt::Continue);
 
         let import_stmt = just('#')
         .ignore_then(just('<'))
@@ -355,43 +467,77 @@ fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
         .map(|((prefix, name), version)| Stmt::Import { prefix, name, version });
 
         let plugin = just('\\')
-        .ignore_then(ident)
+        .ignore_then(ident.clone())
         .map(|name| Stmt::Plugin { name, is_super: false });
 
         let raw = just('>')
-        .ignore_then(take_until(just('\n').ignored().or(end()).or(just('!').ignored())))
+        .ignore_then(take_until(just('\n').ignored().or(end())))
         .map(|(chars, _): (Vec<char>, ())| Stmt::Raw(chars.into_iter().collect::<String>().trim().to_string()));
 
-        let decorated = choice((just('^').to(true), just('&').to(false)))
+        let block = stmt.clone()
+        .repeated()
+        .delimited_by(
+            just('[').padded_by(whitespace.clone()),
+                      just(']').padded_by(whitespace.clone()),
+        )
+        .map(|body| Stmt::Block(body.into_iter().map(|n| n.content).collect()));
+
+        let expr_stmt = expr.clone().map(Stmt::Expr);
+
+        let decorated = just('^')
+        .padded_by(whitespace.clone())
+        .to(true)
         .or_not()
+        .map(|s: Option<bool>| s.unwrap_or(false))
+        .then(
+            just('&')
+            .padded_by(whitespace.clone())
+            .to(true)
+            .or_not()
+            .map(|b: Option<bool>| b.unwrap_or(false)),
+        )
         .then(choice((
             assign_global,
             assign_local,
             func_def,
+            if_stmt,
             ret,
             obj_def,
             try_stmt,
             match_stmt,
             for_indexed,
                 for_stmt,
+                    loop_times,
                     while_stmt,
                         break_stmt,
                       continue_stmt,
                       import_stmt,
                       plugin,
                       raw,
+                      block,
+                      expr_stmt,
         )))
-        .map(|(dec, stmt)| {
-            if let Some(false) = dec {
-                Stmt::Background(vec![stmt])
+        .map_with_span(|((is_sudo, is_bg), stmt): ((bool, bool), Stmt), span: std::ops::Range<usize>| {
+            let final_stmt = if is_bg {
+                match stmt {
+                    Stmt::Block(body) => Stmt::Background(body),
+                       _ => Stmt::Background(vec![stmt]),
+                }
             } else {
                 stmt
+            };
+            ProgramNode {
+                is_sudo,
+                content: final_stmt,
+                span: (span.start, span.end),
+                       ..Default::default()
             }
         });
 
-        decorated.padded().recover_with(skip_until(['\n'], |_| Stmt::default()))
+        decorated.padded_by(whitespace.clone()).recover_with(skip_then_retry_until(['\n']))
     })
     .repeated()
+    .then_ignore(whitespace)
     .then_ignore(end())
 }
 
@@ -420,31 +566,18 @@ pub fn parse_file(
         Err(_) => return Ok(result),
     };
 
-    let lines: Vec<_> = content
-    .lines()
-    .filter(|l| !l.trim().starts_with('!') && !l.trim().is_empty())
-    .collect();
-    let clean_content = lines.join("\n");
-
-    match parser().parse(clean_content) {
-        Ok(stmts) => {
-            for (idx, stmt) in stmts.iter().enumerate() {
-                if is_dangerous(stmt) {
+    match parser().parse(content.clone()) {
+        Ok(mut stmts) => {
+            for (idx, node) in stmts.iter_mut().enumerate() {
+                node.line_num = idx + 1;
+                if is_dangerous(&node.content) {
                     result.is_potentially_unsafe = true;
                     result
                     .safety_warnings
                     .push(format!("Line {}: Potential destructive command", idx + 1));
                 }
 
-                let node = ProgramNode {
-                    line_num: idx + 1,
-                    is_sudo: false,
-                    content: stmt.clone(),
-                    original_text: String::new(),
-                    span: (0, 0),
-                };
-
-                match stmt {
+                match &node.content {
                     Stmt::Function { name, params, ret_ty, body } => {
                         let body_nodes = body
                         .iter()
@@ -537,7 +670,7 @@ pub fn parse_file(
                         }
                     }
                     _ => {
-                        result.main_body.push(node);
+                        result.main_body.push(node.clone());
                     }
                 }
             }
