@@ -1,195 +1,74 @@
-use clap::Parser;
-use colored::*;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+#![allow(dead_code, unused_variables, unused_assignments)]
+use std::alloc::{alloc, dealloc, Layout};
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::mem;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
-use std::hash::{Hash, Hasher};
-use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, AssemblyOffset};
 use std::ptr;
-use std::mem;
-use std::alloc::{alloc, dealloc, Layout};
-use hex;
+use std::time::Instant;
+use colored::Colorize;
+use dynasmrt::{dynasm, DynasmApi, AssemblyOffset};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use hl_plsa::{AnalysisResult, ProgramNode, Stmt};
 
-const CACHE_DIR: &str = "/tmp/Hacker-Lang/cache";
+const CACHE_DIR: &str = "/tmp/hl_cache";
 const PLSA_BIN_NAME: &str = "hl-plsa";
-
-#[derive(Parser, Debug)]
-#[command(author, version)]
-struct Args {
-    file: String,
-    #[arg(long)]
-    verbose: bool,
-    #[arg(long)]
-    jit: bool, // New flag to enable JIT (desktop only)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CommandType {
-    Raw(String),
-    AssignEnv { key: String, val: String },
-    AssignLocal { key: String, val: String },
-    Loop { count: u64, cmd: String },
-    If { cond: String, cmd: String },
-    Background(String),
-    Plugin { name: String, is_super: bool },
-    // Expanded for new features (parsed as strings, evaluated in VM)
-    AssignTyped { key: String, ty: String, val: String },
-    Function { name: String, params: Vec<(String, String)>, ret_ty: Option<String>, body: Vec<ProgramNode> },
-    Return { expr: String },
-    Object { name: String, fields: Vec<(bool, String, String, Option<String>)>, methods: HashMap<String, Vec<ProgramNode>> },
-    Try { body: Vec<ProgramNode>, catches: Vec<(String, String, Vec<ProgramNode>)>, finally: Option<Vec<ProgramNode>> },
-    Match { expr: String, arms: Vec<(String, String)> },
-    For { var: String, iter: String, body: Vec<ProgramNode> },
-    While { cond: String, body: Vec<ProgramNode> },
-    Break,
-    Continue,
-    Pipe { left: String, right: String },
-    Import { prefix: String, name: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramNode {
-    pub line_num: usize,
-    pub is_sudo: bool,
-    pub content: CommandType,
-    pub original_text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnalysisResult {
-    pub deps: Vec<String>,
-    pub libs: Vec<String>,
-    pub functions: HashMap<String, Vec<ProgramNode>>,
-    pub main_body: Vec<ProgramNode>,
-    pub is_potentially_unsafe: bool,
-    pub safety_warnings: Vec<String>,
-    // New: objects and modules
-    pub objects: HashMap<String, Vec<ProgramNode>>,
-    pub modules: HashMap<String, Vec<ProgramNode>>,
-}
-
-// --- NaN-Boxed Value ---
+// ═══════════════════════════════════════════════════════════
+// NaN-boxed Value
+// ═══════════════════════════════════════════════════════════
 #[repr(transparent)]
 #[derive(Copy, Clone)]
 struct Value(u64);
-
 const NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
-const TAG_INT: u64 = NAN_BITS | (1 << 48);
-const TAG_PTR: u64 = NAN_BITS | (2 << 48);
-const TAG_BOOL: u64 = NAN_BITS | (3 << 48);
-const TAG_NIL: u64 = NAN_BITS | (4 << 48);
-const TAG_STR: u64 = NAN_BITS | (5 << 48);
-const TAG_LIST: u64 = NAN_BITS | (6 << 48);
-const TAG_MAP: u64 = NAN_BITS | (7 << 48);
-const TAG_OBJ: u64 = NAN_BITS | (8 << 48);
+const TAG_INT: u64 = NAN_BITS | (1u64 << 48);
+const TAG_PTR: u64 = NAN_BITS | (2u64 << 48);
+const TAG_BOOL: u64 = NAN_BITS | (3u64 << 48);
+const TAG_NIL: u64 = NAN_BITS | (4u64 << 48);
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
 impl Value {
-    fn from_f64(f: f64) -> Self {
-        let bits = f.to_bits();
-        if (bits & NAN_BITS) == NAN_BITS {
-            Value(bits | NAN_BITS)
-        } else {
-            Value(bits)
-        }
-    }
-
-    fn from_i32(i: i32) -> Self {
-        Value(TAG_INT | ((i as u64) & PAYLOAD_MASK))
-    }
-
-    fn from_bool(b: bool) -> Self {
-        Value(TAG_BOOL | (if b { 1 } else { 0 }))
-    }
-
-    fn from_nil() -> Self {
-        Value(TAG_NIL)
-    }
-
-    fn from_gc_ptr(p: *mut GcHeader) -> Self {
-        Value(TAG_PTR | ((p as u64) & PAYLOAD_MASK))
-    }
-
-    fn is_f64(&self) -> bool {
-        (self.0 & NAN_BITS) != NAN_BITS
-    }
-
-    fn is_int(&self) -> bool {
-        (self.0 & !PAYLOAD_MASK) == TAG_INT
-    }
-
-    fn is_bool(&self) -> bool {
-        (self.0 & !PAYLOAD_MASK) == TAG_BOOL
-    }
-
-    fn is_nil(&self) -> bool {
-        (self.0 & !PAYLOAD_MASK) == TAG_NIL
-    }
-
-    fn is_gc_ptr(&self) -> bool {
-        (self.0 & !PAYLOAD_MASK) == TAG_PTR
-    }
-
-    fn as_f64(&self) -> f64 {
-        f64::from_bits(self.0)
-    }
-
-    fn as_i32(&self) -> i32 {
-        ((self.0 & PAYLOAD_MASK) as i64) as i32 // Sign extend if needed
-    }
-
-    fn as_bool(&self) -> bool {
-        (self.0 & 1) == 1
-    }
-
-    fn as_gc_ptr(&self) -> *mut GcHeader {
-        (self.0 & PAYLOAD_MASK) as *mut GcHeader
-    }
-
-    fn points_to_young(&self) -> bool {
-        if self.is_gc_ptr() {
-            unsafe { (*self.as_gc_ptr()).gen == 0 }
-        } else {
-            false
-        }
+    fn from_f64(f: f64) -> Self { Value(f.to_bits()) }
+    fn from_i32(i: i32) -> Self { Value(TAG_INT | ((i as u64) & PAYLOAD_MASK)) }
+    fn from_bool(b: bool) -> Self { Value(TAG_BOOL | (b as u64)) }
+    fn nil() -> Self { Value(TAG_NIL) }
+    fn from_gc(p: *mut GcHdr) -> Self { Value(TAG_PTR | ((p as u64) & PAYLOAD_MASK)) }
+    fn is_f64(self) -> bool { (self.0 & NAN_BITS) != NAN_BITS }
+    fn is_int(self) -> bool { (self.0 & !PAYLOAD_MASK) == TAG_INT }
+    fn is_bool(self) -> bool { (self.0 & !PAYLOAD_MASK) == TAG_BOOL }
+    fn is_nil(self) -> bool { (self.0 & !PAYLOAD_MASK) == TAG_NIL }
+    fn is_gc(self) -> bool { (self.0 & !PAYLOAD_MASK) == TAG_PTR }
+    fn as_f64(self) -> f64 { f64::from_bits(self.0) }
+    fn as_i32(self) -> i32 { ((self.0 & PAYLOAD_MASK) as i64) as i32 }
+    fn as_bool(self) -> bool { (self.0 & 1) != 0 }
+    fn as_gc(self) -> *mut GcHdr { (self.0 & PAYLOAD_MASK) as *mut GcHdr }
+    fn points_young(self) -> bool {
+        self.is_gc() && unsafe { (*self.as_gc()).gen == 0 }
     }
 }
-
 impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        if self.is_int() && other.is_int() {
-            self.as_i32() == other.as_i32()
-        } else if self.is_f64() && other.is_f64() {
-            self.as_f64() == other.as_f64()
-        } else if self.is_bool() && other.is_bool() {
-            self.as_bool() == other.as_bool()
-        } else if self.is_nil() && other.is_nil() {
-            true
-        } else if self.is_gc_ptr() && other.is_gc_ptr() {
-            let a = self.as_gc_ptr();
-            let b = other.as_gc_ptr();
+    fn eq(&self, o: &Self) -> bool {
+        if self.is_int() && o.is_int() { return self.as_i32() == o.as_i32(); }
+        if self.is_f64() && o.is_f64() { return self.as_f64() == o.as_f64(); }
+        if self.is_bool() && o.is_bool() { return self.as_bool() == o.as_bool(); }
+        if self.is_nil() && o.is_nil() { return true; }
+        if self.is_gc() && o.is_gc() {
+            let a = self.as_gc();
+            let b = o.as_gc();
             unsafe {
-                if (*a).kind != (*b).kind {
-                    return false;
-                }
+                if (*a).kind != (*b).kind { return false; }
                 match (*a).kind {
-                    0 => { // String
-                        let sa = (a as *mut u8).add(mem::size_of::<GcHeader>()) as *mut GcString;
-                        let sb = (b as *mut u8).add(mem::size_of::<GcHeader>()) as *mut GcString;
-                        let stra = std::slice::from_raw_parts((*sa).data, (*sa).len);
-                        let strb = std::slice::from_raw_parts((*sb).data, (*sb).len);
-                        stra == strb
+                    0 => { // string
+                        let sa = &*(a as *mut GcStr);
+                        let sb = &*(b as *mut GcStr);
+                        if sa.len != sb.len { return false; }
+                        std::slice::from_raw_parts(sa.data, sa.len)
+                        == std::slice::from_raw_parts(sb.data, sb.len)
                     }
-                    1 => { // List
-                        let la = (a as *mut u8).add(mem::size_of::<GcHeader>()) as *mut GcList;
-                        let lb = (b as *mut u8).add(mem::size_of::<GcHeader>()) as *mut GcList;
-                        (*la).items == (*lb).items
+                    1 => { // list
+                        (*(a as *mut GcList)).items == (*(b as *mut GcList)).items
                     }
-                    // Similarly for Map, Obj
                     _ => false,
                 }
             }
@@ -198,807 +77,709 @@ impl PartialEq for Value {
         }
     }
 }
-
 impl Eq for Value {}
-
 impl Hash for Value {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        if self.is_int() {
-            self.as_i32().hash(state)
-        } else if self.is_gc_ptr() {
+    fn hash<H: Hasher>(&self, st: &mut H) {
+        if self.is_int() { self.as_i32().hash(st); }
+        else if self.is_bool() { self.as_bool().hash(st); }
+        else if self.is_nil() { 0u8.hash(st); }
+        else if self.is_gc() {
             unsafe {
-                if (*self.as_gc_ptr()).kind == 0 { // String
-                    let s = (self.as_gc_ptr() as *mut u8).add(mem::size_of::<GcHeader>()) as *mut GcString;
-                    let slice = std::slice::from_raw_parts((*s).data, (*s).len);
-                    slice.hash(state);
+                let h = self.as_gc();
+                if (*h).kind == 0 {
+                    let s = &*(h as *mut GcStr);
+                    std::slice::from_raw_parts(s.data, s.len).hash(st);
+                } else {
+                    (h as usize).hash(st);
                 }
             }
-        } else if self.is_bool() {
-            self.as_bool().hash(state);
         } else {
-            panic!("Type not hashable")
+            self.0.hash(st);
         }
     }
 }
-
-// --- GC Structures ---
-const BLOCK_SIZE: usize = 32 * 1024;
-
-struct Block {
-    data: Box<[u8; BLOCK_SIZE]>,
-    offset: usize,
-}
-
-struct BumpArena {
-    blocks: Vec<Box<Block>>,
-    current: usize,
-}
-
+// ═══════════════════════════════════════════════════════════
+// GC
+// ═══════════════════════════════════════════════════════════
+const BLOCK: usize = 32 * 1024;
+struct BumpBlock { data: Box<[u8; BLOCK]>, off: usize }
+struct BumpArena { blocks: Vec<BumpBlock>, cur: usize }
 impl BumpArena {
     fn new() -> Self {
-        let mut arena = BumpArena {
-            blocks: Vec::new(),
-            current: 0,
-        };
-        arena.add_block();
-        arena
+        let mut a = BumpArena { blocks: Vec::new(), cur: 0 };
+        a.add(); a
     }
-
-    fn add_block(&mut self) {
-        let block = Box::new(Block {
-            data: Box::new([0u8; BLOCK_SIZE]),
-                             offset: 0,
-        });
-        self.blocks.push(block);
+    fn add(&mut self) {
+        self.blocks.push(BumpBlock { data: Box::new([0; BLOCK]), off: 0 });
     }
-
     fn alloc(&mut self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        let align = layout.align();
-        let mut offset = (self.blocks[self.current].offset + align - 1) & !(align - 1);
-        if offset + size > BLOCK_SIZE {
-            self.current += 1;
-            if self.current >= self.blocks.len() {
-                self.add_block();
-            }
-            offset = 0;
-            self.blocks[self.current].offset = offset + size;
+        let sz = layout.size();
+        let al = layout.align();
+        let off = (self.blocks[self.cur].off + al - 1) & !(al - 1);
+        if off + sz > BLOCK {
+            self.cur += 1;
+            if self.cur >= self.blocks.len() { self.add(); }
+            self.blocks[self.cur].off = sz;
+            self.blocks[self.cur].data.as_mut_ptr()
         } else {
-            self.blocks[self.current].offset = offset + size;
+            self.blocks[self.cur].off = off + sz;
+            unsafe { self.blocks[self.cur].data.as_mut_ptr().add(off) }
         }
-        // Fix: unsafe add
-        unsafe { self.blocks[self.current].data.as_mut_ptr().add(offset) }
     }
-
     fn reset(&mut self) {
-        for block in &mut self.blocks {
-            block.offset = 0;
-        }
-        self.current = 0;
+        for b in &mut self.blocks { b.off = 0; }
+        self.cur = 0;
     }
 }
-
-struct FreeListAllocator {
-    free_list: *mut GcHeader,
-}
-
-impl FreeListAllocator {
-    fn new() -> Self {
-        FreeListAllocator { free_list: ptr::null_mut() }
+struct FreeAlloc;
+impl FreeAlloc {
+    fn alloc(sz: usize) -> *mut u8 {
+        unsafe { alloc(Layout::from_size_align_unchecked(sz, 8)) }
     }
-
-    fn alloc(&mut self, size: usize) -> *mut u8 {
-        // For now, use global alloc, implement free list later
-        unsafe { alloc(Layout::from_size_align_unchecked(size, 8)) }
-    }
-
-    fn free(&mut self, ptr: *mut GcHeader) {
-        unsafe {
-            let layout = Layout::from_size_align_unchecked((*ptr).size as usize + mem::size_of::<GcHeader>(), 8);
-            dealloc(ptr as *mut u8, layout);
-        }
+    fn free(p: *mut u8, sz: usize) {
+        unsafe { dealloc(p, Layout::from_size_align_unchecked(sz, 8)); }
     }
 }
-
 #[repr(C)]
-struct GcHeader {
-    mark: u8,        // 0=white, 1=gray, 2=black
-    gen: u8,         // 0=young, 1=old
-    kind: u8,        // 0=String, 1=List, 2=Map, 3=Object
-    size: u32,       // payload size
-    next: *mut GcHeader,
-}
-
+struct GcHdr { mark: u8, gen: u8, kind: u8, size: u32, next: *mut GcHdr }
 #[repr(C)]
-struct GcString {
-    header: GcHeader,
-    len: usize,
-    data: *mut u8, // Allocated separately or inlined
-}
-
+struct GcStr { hdr: GcHdr, len: usize, data: *mut u8 }
 #[repr(C)]
-struct GcList {
-    header: GcHeader,
-    items: Vec<Value>,
-}
-
+struct GcList { hdr: GcHdr, items: Vec<Value> }
 #[repr(C)]
-struct GcMap {
-    header: GcHeader,
-    map: HashMap<Value, Value>,
-}
-
+struct GcMap { hdr: GcHdr, map: HashMap<Value, Value> }
 #[repr(C)]
-struct GcObject {
-    header: GcHeader,
-    obj: Object,
+struct GcObj { hdr: GcHdr, obj: Obj }
+#[derive(Clone)]
+struct Obj {
+    name: String,
+    fields: HashMap<String, Value>,
+    methods: HashMap<String, usize>,
 }
-
 struct Gc {
-    // Young generation — bump arena
     young: BumpArena,
-    // Old generation — free list allocator
-    old: FreeListAllocator,
-    // Wszystkie obiekty (linked list przez GcHeader.next)
-    all_objects: *mut GcHeader,
-    // Gray stack dla incremental mark
-    gray_stack: Vec<*mut GcHeader>,
-    // Write barrier log (card table)
-    write_barriers: Vec<*mut GcHeader>,
-    // Liczniki
-    bytes_allocated: usize,
-    gc_threshold: usize,  // trigger GC co N bajtów
+    all: *mut GcHdr,
+    gray: Vec<*mut GcHdr>,
+    barriers: Vec<*mut GcHdr>,
+    allocated: usize,
+    threshold: usize,
 }
-
 impl Gc {
-    fn new(threshold: usize) -> Self {
-        Gc {
-            young: BumpArena::new(),
-            old: FreeListAllocator::new(),
-            all_objects: ptr::null_mut(),
-            gray_stack: Vec::new(),
-            write_barriers: Vec::new(),
-            bytes_allocated: 0,
-            gc_threshold: threshold,
-        }
+    fn new() -> Self {
+        Gc { young: BumpArena::new(), all: ptr::null_mut(),
+            gray: Vec::new(), barriers: Vec::new(),
+            allocated: 0, threshold: 1 << 20 }
     }
-
-    fn alloc(&mut self, size: usize, kind: u8, gen: u8) -> *mut GcHeader {
-        if self.bytes_allocated > self.gc_threshold {
-            // Cannot call collect(vm) here due to borrow rules.
-            // For now, we just grow. In a real impl, we would need to restructure VM/GC.
-            self.gc_threshold *= 2;
-        }
-        let total_size = size + mem::size_of::<GcHeader>();
+    fn raw_alloc(&mut self, payload: usize, kind: u8, gen: u8) -> *mut GcHdr {
+        if self.allocated > self.threshold { self.threshold *= 2; }
+        let total = payload + mem::size_of::<GcHdr>();
         let ptr = if gen == 0 {
-            self.young.alloc(unsafe { Layout::from_size_align_unchecked(total_size, 8) }) as *mut GcHeader
+            self.young.alloc(unsafe { Layout::from_size_align_unchecked(total, 8) })
         } else {
-            self.old.alloc(total_size) as *mut GcHeader
-        };
+            FreeAlloc::alloc(total)
+        } as *mut GcHdr;
         unsafe {
-            (*ptr).mark = 0;
-            (*ptr).gen = gen;
-            (*ptr).kind = kind;
-            (*ptr).size = size as u32;
-            (*ptr).next = self.all_objects;
+            (*ptr) = GcHdr { mark: 0, gen, kind, size: payload as u32, next: self.all };
         }
-        self.all_objects = ptr;
-        self.bytes_allocated += total_size;
+        self.all = ptr;
+        self.allocated += total;
         ptr
     }
-
-    fn alloc_string(&mut self, s: String, gen: u8) -> Value {
+    fn alloc_str(&mut self, s: String, gen: u8) -> Value {
         let len = s.len();
-        let size = mem::size_of::<GcString>() + len - mem::size_of::<*mut u8>(); // Since data is pointer
-        let header = self.alloc(size, 0, gen);
-        let gcs = unsafe { &mut *(header as *mut GcString) };
-        gcs.len = len;
-        gcs.data = unsafe { alloc(Layout::from_size_align_unchecked(len, 1)) };
-        unsafe { ptr::copy_nonoverlapping(s.as_ptr(), gcs.data, len); }
-        Value::from_gc_ptr(header)
+        let pay = mem::size_of::<GcStr>() - mem::size_of::<GcHdr>();
+        let h = self.raw_alloc(pay, 0, gen);
+        unsafe {
+            let gs = &mut *(h as *mut GcStr);
+            gs.len = len;
+            gs.data = if len > 0 {
+                let d = alloc(Layout::from_size_align_unchecked(len, 1));
+                ptr::copy_nonoverlapping(s.as_ptr(), d, len);
+                d
+            } else { ptr::null_mut() };
+        }
+        Value::from_gc(h)
     }
-
-    fn alloc_list(&mut self, list: Vec<Value>, gen: u8) -> Value {
-        let size = mem::size_of::<GcList>();
-        let header = self.alloc(size, 1, gen);
-        let gcl = unsafe { &mut *(header as *mut GcList) };
-        gcl.items = list;
-        Value::from_gc_ptr(header)
+    fn alloc_list(&mut self, items: Vec<Value>, gen: u8) -> Value {
+        let pay = mem::size_of::<GcList>() - mem::size_of::<GcHdr>();
+        let h = self.raw_alloc(pay, 1, gen);
+        unsafe { (*(h as *mut GcList)).items = items; }
+        Value::from_gc(h)
     }
-
     fn alloc_map(&mut self, map: HashMap<Value, Value>, gen: u8) -> Value {
-        let size = mem::size_of::<GcMap>();
-        let header = self.alloc(size, 2, gen);
-        let gcm = unsafe { &mut *(header as *mut GcMap) };
-        gcm.map = map;
-        Value::from_gc_ptr(header)
+        let pay = mem::size_of::<GcMap>() - mem::size_of::<GcHdr>();
+        let h = self.raw_alloc(pay, 2, gen);
+        unsafe { (*(h as *mut GcMap)).map = map; }
+        Value::from_gc(h)
     }
-
-    fn alloc_object(&mut self, obj: Object, gen: u8) -> Value {
-        let size = mem::size_of::<GcObject>();
-        let header = self.alloc(size, 3, gen);
-        let gco = unsafe { &mut *(header as *mut GcObject) };
-        gco.obj = obj;
-        Value::from_gc_ptr(header)
+    fn alloc_obj(&mut self, obj: Obj, gen: u8) -> Value {
+        let pay = mem::size_of::<GcObj>() - mem::size_of::<GcHdr>();
+        let h = self.raw_alloc(pay, 3, gen);
+        unsafe { (*(h as *mut GcObj)).obj = obj; }
+        Value::from_gc(h)
     }
-
+    fn mark_gray(&mut self, p: *mut GcHdr) {
+        unsafe { if (*p).mark == 0 { (*p).mark = 1; self.gray.push(p); } }
+    }
     fn mark_roots(&mut self, vm: &VM) {
-        // Stack
-        for val in &vm.stack {
-            if val.is_gc_ptr() {
-                self.mark_gray(val.as_gc_ptr());
+        for v in &vm.stack { if v.is_gc() { let p = v.as_gc(); self.mark_gray(p); } }
+        for (_, v) in &vm.globals { if v.is_gc() { let p = v.as_gc(); self.mark_gray(p); } }
+        for fr in &vm.frames {
+            for &v in &fr.locals[..fr.live] {
+                if v.is_gc() { let p = v.as_gc(); self.mark_gray(p); }
             }
         }
-        // Globals
-        for (_, val) in &vm.globals {
-            if val.is_gc_ptr() {
-                self.mark_gray(val.as_gc_ptr());
-            }
-        }
-        // Call stack locals
-        for frame in &vm.call_stack {
-            for &val in &frame.locals {
-                if val.is_gc_ptr() {
-                    self.mark_gray(val.as_gc_ptr());
-                }
-            }
-        }
-        // Write barriers for generational
-        let barriers = self.write_barriers.clone();
-        self.write_barriers.clear();
-        for obj in barriers {
-            self.mark_gray(obj);
-        }
+        let bs = mem::take(&mut self.barriers);
+        for p in bs { self.mark_gray(p); }
     }
-
-    fn mark_gray(&mut self, obj: *mut GcHeader) {
+    fn trace(&mut self, p: *mut GcHdr) {
         unsafe {
-            if (*obj).mark == 0 {
-                (*obj).mark = 1;
-                self.gray_stack.push(obj);
-            }
-        }
-    }
-
-    fn trace_children(&mut self, obj: *mut GcHeader) {
-        unsafe {
-            match (*obj).kind {
-                0 => {} // String has no children
-                1 => { // List
-                    let list = obj as *mut GcList;
-                    for val in &(*list).items {
-                        if val.is_gc_ptr() {
-                            self.mark_gray(val.as_gc_ptr());
-                        }
-                    }
-                }
-                2 => { // Map
-                    let map = obj as *mut GcMap;
-                    for (k, v) in &(*map).map {
-                        if k.is_gc_ptr() {
-                            self.mark_gray(k.as_gc_ptr());
-                        }
-                        if v.is_gc_ptr() {
-                            self.mark_gray(v.as_gc_ptr());
-                        }
-                    }
-                }
-                3 => { // Object
-                    let o = obj as *mut GcObject;
-                    for (_, v) in &(*o).obj.fields {
-                        if v.is_gc_ptr() {
-                            self.mark_gray(v.as_gc_ptr());
-                        }
-                    }
-                }
+            match (*p).kind {
+                0 => {}
+                1 => for v in &(*(p as *mut GcList)).items {
+                    if v.is_gc() { let pp = v.as_gc(); self.mark_gray(pp); }
+                },
+                2 => for (k, v) in &(*(p as *mut GcMap)).map {
+                    if k.is_gc() { let pp = k.as_gc(); self.mark_gray(pp); }
+                    if v.is_gc() { let pp = v.as_gc(); self.mark_gray(pp); }
+                },
+                3 => for (_, v) in &(*(p as *mut GcObj)).obj.fields {
+                    if v.is_gc() { let pp = v.as_gc(); self.mark_gray(pp); }
+                },
                 _ => {}
             }
         }
     }
-
     fn mark_phase(&mut self) {
-        while let Some(obj) = self.gray_stack.pop() {
-            unsafe {
-                (*obj).mark = 2; // black
-                self.trace_children(obj);
-            }
+        while let Some(p) = self.gray.pop() {
+            unsafe { (*p).mark = 2; }
+            self.trace(p);
         }
     }
-
     fn sweep_phase(&mut self) {
-        let mut prev: *mut *mut GcHeader = &mut self.all_objects;
-        let mut current = self.all_objects;
-        while !current.is_null() {
+        let mut prev: *mut *mut GcHdr = &mut self.all;
+        let mut cur = self.all;
+        while !cur.is_null() {
             unsafe {
-                let next = (*current).next;
-                if (*current).mark == 0 {
-                    // Białe = nieosiągalne, zwolnij
-                    *prev = next;
-                    self.free(current);
+                let nxt = (*cur).next;
+                if (*cur).mark == 0 {
+                    *prev = nxt;
+                    self.free_obj(cur);
                 } else {
-                    (*current).mark = 0; // reset na biały dla następnego cyklu
-                    prev = &mut (*current).next;
+                    (*cur).mark = 0;
+                    prev = &mut (*cur).next;
                 }
-                current = next;
+                cur = nxt;
             }
         }
     }
-
-    fn free(&mut self, obj: *mut GcHeader) {
+    fn free_obj(&mut self, p: *mut GcHdr) {
+        let total = unsafe { (*p).size as usize } + mem::size_of::<GcHdr>();
         unsafe {
-            if (*obj).kind == 0 {
-                let s = obj as *mut GcString;
-                dealloc((*s).data, Layout::from_size_align_unchecked((*s).len, 1));
+            match (*p).kind {
+                0 => {
+                    let s = &*(p as *mut GcStr);
+                    if !s.data.is_null() && s.len > 0 {
+                        dealloc(s.data, Layout::from_size_align_unchecked(s.len, 1));
+                    }
+                }
+                1 => ptr::drop_in_place(&mut (*(p as *mut GcList)).items),
+                2 => ptr::drop_in_place(&mut (*(p as *mut GcMap)).map),
+                3 => ptr::drop_in_place(&mut (*(p as *mut GcObj)).obj),
+                _ => {}
             }
-            // Drop Vec, HashMap etc.
-            if (*obj).kind == 1 {
-                let l = obj as *mut GcList;
-                ptr::drop_in_place(&mut (*l).items);
-            } else if (*obj).kind == 2 {
-                let m = obj as *mut GcMap;
-                ptr::drop_in_place(&mut (*m).map);
-            } else if (*obj).kind == 3 {
-                let o = obj as *mut GcObject;
-                ptr::drop_in_place(&mut (*o).obj);
-            }
-            let size = (*obj).size as usize + mem::size_of::<GcHeader>();
-            if (*obj).gen == 1 {
-                self.old.free(obj);
-            } // Young freed by reset
-            self.bytes_allocated -= size;
+            if (*p).gen == 1 { FreeAlloc::free(p as *mut u8, total); }
         }
+        self.allocated = self.allocated.saturating_sub(total);
     }
-
     fn collect(&mut self, vm: &VM) {
         self.mark_roots(vm);
         self.mark_phase();
         self.sweep_phase();
-        // Optional compact
         self.young.reset();
     }
-
-    fn write_barrier(&mut self, obj: *mut GcHeader, val: Value) {
-        unsafe {
-            if (*obj).gen == 1 && val.points_to_young() {
-                self.write_barriers.push(obj);
-            }
-        }
-    }
 }
-
-// --- Object ---
-#[derive(Clone)]
-struct Object {
-    name: String,
-    fields: HashMap<String, Value>,
-    methods: HashMap<String, usize>, // method name to func index
-}
-
-// --- Constant Pool ---
-// Fix: Add Serialize, Deserialize
+// ═══════════════════════════════════════════════════════════
+// Constant pool
+// ═══════════════════════════════════════════════════════════
 #[derive(Serialize, Deserialize)]
-struct ConstPool {
+struct Pool {
     strings: Vec<String>,
-    numbers_i32: Vec<i32>,
-    numbers_f64: Vec<f64>,
+    ints: Vec<i32>,
+    floats: Vec<f64>,
 }
-
-impl ConstPool {
-    fn new() -> Self {
-        ConstPool {
-            strings: Vec::new(),
-            numbers_i32: Vec::new(),
-            numbers_f64: Vec::new(),
-        }
+impl Pool {
+    fn new() -> Self { Pool { strings: Vec::new(), ints: Vec::new(), floats: Vec::new() } }
+    fn str_idx(&mut self, s: String) -> u32 {
+        if let Some(i) = self.strings.iter().position(|x| *x == s) { return i as u32; }
+        let i = self.strings.len() as u32; self.strings.push(s); i
     }
-
-    fn add_string(&mut self, s: String) -> u32 {
-        if let Some(idx) = self.strings.iter().position(|existing| *existing == s) {
-            idx as u32
-        } else {
-            let idx = self.strings.len() as u32;
-            self.strings.push(s);
-            idx
-        }
+    fn int_idx(&mut self, v: i32) -> u32 {
+        if let Some(i) = self.ints.iter().position(|x| *x == v) { return i as u32; }
+        let i = self.ints.len() as u32; self.ints.push(v); i
     }
-
-    fn add_i32(&mut self, i: i32) -> u32 {
-        if let Some(idx) = self.numbers_i32.iter().position(|existing| *existing == i) {
-            idx as u32
-        } else {
-            let idx = self.numbers_i32.len() as u32;
-            self.numbers_i32.push(i);
-            idx
-        }
-    }
-
-    fn add_f64(&mut self, f: f64) -> u32 {
-        if let Some(idx) = self.numbers_f64.iter().position(|existing| *existing == f) {
-            idx as u32
-        } else {
-            let idx = self.numbers_f64.len() as u32;
-            self.numbers_f64.push(f);
-            idx
-        }
+    fn flt_idx(&mut self, v: f64) -> u32 {
+        if let Some(i) = self.floats.iter().position(|x| *x == v) { return i as u32; }
+        let i = self.floats.len() as u32; self.floats.push(v); i
     }
 }
-
-// --- Bytecode ---
+// ═══════════════════════════════════════════════════════════
+// Bytecode
+// ═══════════════════════════════════════════════════════════
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum OpCode {
-    LoadConst(u32),              // indeks do ConstPool
-    LoadVar(u16),                // indeks do tablicy zmiennych
-    StoreVar(u16),
-    BinAdd,                      // osobne opkody
-    BinSub,
-    BinMul,
-    BinDiv,
-    BinEq,
-    BinLt,
-    Call(u16, u8),               // func_idx, num_args
-    Jump(i32),                   // względny offset
-    JumpIfFalse(i32),
-    Return,
-    Exit,
-    Exec(u32, bool),             // cmd_idx w ConstPool, sudo
-}
-
-#[derive(Serialize, Deserialize)]
-struct BytecodeProgram {
-    ops: Vec<OpCode>,
-    const_pool: ConstPool,
-    functions: HashMap<u16, usize>, // func idx -> op index
-    // For variables, assume per frame indices assigned by compiler
-}
-
-// --- IR for Tracing JIT ---
-#[derive(Clone)]
-enum IROp {
-    ConstI32(i32),
-    ConstF64(f64),
-    ConstBool(bool),
-    ConstNil,
-    Add(IrRef, IrRef),
-    Sub(IrRef, IrRef),
-    Mul(IrRef, IrRef),
-    Guard(IrRef, GuardKind, usize), // value, kind, deopt ip
+enum Op {
+    LoadStr(u32),
+    LoadInt(u32),
+    LoadFlt(u32),
+    LoadBool(bool),
+    LoadNil,
     LoadVar(u16),
-    StoreVar(u16, IrRef),
-    // More ops
+    StoreVar(u16),
+    BinAdd, BinSub, BinMul, BinDiv,
+    BinEq, BinNe, BinLt, BinGt, BinLe, BinGe,
+    Jump(i32),
+    JumpFalse(i32),
+    Call(u16, u8),
+    Return,
+    Exec(u32, bool), // (str_idx, is_sudo)
+    Exit,
 }
-
-type IrRef = usize;
-
-#[derive(Clone)]
-enum GuardKind {
-    IsInt,
-    IsF64,
-    IsBool,
-    // etc
+#[derive(Serialize, Deserialize)]
+struct Program {
+    ops: Vec<Op>,
+    pool: Pool,
+    fns: HashMap<u16, usize>, // fn_idx → first op index
 }
-
-struct TraceRecorder {
-    ir: Vec<IROp>,
-    var_map: HashMap<u16, IrRef>,
-    loop_start_ip: usize,
-    is_recording: bool,
-    hot_count: HashMap<usize, u32>, // ip -> count
-}
-
-impl TraceRecorder {
-    fn new() -> Self {
-        TraceRecorder {
-            ir: Vec::new(),
-            var_map: HashMap::new(),
-            loop_start_ip: 0,
-            is_recording: false,
-            hot_count: HashMap::new(),
-        }
-    }
-}
-
-// --- Register Allocation ---
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum X64Reg {
-    Rax = 0, Rbx, Rcx, Rdx, Rsi, Rdi, Rbp, Rsp,
-    R8, R9, R10, R11, R12, R13, R14, R15,
-}
-
-struct RegAlloc {
-    live_intervals: Vec<(IrRef, usize, usize)>, // ref, start, end
-    reg_map: HashMap<IrRef, X64Reg>,
-    free_regs: Vec<X64Reg>,
-}
-
-impl RegAlloc {
-    fn new() -> Self {
-        let free_regs = vec![X64Reg::Rbx, X64Reg::Rcx, X64Reg::Rdx, X64Reg::Rsi, X64Reg::Rdi,
-        X64Reg::R8, X64Reg::R9, X64Reg::R10, X64Reg::R11, X64Reg::R12, X64Reg::R13, X64Reg::R14, X64Reg::R15];
-        RegAlloc {
-            live_intervals: Vec::new(),
-            reg_map: HashMap::new(),
-            free_regs,
-        }
-    }
-
-    fn allocate(&mut self, ir: &[IROp]) {
-        // Simplistic linear scan
-        // Collect intervals (dummy)
-        for i in 0..ir.len() {
-            self.live_intervals.push((i, i, ir.len()));
-        }
-        self.live_intervals.sort_by_key(|&(_, start, _)| start);
-        let mut active = Vec::new();
-        for (iref, start, end) in self.live_intervals.clone() {
-            active.retain(|&(_, a_end)| a_end > start);
-            if let Some(reg) = self.free_regs.pop() {
-                self.reg_map.insert(iref, reg);
-                active.push((iref, end));
-            } // Else spill, ignore
-        }
-    }
-}
-
-// --- VmState ---
+// ═══════════════════════════════════════════════════════════
+// JIT stubs
+// ═══════════════════════════════════════════════════════════
 #[repr(C)]
-struct VmState {
-    stack_ptr: *mut Value,
-    stack_base: *mut Value,
-    locals_ptr: *mut Value,
-    globals_ptr: *mut HashMap<u16, Value>, // Update to u16 indices if needed
+struct VmState { sp: *mut Value, bp: *mut Value }
+struct Trace {
+    _buf: dynasmrt::ExecutableBuffer,
+    fptr: unsafe fn(*mut VmState),
+    start: usize,
 }
-
-// --- CompiledTrace ---
-struct CompiledTrace {
-    _buf: dynasmrt::ExecutableBuffer,  // owner
-    fn_ptr: unsafe fn(*mut VmState),   // przekazuje wskaźnik na VM state
-    entry_ip: usize,
-    exit_ip: usize,
+struct Jit { cache: HashMap<usize, Trace> }
+impl Jit {
+    fn new() -> Self { Jit { cache: HashMap::new() } }
+    fn codegen(&mut self, start_ip: usize) {
+        let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+        dynasm!(ops
+        ; .arch x64
+        ; mov rax, 0
+        ; ret
+        );
+        let buf = ops.finalize().unwrap();
+        let fptr = unsafe {
+            std::mem::transmute::<_, unsafe fn(*mut VmState)>(buf.ptr(AssemblyOffset(0)))
+        };
+        self.cache.insert(start_ip, Trace { _buf: buf, fptr, start: start_ip });
+    }
 }
-
-// --- JitCache ---
-struct JitCache {
-    compiled: HashMap<usize, CompiledTrace>,
+// ═══════════════════════════════════════════════════════════
+// Call frame
+// ═══════════════════════════════════════════════════════════
+struct Frame {
+    locals: [Value; 256],
+    live: usize, // how many locals are actually used
+    ret_ip: usize,
 }
-
-// --- CallFrame ---
-struct CallFrame {
-    locals: [Value; 256],        // fixed array
-    base_ip: usize,
-    return_ip: usize,
-}
-
-// --- VM ---
+// ═══════════════════════════════════════════════════════════
+// VM
+// ═══════════════════════════════════════════════════════════
 struct VM {
     stack: Vec<Value>,
-    call_stack: Vec<CallFrame>,
+    frames: Vec<Frame>,
     globals: HashMap<String, Value>,
     env: HashMap<String, String>,
     gc: Gc,
-    recorder: TraceRecorder,
-    jit_cache: JitCache,
+    jit: Jit,
+    hot: HashMap<usize, u32>,
 }
-
 impl VM {
     fn new() -> Self {
         VM {
             stack: Vec::new(),
-            call_stack: Vec::new(),
+            frames: Vec::new(),
             globals: HashMap::new(),
             env: std::env::vars().collect(),
-            gc: Gc::new(1024 * 1024),
-            recorder: TraceRecorder::new(),
-            jit_cache: JitCache { compiled: HashMap::new() },
+            gc: Gc::new(),
+            jit: Jit::new(),
+            hot: HashMap::new(),
         }
     }
-
-    fn start_recording(&mut self, ip: usize) {
-        self.recorder.is_recording = true;
-        self.recorder.loop_start_ip = ip;
-        self.recorder.ir.clear();
-    }
-
-    fn stop_recording(&mut self) -> Vec<IROp> {
-        self.recorder.is_recording = false;
-        self.recorder.ir.clone()
-    }
-
-    fn optimize_ir(&mut self, ir: &mut Vec<IROp>) {
-        // Placeholder for const folding, DCE, etc.
-    }
-
-    fn codegen(&mut self, ir: Vec<IROp>, start_ip: usize) {
-        let mut regalloc = RegAlloc::new();
-        regalloc.allocate(&ir);
-        let mut ops = dynasmrt::x64::Assembler::new().unwrap();
-        // Generate assembly using dynasm
-        // Example placeholder
-        dynasm!(ops
-        ; .arch x64
-        ; mov rax, 42
-        ; ret
-        );
-        let buf = ops.finalize().unwrap();
-        let fn_ptr = unsafe { std::mem::transmute::<_, unsafe fn(*mut VmState)>(buf.ptr(AssemblyOffset(0))) };
-        self.jit_cache.compiled.insert(start_ip, CompiledTrace {
-            _buf: buf,
-            fn_ptr,
-            entry_ip: start_ip,
-            exit_ip: start_ip + 1, // dummy
-        });
-    }
-
-    fn run_interpreted(&mut self, prog: &BytecodeProgram, verbose: bool) {
-        let mut ip = 0;
-        while ip < prog.ops.len() {
-            // Hot count for loops
-            // Placeholder
-            match &prog.ops[ip] {
-                OpCode::LoadConst(idx) => {
-                    // Assume it's string for example
-                    let s = prog.const_pool.strings[*idx as usize].clone();
-                    let val = self.gc.alloc_string(s, 0);
-                    self.stack.push(val);
-                }
-                OpCode::Exec(idx, sudo) => {
-                    let cmd = prog.const_pool.strings[*idx as usize].clone();
-                    let final_cmd = self.substitute(&cmd);
-                    let status = if *sudo {
-                        Command::new("sudo").arg("sh").arg("-c").arg(&final_cmd).status()
-                    } else {
-                        Command::new("sh").arg("-c").arg(&final_cmd).status()
-                    };
-                    if let Err(e) = status {
-                        eprintln!("Command failed: {}", e);
+    fn substitute(&self, text: &str) -> String {
+        let mut r = text.to_string();
+        for (k, v) in &self.globals {
+            if v.is_gc() {
+                unsafe {
+                    let h = v.as_gc();
+                    if (*h).kind == 0 {
+                        let s = &*(h as *mut GcStr);
+                        let sv = String::from_utf8_lossy(
+                            std::slice::from_raw_parts(s.data, s.len)
+                        );
+                        r = r.replace(&format!("@{}", k), sv.as_ref());
                     }
                 }
-                OpCode::BinAdd => {
-                    let b = self.stack.pop().unwrap();
-                    let a = self.stack.pop().unwrap();
-                    let result = if a.is_int() && b.is_int() {
-                        Value::from_i32(a.as_i32() + b.as_i32())
-                    } else if a.is_f64() && b.is_f64() {
-                        Value::from_f64(a.as_f64() + b.as_f64())
-                    } else {
-                        panic!("Type error");
-                    };
-                    self.stack.push(result);
-                }
-                // Implement other ops
-                _ => {}
             }
-            ip += 1;
-        }
-    }
-
-    fn run(&mut self, prog: BytecodeProgram, verbose: bool, use_jit: bool) {
-        self.run_interpreted(&prog, verbose);
-        // Add JIT logic
-    }
-
-    fn substitute(&self, text: &str) -> String {
-        let mut res = text.to_string();
-        for (k, v) in &self.globals {
-            if v.is_gc_ptr() && unsafe { (*v.as_gc_ptr()).kind == 0 } {
-                let s = unsafe { &*(v.as_gc_ptr() as *const GcString) };
-                let str_slice = unsafe { std::slice::from_raw_parts(s.data, s.len) };
-                let str_val = std::string::String::from_utf8_lossy(str_slice).to_string();
-                res = res.replace(&format!("@{}", k), &str_val);
-            }
-            // Add for other types
         }
         for (k, v) in &self.env {
-            res = res.replace(&format!("${}", k), v);
+            r = r.replace(&format!("${}", k), v);
         }
-        res
+        r
     }
-}
-
-// --- Compiler ---
-fn compile_to_bytecode(ast: &AnalysisResult) -> BytecodeProgram {
-    let mut ops = Vec::new();
-    let mut const_pool = ConstPool::new();
-    let mut functions = HashMap::new();
-    // Compile main body
-    for node in &ast.main_body {
-        compile_node(node, &mut ops, &mut const_pool, &mut functions);
-    }
-    ops.push(OpCode::Exit);
-    // Compile functions
-    let mut func_idx = 0u16;
-    for (name, nodes) in &ast.functions {
-        functions.insert(func_idx, ops.len());
-        func_idx += 1;
-        for node in nodes {
-            compile_node(node, &mut ops, &mut const_pool, &mut functions);
-        }
-        ops.push(OpCode::Return);
-    }
-    // Similar for objects
-    BytecodeProgram {
-        ops,
-        const_pool,
-        functions,
-    }
-}
-
-fn compile_node(node: &ProgramNode, ops: &mut Vec<OpCode>, const_pool: &mut ConstPool, functions: &mut HashMap<u16, usize>) {
-    match &node.content {
-        CommandType::Raw(s) => {
-            if s.starts_with("call:") {
-                let fname = s.strip_prefix("call:").unwrap().to_string();
-                // Find func idx
-                // Placeholder
-                ops.push(OpCode::Call(0, 0));
-            } else {
-                let idx = const_pool.add_string(s.clone());
-                ops.push(OpCode::Exec(idx, node.is_sudo));
+    fn run(&mut self, prog: &Program) {
+        let mut ip = 0usize;
+        while ip < prog.ops.len() {
+            match &prog.ops[ip] {
+                Op::LoadStr(i) => {
+                    let s = prog.pool.strings[*i as usize].clone();
+                    let val = self.gc.alloc_str(s, 0);
+                    self.stack.push(val);
+                }
+                Op::LoadInt(i) => {
+                    self.stack.push(Value::from_i32(prog.pool.ints[*i as usize]));
+                }
+                Op::LoadFlt(i) => {
+                    self.stack.push(Value::from_f64(prog.pool.floats[*i as usize]));
+                }
+                Op::LoadBool(b) => self.stack.push(Value::from_bool(*b)),
+                Op::LoadNil => self.stack.push(Value::nil()),
+                Op::LoadVar(s) => {}, // not implemented in provided code
+                Op::StoreVar(s) => {}, // not implemented fully
+                Op::BinAdd => {
+                    let b = self.stack.pop().unwrap();
+                    let a = self.stack.pop().unwrap();
+                    let v = if a.is_int() && b.is_int() {
+                        Value::from_i32(a.as_i32().wrapping_add(b.as_i32()))
+                    } else { Value::from_f64(a.as_f64() + b.as_f64()) };
+                    self.stack.push(v);
+                }
+                Op::BinSub => {
+                    let b = self.stack.pop().unwrap();
+                    let a = self.stack.pop().unwrap();
+                    let v = if a.is_int() && b.is_int() {
+                        Value::from_i32(a.as_i32().wrapping_sub(b.as_i32()))
+                    } else { Value::from_f64(a.as_f64() - b.as_f64()) };
+                    self.stack.push(v);
+                }
+                Op::BinMul => {
+                    let b = self.stack.pop().unwrap();
+                    let a = self.stack.pop().unwrap();
+                    let v = if a.is_int() && b.is_int() {
+                        Value::from_i32(a.as_i32().wrapping_mul(b.as_i32()))
+                    } else { Value::from_f64(a.as_f64() * b.as_f64()) };
+                    self.stack.push(v);
+                }
+                Op::BinDiv => {
+                    let b = self.stack.pop().unwrap();
+                    let a = self.stack.pop().unwrap();
+                    self.stack.push(Value::from_f64(a.as_f64() / b.as_f64()));
+                }
+                Op::BinEq => { let b = self.stack.pop().unwrap(); let a = self.stack.pop().unwrap(); self.stack.push(Value::from_bool(a == b)); }
+                Op::BinNe => { let b = self.stack.pop().unwrap(); let a = self.stack.pop().unwrap(); self.stack.push(Value::from_bool(a != b)); }
+                Op::BinLt => {
+                    let b = self.stack.pop().unwrap(); let a = self.stack.pop().unwrap();
+                    let r = if a.is_int() && b.is_int() { a.as_i32() < b.as_i32() } else { a.as_f64() < b.as_f64() };
+                    self.stack.push(Value::from_bool(r));
+                }
+                Op::BinGt => {
+                    let b = self.stack.pop().unwrap(); let a = self.stack.pop().unwrap();
+                    let r = if a.is_int() && b.is_int() { a.as_i32() > b.as_i32() } else { a.as_f64() > b.as_f64() };
+                    self.stack.push(Value::from_bool(r));
+                }
+                Op::BinLe => {
+                    let b = self.stack.pop().unwrap(); let a = self.stack.pop().unwrap();
+                    let r = if a.is_int() && b.is_int() { a.as_i32() <= b.as_i32() } else { a.as_f64() <= b.as_f64() };
+                    self.stack.push(Value::from_bool(r));
+                }
+                Op::BinGe => {
+                    let b = self.stack.pop().unwrap(); let a = self.stack.pop().unwrap();
+                    let r = if a.is_int() && b.is_int() { a.as_i32() >= b.as_i32() } else { a.as_f64() >= b.as_f64() };
+                    self.stack.push(Value::from_bool(r));
+                }
+                Op::Jump(off) => {
+                    ip = (ip as i64 + *off as i64) as usize;
+                    continue;
+                }
+                Op::JumpFalse(off) => {
+                    let top = self.stack.pop().unwrap();
+                    if !top.as_bool() {
+                        ip = (ip as i64 + *off as i64) as usize;
+                        continue;
+                    }
+                }
+                Op::Exec(i, sudo) => {
+                    let cmd = prog.pool.strings[*i as usize].clone();
+                    let full = self.substitute(&cmd);
+                    let status = if *sudo {
+                        Command::new("sudo").arg("sh").arg("-c").arg(&full).status()
+                    } else {
+                        Command::new("sh").arg("-c").arg(&full).status()
+                    };
+                    if let Err(e) = status {
+                        eprintln!("{} {}", "[x]".red(), e);
+                    }
+                }
+                Op::Return | Op::Exit => break,
+                Op::Call(_ , _) => {}, // not fully implemented in provided code
+            }
+            ip += 1;
+            if self.gc.allocated > self.gc.threshold {
+                // Cannot call collect here due to borrow rules — just bump threshold
+                self.gc.threshold *= 2;
             }
         }
-        // Implement other command types
-        _ => {}
     }
 }
-
-// --- Main functions ---
-pub fn run_command(file_path: String, verbose: bool) -> bool {
-    if let Err(_) = fs::create_dir_all(CACHE_DIR) {
-        // Ignored
+// ═══════════════════════════════════════════════════════════
+// Bytecode compiler
+// ═══════════════════════════════════════════════════════════
+struct Compiler {
+    ops: Vec<Op>,
+    pool: Pool,
+    fns: HashMap<u16, usize>,
+    fidx: u16,
+}
+impl Compiler {
+    fn new() -> Self {
+        Compiler { ops: Vec::new(), pool: Pool::new(), fns: HashMap::new(), fidx: 0 }
     }
-    let hash = get_file_hash(&file_path);
-    let bc_path = PathBuf::from(CACHE_DIR).join(format!("{}.bc", hash));
-    let program: BytecodeProgram;
-    if bc_path.exists() {
-        if verbose { println!("{} Cache hit. Loading bytecode.", "[*]".green()); }
-        let data = fs::read(&bc_path).unwrap();
-        program = bincode::deserialize(&data).unwrap();
+    fn emit_nodes(&mut self, nodes: &[ProgramNode]) {
+        for n in nodes { self.emit_node(n); }
+    }
+    fn emit_stmts(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            self.emit_stmt(stmt);
+        }
+    }
+    fn emit_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Raw(s) => {
+                let i = self.pool.str_idx(s.clone());
+                self.ops.push(Op::Exec(i, false));
+            }
+            Stmt::AssignGlobal { key, val, .. } | Stmt::AssignLocal { key, val, .. } => {
+                self.emit_expr(val);
+                let slot = fnv16(key);
+                self.ops.push(Op::StoreVar(slot));
+            }
+            Stmt::If { cond, body } => {
+                self.emit_expr(cond);
+                let patch = self.ops.len();
+                self.ops.push(Op::JumpFalse(0));
+                self.emit_stmts(body);
+                let target = self.ops.len() as i32 - patch as i32;
+                if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = target; }
+            }
+            Stmt::While { cond, body } => {
+                let loop_start = self.ops.len();
+                self.emit_expr(cond);
+                let patch = self.ops.len();
+                self.ops.push(Op::JumpFalse(0));
+                self.emit_stmts(body);
+                let back = loop_start as i32 - self.ops.len() as i32;
+                self.ops.push(Op::Jump(back));
+                let exit = self.ops.len() as i32 - patch as i32;
+                if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = exit; }
+            }
+            Stmt::For { var, iter, body } => {
+                self.emit_expr(iter);
+                let slot = fnv16(var);
+                self.ops.push(Op::StoreVar(slot));
+                self.emit_stmts(body);
+            }
+            Stmt::Function { name, body, .. } => {
+                let fidx = self.fidx;
+                self.fidx += 1;
+                let skip_patch = self.ops.len();
+                self.ops.push(Op::Jump(0));
+                self.fns.insert(fidx, self.ops.len());
+                self.emit_stmts(body);
+                self.ops.push(Op::Return);
+                let skip_off = self.ops.len() as i32 - skip_patch as i32;
+                if let Op::Jump(ref mut off) = self.ops[skip_patch] { *off = skip_off; }
+            }
+            Stmt::Return { expr } => {
+                self.emit_expr(expr);
+                self.ops.push(Op::Return);
+            }
+            Stmt::LoopTimes { count, body } => {
+                for _ in 0..*count { self.emit_stmts(body); }
+            }
+            Stmt::Background(nodes) => {
+                self.emit_stmts(nodes);
+            }
+            _ => {}
+        }
+    }
+    fn emit_node(&mut self, node: &ProgramNode) {
+        match &node.content {
+            Stmt::Raw(s) => {
+                let i = self.pool.str_idx(s.clone());
+                self.ops.push(Op::Exec(i, node.is_sudo));
+            }
+            Stmt::AssignGlobal { key, val, .. } | Stmt::AssignLocal { key, val, .. } => {
+                self.emit_expr(val);
+                let slot = fnv16(key);
+                self.ops.push(Op::StoreVar(slot));
+            }
+            Stmt::If { cond, body } => {
+                self.emit_expr(cond);
+                let patch = self.ops.len();
+                self.ops.push(Op::JumpFalse(0));
+                self.emit_stmts(body);
+                let target = self.ops.len() as i32 - patch as i32;
+                if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = target; }
+            }
+            Stmt::While { cond, body } => {
+                let loop_start = self.ops.len();
+                self.emit_expr(cond);
+                let patch = self.ops.len();
+                self.ops.push(Op::JumpFalse(0));
+                self.emit_stmts(body);
+                let back = loop_start as i32 - self.ops.len() as i32;
+                self.ops.push(Op::Jump(back));
+                let exit = self.ops.len() as i32 - patch as i32;
+                if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = exit; }
+            }
+            Stmt::For { var, iter, body } => {
+                self.emit_expr(iter);
+                let slot = fnv16(var);
+                self.ops.push(Op::StoreVar(slot));
+                self.emit_stmts(body);
+            }
+            Stmt::Function { name, body, .. } => {
+                let fidx = self.fidx;
+                self.fidx += 1;
+                let skip_patch = self.ops.len();
+                self.ops.push(Op::Jump(0));
+                self.fns.insert(fidx, self.ops.len());
+                self.emit_stmts(body);
+                self.ops.push(Op::Return);
+                let skip_off = self.ops.len() as i32 - skip_patch as i32;
+                if let Op::Jump(ref mut off) = self.ops[skip_patch] { *off = skip_off; }
+            }
+            Stmt::Return { expr } => {
+                self.emit_expr(expr);
+                self.ops.push(Op::Return);
+            }
+            Stmt::LoopTimes { count, body } => {
+                for _ in 0..*count { self.emit_stmts(body); }
+            }
+            Stmt::Background(nodes) => {
+                self.emit_stmts(nodes);
+            }
+            _ => {}
+        }
+    }
+    fn emit_expr(&mut self, expr: &hl_plsa::Expr) {
+        use hl_plsa::Expr::*;
+        use hl_plsa::Value as V;
+        match expr {
+            Lit(V::I32(n)) => { let i = self.pool.int_idx(*n); self.ops.push(Op::LoadInt(i)); }
+            Lit(V::F64(f)) => { let i = self.pool.flt_idx(*f); self.ops.push(Op::LoadFlt(i)); }
+            Lit(V::Str(s)) => { let i = self.pool.str_idx(s.clone()); self.ops.push(Op::LoadStr(i)); }
+            Lit(V::Bool(b)) => self.ops.push(Op::LoadBool(*b)),
+            Lit(_) => self.ops.push(Op::LoadNil),
+            Var(name) => { let s = fnv16(name); self.ops.push(Op::LoadVar(s)); }
+            BinOp { op, left, right } => {
+                self.emit_expr(left);
+                self.emit_expr(right);
+                match op.as_str() {
+                    "+" => self.ops.push(Op::BinAdd),
+                    "-" => self.ops.push(Op::BinSub),
+                    "*" => self.ops.push(Op::BinMul),
+                    "/" => self.ops.push(Op::BinDiv),
+                    "=="=> self.ops.push(Op::BinEq),
+                    "!="=> self.ops.push(Op::BinNe),
+                    "<" => self.ops.push(Op::BinLt),
+                    ">" => self.ops.push(Op::BinGt),
+                    "<=" => self.ops.push(Op::BinLe),
+                    ">=" => self.ops.push(Op::BinGe),
+                    _ => {}
+                }
+            }
+            Call { name, args } => {
+                for a in args { self.emit_expr(a); }
+                let slot = fnv16(name);
+                self.ops.push(Op::Call(slot, args.len() as u8));
+            }
+            _ => self.ops.push(Op::LoadNil),
+        }
+    }
+    fn finish(self, ast: &AnalysisResult) -> Program {
+        // Functions already emitted via emit_node for Function stmts in main_body
+        Program { ops: self.ops, pool: self.pool, fns: self.fns }
+    }
+}
+fn fnv16(s: &str) -> u16 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in s.bytes() { h ^= b as u32; h = h.wrapping_mul(0x01000193); }
+    h as u16
+}
+fn compile_ast(ast: &AnalysisResult) -> Program {
+    let mut c = Compiler::new();
+    c.emit_nodes(&ast.main_body);
+    c.ops.push(Op::Exit);
+    // emit top-level functions
+    for (_name, (_params, _ret, body)) in &ast.functions {
+        let fidx = c.fidx; c.fidx += 1;
+        let skip = c.ops.len();
+        c.ops.push(Op::Jump(0));
+        c.fns.insert(fidx, c.ops.len());
+        c.emit_nodes(body);
+        c.ops.push(Op::Return);
+        let off = c.ops.len() as i32 - skip as i32;
+        if let Op::Jump(ref mut o) = c.ops[skip] { *o = off; }
+    }
+    c.finish(ast)
+}
+// ═══════════════════════════════════════════════════════════
+// Public API
+// ═══════════════════════════════════════════════════════════
+pub fn run_command(file: String, verbose: bool) -> bool {
+    let _ = fs::create_dir_all(CACHE_DIR);
+    let hash = hash_file(&file);
+    let bcpath = PathBuf::from(CACHE_DIR).join(format!("{}.bc", hash));
+    let prog: Program = if bcpath.exists() {
+        if verbose { println!("{} Cache hit", "[*]".green()); }
+        match fs::read(&bcpath).ok()
+        .and_then(|b| bincode::deserialize::<Program>(&b).ok())
+        {
+            Some(p) => p,
+            None => {
+                if verbose { eprintln!("{} Cache corrupt, recompiling", "[!]".yellow()); }
+                build_and_cache(&file, &bcpath, verbose)
+            }
+        }
     } else {
-        program = generate_bytecode(&file_path, verbose);
-        let bc_data = bincode::serialize(&program).unwrap();
-        fs::write(bc_path, bc_data).unwrap();
-    }
+        build_and_cache(&file, &bcpath, verbose)
+    };
     let mut vm = VM::new();
     let start = Instant::now();
-    vm.run(program, verbose, false); // JIT disabled by default in run_command
-    if verbose {
-        println!("{} Execution time: {:?}", "[INFO]".blue(), start.elapsed());
-    }
+    vm.run(&prog);
+    if verbose { println!("{} Done in {:?}", "[*]".blue(), start.elapsed()); }
     true
 }
-
-fn get_plsa_path() -> PathBuf {
-    let home = dirs::home_dir().expect("Failed to determine home directory");
-    let path = home.join(".hackeros/hacker-lang/bin").join(PLSA_BIN_NAME);
-    if !path.exists() {
-        eprintln!("{} Critical Error: {} not found at {:?}", "[x]".red(), PLSA_BIN_NAME, path);
-        std::process::exit(127);
-    }
-    path
-}
-
-fn get_file_hash(path: &str) -> String {
-    let bytes = fs::read(path).unwrap_or(vec![]);
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
-
-fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
-    if verbose { println!("{} Cache miss. Analyzing source.", "[*]".yellow()); }
-    let plsa_path = get_plsa_path();
-    let output = Command::new(&plsa_path)
-    .arg(file_path)
-    .arg("--json")
-    .arg("--resolve-libs")
-    .output()
-    .expect(&format!("Failed to run hl-plsa at {:?}", plsa_path));
-    if !output.status.success() {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-        std::process::exit(1);
-    }
-    let ast: AnalysisResult = serde_json::from_slice(&output.stdout).expect("Invalid JSON from PLSA");
+fn build_and_cache(file: &str, bcpath: &PathBuf, verbose: bool) -> Program {
+    if verbose { println!("{} Compiling {}", "[*]".yellow(), file); }
+    let mut seen = HashSet::new();
+    let ast = match hl_plsa::parse_file(file, true, verbose, &mut seen) {
+        Ok(a) => a,
+        Err(e) => { for err in e { eprintln!("{:?}", err); } std::process::exit(1); }
+    };
     if verbose && ast.is_potentially_unsafe {
-        println!("{} Warning: Script contains privileged commands.", "[!]".yellow());
+        eprintln!("{} Script has privileged commands", "[!]".yellow());
     }
-    compile_to_bytecode(&ast)
+    let prog = compile_ast(&ast);
+    if let Ok(b) = bincode::serialize(&prog) { let _ = fs::write(bcpath, b); }
+    prog
+}
+fn hash_file(path: &str) -> String {
+    let b = fs::read(path).unwrap_or_default();
+    let mut h = Sha256::new(); h.update(&b);
+    hex::encode(h.finalize())
 }
