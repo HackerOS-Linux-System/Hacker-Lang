@@ -1,5 +1,4 @@
 #![allow(dead_code, unused_assignments, unused_variables)]
-
 use chumsky::prelude::*;
 use chumsky::Parser as ChumskyParser;
 use miette::{Diagnostic, NamedSource, SourceSpan};
@@ -13,6 +12,7 @@ use colored::Colorize;
 pub const HACKER_DIR_SUFFIX: &str = ".hackeros/hacker-lang";
 
 // --- AST Structures ---
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     I32(i32),
@@ -38,26 +38,26 @@ pub enum Expr {
 pub enum Stmt {
     Raw(String),
     AssignGlobal { key: String, ty: Option<String>, val: Expr },
-    AssignLocal  { key: String, ty: Option<String>, val: Expr },
-    LoopTimes    { count: u64, body: Vec<Stmt> },
-    If           { cond: Expr, body: Vec<Stmt> },
+    AssignLocal { key: String, ty: Option<String>, val: Expr },
+    LoopTimes { count: u64, body: Vec<Stmt> },
+    If { cond: Expr, body: Vec<Stmt> },
     Background(Vec<Stmt>),
-    Plugin       { name: String, is_super: bool },
-    Function     { name: String, params: Vec<(String, String)>, ret_ty: Option<String>, body: Vec<Stmt> },
-    Return       { expr: Expr },
-    Object       {
+    Plugin { name: String, is_super: bool },
+    Function { name: String, params: Vec<(String, String)>, ret_ty: Option<String>, body: Vec<Stmt> },
+    Return { expr: Expr },
+    Object {
         name: String,
         fields: Vec<(bool, String, String, Option<Expr>)>,
         methods: HashMap<String, (Vec<(String, String)>, Option<String>, Vec<Stmt>)>,
     },
-    Try          { body: Vec<Stmt>, catches: Vec<(String, String, Vec<Stmt>)>, finally: Option<Vec<Stmt>> },
-    Match        { expr: Expr, arms: Vec<(Expr, Vec<Stmt>)> },
-    For          { var: String, iter: Expr, body: Vec<Stmt> },
-    ForIndexed   { idx: String, var: String, iter: Expr, body: Vec<Stmt> },
-    While        { cond: Expr, body: Vec<Stmt> },
+    Try { body: Vec<Stmt>, catches: Vec<(String, String, Vec<Stmt>)>, finally: Option<Vec<Stmt>> },
+    Match { expr: Expr, arms: Vec<(Expr, Vec<Stmt>)> },
+    For { var: String, iter: Expr, body: Vec<Stmt> },
+    ForIndexed { idx: String, var: String, iter: Expr, body: Vec<Stmt> },
+    While { cond: Expr, body: Vec<Stmt> },
     Break,
     Continue,
-    Import       { prefix: String, name: String },
+    Import { prefix: String, name: String, version: Option<String> },
 }
 
 impl Default for Stmt {
@@ -88,6 +88,7 @@ pub struct AnalysisResult {
 }
 
 // --- Parse Errors ---
+
 #[derive(Error, Debug, Diagnostic)]
 pub enum ParseError {
     #[error("Syntax Error")]
@@ -112,6 +113,7 @@ pub enum ParseError {
 }
 
 // --- Parser ---
+
 fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
     recursive(|stmt| {
         let ident = text::ident().padded();
@@ -340,23 +342,25 @@ fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
         )
         .map(|(cond, body)| Stmt::While { cond, body });
 
-        let break_stmt    = just("break").to(Stmt::Break);
+        let break_stmt = just("break").to(Stmt::Break);
         let continue_stmt = just("continue").to(Stmt::Continue);
 
         let import_stmt = just('#')
-        .ignore_then(ident.clone())
-        .then_ignore(just(':'))
-        .then(ident.clone())
-        .map(|(prefix, name)| Stmt::Import { prefix, name });
+        .ignore_then(just('<'))
+        .ignore_then(text::ident())
+        .then_ignore(just('/'))
+        .then(filter(|c| *c != ':' && *c != '>').repeated().map(|chars: Vec<char>| chars.into_iter().collect::<String>()))
+        .then(just(':').ignore_then(filter(|c| *c != '>').repeated().map(|chars: Vec<char>| chars.into_iter().collect::<String>())).or_not())
+        .then_ignore(just('>'))
+        .map(|((prefix, name), version)| Stmt::Import { prefix, name, version });
 
         let plugin = just('\\')
         .ignore_then(ident)
         .map(|name| Stmt::Plugin { name, is_super: false });
 
-        let raw = take_until(end().or(just('!').ignored()))
-        .map(|(chars, _)| {
-            Stmt::Raw(chars.into_iter().collect::<String>().trim().to_string())
-        });
+        let raw = just('>')
+        .ignore_then(take_until(just('\n').ignored().or(end()).or(just('!').ignored())))
+        .map(|(chars, _): (Vec<char>, ())| Stmt::Raw(chars.into_iter().collect::<String>().trim().to_string()));
 
         let decorated = choice((just('^').to(true), just('&').to(false)))
         .or_not()
@@ -385,7 +389,7 @@ fn parser() -> impl Parser<char, Vec<Stmt>, Error = Simple<char>> {
             }
         });
 
-        decorated.padded().recover_with(skip_then_retry_until([]))
+        decorated.padded().recover_with(skip_until(['\n'], |_| Stmt::default()))
     })
     .repeated()
     .then_ignore(end())
@@ -431,6 +435,7 @@ pub fn parse_file(
                     .safety_warnings
                     .push(format!("Line {}: Potential destructive command", idx + 1));
                 }
+
                 let node = ProgramNode {
                     line_num: idx + 1,
                     is_sudo: false,
@@ -438,6 +443,7 @@ pub fn parse_file(
                     original_text: String::new(),
                     span: (0, 0),
                 };
+
                 match stmt {
                     Stmt::Function { name, params, ret_ty, body } => {
                         let body_nodes = body
@@ -455,63 +461,78 @@ pub fn parse_file(
                     Stmt::Object { name, .. } => {
                         result.objects.insert(name.clone(), node.clone());
                     }
-                    Stmt::Import { prefix, name } => {
+                    Stmt::Import { prefix, name, version } => {
                         let lib_key = format!("{}:{}", prefix, name);
                         if seen_libs.contains(&lib_key) {
                             continue;
                         }
                         seen_libs.insert(lib_key.clone());
-                        result.libs.push(lib_key.clone());
 
-                        if resolve_libs {
-                            let libs_dir = if prefix == "local" {
-                                PathBuf::from(path)
-                                .parent()
-                                .unwrap()
-                                .to_path_buf()
-                            } else if prefix == "core" {
-                                PathBuf::from("/usr/lib/Hacker-Lang/libs/core")
-                            } else {
-                                dirs::home_dir()
-                                .unwrap()
-                                .join(HACKER_DIR_SUFFIX)
-                                .join("libs")
-                            };
-                            let lib_path = libs_dir.join(format!("{}.hl", name));
-                            if verbose {
-                                println!(
-                                    "{} Resolving library: {:?}",
-                                    "[*]".blue(),
-                                         lib_path
-                                );
+                        if prefix == "bytes" || prefix == "crates" {
+                            let dep_str = format!("{} = \"{}\"", name.replace("-", "_"), version.clone().unwrap_or("*".to_string()));
+                            result.deps.push(dep_str);
+                        } else if prefix == "github" {
+                            let repo_name = name.split('/').last().map(|s| s.replace(".git", "")).unwrap_or(name.clone());
+                            let mut git_str = format!("{} = {{ git = \"https://github.com/{}\"", repo_name.replace("-", "_"), name);
+                            if let Some(v) = version.clone() {
+                                git_str.push_str(&format!(", branch = \"{}\"", v));
                             }
-                            if lib_path.exists() {
-                                if let Ok(lib_res) = parse_file(
-                                    lib_path.to_str().unwrap(),
-                                                                resolve_libs,
-                                                                verbose,
-                                                                seen_libs,
-                                ) {
-                                    result.deps.extend(lib_res.deps);
-                                    result.libs.extend(lib_res.libs);
-                                    for (k, v) in lib_res.functions {
-                                        result.functions.insert(k, v);
-                                    }
-                                    result.objects.extend(lib_res.objects);
-                                    if lib_res.is_potentially_unsafe {
-                                        result.is_potentially_unsafe = true;
-                                        result.safety_warnings.push(format!(
-                                            "Imported library {} contains unsafe code",
-                                            name
-                                        ));
-                                    }
+                            git_str.push_str(" }");
+                            result.deps.push(git_str);
+                        } else {
+                            result.libs.push(lib_key.clone());
+                            if resolve_libs {
+                                let libs_dir = if prefix == "local" {
+                                    PathBuf::from(path)
+                                    .parent()
+                                    .unwrap()
+                                    .to_path_buf()
+                                } else if prefix == "core" {
+                                    PathBuf::from("/usr/lib/Hacker-Lang/libs/core")
+                                } else {
+                                    dirs::home_dir()
+                                    .unwrap()
+                                    .join(HACKER_DIR_SUFFIX)
+                                    .join("libs")
+                                };
+
+                                let lib_path = libs_dir.join(format!("{}.hl", name));
+                                if verbose {
+                                    println!(
+                                        "{} Resolving library: {:?}",
+                                        "[*]".blue(),
+                                             lib_path
+                                    );
                                 }
-                            } else if verbose {
-                                eprintln!(
-                                    "{} Library source not found at {:?}",
-                                    "[!]".yellow(),
-                                          lib_path
-                                );
+
+                                if lib_path.exists() {
+                                    if let Ok(lib_res) = parse_file(
+                                        lib_path.to_str().unwrap(),
+                                                                    resolve_libs,
+                                                                    verbose,
+                                                                    seen_libs,
+                                    ) {
+                                        result.deps.extend(lib_res.deps);
+                                        result.libs.extend(lib_res.libs);
+                                        for (k, v) in lib_res.functions {
+                                            result.functions.insert(k, v);
+                                        }
+                                        result.objects.extend(lib_res.objects);
+                                        if lib_res.is_potentially_unsafe {
+                                            result.is_potentially_unsafe = true;
+                                            result.safety_warnings.push(format!(
+                                                "Imported library {} contains unsafe code",
+                                                name
+                                            ));
+                                        }
+                                    }
+                                } else if verbose {
+                                    eprintln!(
+                                        "{} Library source not found at {:?}",
+                                        "[!]".yellow(),
+                                              lib_path
+                                    );
+                                }
                             }
                         }
                     }
