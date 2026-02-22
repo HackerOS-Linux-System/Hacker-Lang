@@ -1,12 +1,12 @@
 [package]
-name    = "hl-plsa"
-version = "1.7.0"
+name = "hl-plsa"
+version = "1.6.3"
 edition = "2021"
 
 [dependencies]
-chumsky   = "0.9.3"
-serde     = { version = "1.0", features = ["derive"] }
-miette    = { version = "5.10", features = ["fancy"] }
+chumsky = "0.9.3"
+serde = { version = "1.0", features = ["derive"] }
+miette = { version = "5.10", features = ["fancy"] }
 thiserror = "1.0"
-colored   = "2.0"
-dirs      = "5.0"
+colored = "2.0"
+dirs = "5.0"
