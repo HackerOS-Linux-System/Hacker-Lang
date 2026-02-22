@@ -10,17 +10,13 @@ use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Tar
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue, ValueKind};
 use inkwell::{AddressSpace, IntPredicate, OptimizationLevel};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::process::Command;
-use hl_plsa::{AnalysisResult, Expr, ProgramNode, Stmt, Value as HlVal};
-
-const PLSA_BIN_NAME: &str = "hl-plsa";
-
+use hl_plsa::{parse_file, AnalysisResult, Expr, ProgramNode, Stmt, Value as HlVal};
 // ─────────────────────────────────────────────────────────────
 // AST optimiser
 // ─────────────────────────────────────────────────────────────
-
 fn fold_node(node: &ProgramNode) -> ProgramNode {
     ProgramNode {
         line_num: node.line_num,
@@ -30,18 +26,20 @@ fn fold_node(node: &ProgramNode) -> ProgramNode {
         span: node.span,
     }
 }
-
 fn fold_stmt(s: &Stmt) -> Stmt {
     match s {
-        Stmt::Function { name, params, ret_ty, body } => Stmt::Function {
+        Stmt::Function { name, params, ret_ty, body, is_quick } => Stmt::Function {
             name: name.clone(),
             params: params.clone(),
             ret_ty: ret_ty.clone(),
             body: body.iter().map(fold_stmt).collect(),
+            is_quick: *is_quick,
         },
-        Stmt::If { cond, body } => Stmt::If {
+        Stmt::If { cond, body, else_ifs, else_body } => Stmt::If {
             cond: cond.clone(),
             body: body.iter().map(fold_stmt).collect(),
+            else_ifs: else_ifs.iter().map(|(c, b)| (c.clone(), b.iter().map(fold_stmt).collect())).collect(),
+                else_body: else_body.as_ref().map(|b| b.iter().map(fold_stmt).collect()),
         },
         Stmt::While { cond, body } => Stmt::While {
             cond: cond.clone(),
@@ -58,17 +56,18 @@ fn fold_stmt(s: &Stmt) -> Stmt {
             iter: iter.clone(),
             body: body.iter().map(fold_stmt).collect(),
         },
-        Stmt::LoopTimes { count, body } => Stmt::LoopTimes {
+        Stmt::Repeat { count, body } => Stmt::Repeat {
             count: *count,
             body: body.iter().map(fold_stmt).collect(),
         },
-        Stmt::Try { body, catches, finally } => Stmt::Try {
+        Stmt::Try { body, catches, finally, else_body } => Stmt::Try {
             body: body.iter().map(fold_stmt).collect(),
             catches: catches
             .iter()
             .map(|(v, t, b)| (v.clone(), t.clone(), b.iter().map(fold_stmt).collect()))
             .collect(),
             finally: finally.as_ref().map(|b| b.iter().map(fold_stmt).collect()),
+            else_body: else_body.as_ref().map(|b| b.iter().map(fold_stmt).collect()),
         },
         Stmt::Match { expr, arms } => Stmt::Match {
             expr: expr.clone(),
@@ -89,27 +88,22 @@ fn fold_stmt(s: &Stmt) -> Stmt {
         other => other.clone(),
     }
 }
-
 pub fn optimise(ast: &mut AnalysisResult) {
     ast.main_body = ast.main_body.iter().map(fold_node).collect();
-    for (_name, (_params, _ret, body)) in ast.functions.iter_mut() {
+    for (_name, (_params, _ret, body, _is_quick)) in ast.functions.iter_mut() {
         *body = body.iter().map(fold_node).collect();
     }
 }
-
 // ─────────────────────────────────────────────────────────────
 // String interner
 // ─────────────────────────────────────────────────────────────
-
 struct Strings<'ctx> {
     cache: HashMap<String, PointerValue<'ctx>>,
 }
-
 impl<'ctx> Strings<'ctx> {
     fn new() -> Self {
         Strings { cache: HashMap::new() }
     }
-
     fn get(&mut self, s: &str, m: &Module<'ctx>, ctx: &'ctx Context) -> PointerValue<'ctx> {
         if let Some(&p) = self.cache.get(s) {
             return p;
@@ -126,11 +120,9 @@ impl<'ctx> Strings<'ctx> {
         ptr
     }
 }
-
 // ─────────────────────────────────────────────────────────────
 // Code generator
 // ─────────────────────────────────────────────────────────────
-
 struct CG<'ctx> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
@@ -140,7 +132,6 @@ struct CG<'ctx> {
     loops: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
     strs: Strings<'ctx>,
 }
-
 impl<'ctx> CG<'ctx> {
     fn new(ctx: &'ctx Context, module: Module<'ctx>) -> Self {
         CG {
@@ -153,7 +144,6 @@ impl<'ctx> CG<'ctx> {
             strs: Strings::new(),
         }
     }
-
     fn ty(&self, name: &str) -> BasicTypeEnum<'ctx> {
         match name {
             "i8" | "u8" => self.ctx.i8_type().into(),
@@ -169,10 +159,9 @@ impl<'ctx> CG<'ctx> {
             .unwrap_or_else(|| self.ctx.i64_type().into()),
         }
     }
-
     fn expr(&mut self, e: &Expr) -> BasicValueEnum<'ctx> {
         match e {
-            Expr::Lit(HlVal::I32(n)) => self.ctx.i64_type().const_int(*n as u64, *n < 0).into(),
+            Expr::Lit(HlVal::I32(n)) => self.ctx.i64_type().const_int((*n as i64) as u64, false).into(),
             Expr::Lit(HlVal::F64(f)) => self.ctx.f64_type().const_float(*f).into(),
             Expr::Lit(HlVal::Bool(b)) => self.ctx.bool_type().const_int(*b as u64, false).into(),
             Expr::Lit(HlVal::Str(s)) => self.strs.get(s, &self.module, self.ctx).into(),
@@ -205,49 +194,47 @@ impl<'ctx> CG<'ctx> {
             Expr::Call { name, args } => {
                 let args_vals: Vec<BasicValueEnum<'ctx>> = args.iter().map(|a| self.expr(a)).collect();
                 if let Some(func) = self.module.get_function(name) {
+                    let args_meta: Vec<BasicMetadataValueEnum<'ctx>> = args_vals.iter().map(|&v| v.into()).collect();
                     let call = self.builder.build_call(
                         func,
-                        &args_vals.iter().cloned().map(Into::into).collect::<Vec<BasicMetadataValueEnum<'ctx>>>(),
-                                                       "call",
+                        &args_meta,
+                        "call",
                     ).unwrap();
                     match call.try_as_basic_value() {
-                        ValueKind::Basic(val) => return val,
-                        _ => {}
+                        ValueKind::Basic(val) => val,
+                        _ => self.ctx.i64_type().const_zero().into()
                     }
+                } else {
+                    self.ctx.i64_type().const_zero().into()
                 }
-                self.ctx.i64_type().const_zero().into()
             }
             _ => self.ctx.i64_type().const_zero().into(),
         }
     }
-
     fn nodes(&mut self, nodes: &[ProgramNode]) {
         for node in nodes {
             self.node(node);
         }
     }
-
     fn node(&mut self, node: &ProgramNode) {
         self.stmt(&node.content, node.is_sudo);
     }
-
     fn stmts(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             self.stmt(stmt, false);
         }
     }
-
     fn stmt(&mut self, stmt: &Stmt, is_sudo: bool) {
         let Some(fn_val) = self.cur_fn else { return; };
         match stmt {
-            Stmt::Raw(cmd) => {
+            Stmt::Raw { mode, cmd } => {
                 let cmd_str = if is_sudo {
                     if cmd.starts_with("sudo ") { cmd.clone() } else { format!("sudo {}", cmd) }
                 } else {
                     cmd.clone()
                 };
-                if cmd.starts_with("echo ") {
-                    let msg = cmd[5..].trim();
+                if mode == ">" && cmd_str.starts_with("echo ") {
+                    let msg = cmd_str[5..].trim();
                     let fmt = self.strs.get("%s\n", &self.module, self.ctx);
                     let text = self.strs.get(msg, &self.module, self.ctx);
                     let pf = self.printf();
@@ -273,7 +260,7 @@ impl<'ctx> CG<'ctx> {
                 let v = self.expr(expr);
                 self.builder.build_return(Some(&v)).unwrap();
             }
-            Stmt::If { cond, body } => {
+            Stmt::If { cond, body, else_ifs: _, else_body: _ } => {
                 let then_bb = self.ctx.append_basic_block(fn_val, "then");
                 let merge_bb = self.ctx.append_basic_block(fn_val, "ifcont");
                 let cond_val = self.expr(cond).into_int_value();
@@ -285,7 +272,7 @@ impl<'ctx> CG<'ctx> {
                 }
                 self.builder.position_at_end(merge_bb);
             }
-            Stmt::Function { name, params, ret_ty, body } => {
+            Stmt::Function { name, params, ret_ty, body, is_quick: _ } => {
                 let temp_body: Vec<ProgramNode> = body.iter().map(|s| ProgramNode {
                     line_num: 0,
                     is_sudo: false,
@@ -295,7 +282,7 @@ impl<'ctx> CG<'ctx> {
                 }).collect();
                 self.emit_fn(name, params, ret_ty.as_deref(), &temp_body);
             }
-            Stmt::LoopTimes { count, body } => {
+            Stmt::Repeat { count, body } => {
                 let desugar = Stmt::For {
                     var: "i".to_string(),
                     iter: Expr::Lit(HlVal::Str(format!("0..{}", count))),
@@ -306,7 +293,6 @@ impl<'ctx> CG<'ctx> {
             _ => { /* pomijamy na razie inne konstrukcje */ }
         }
     }
-
     fn emit_fn(
         &mut self,
         name: &str,
@@ -319,26 +305,22 @@ impl<'ctx> CG<'ctx> {
         .iter()
         .map(|(_, t)| self.ty(t).into())
         .collect();
-
         let fn_type = match ret_ty {
             Some(BasicTypeEnum::IntType(it)) => it.fn_type(&param_types, false),
             Some(BasicTypeEnum::FloatType(ft)) => ft.fn_type(&param_types, false),
             Some(BasicTypeEnum::PointerType(pt)) => pt.fn_type(&param_types, false),
             _ => self.ctx.void_type().fn_type(&param_types, false),
         };
-
         let func = self.module.add_function(name, fn_type, None);
         if body.len() < 12 {
             let id = inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline");
             let attr = self.ctx.create_enum_attribute(id, 0);
             func.add_attribute(AttributeLoc::Function, attr);
         }
-
         let entry = self.ctx.append_basic_block(func, "entry");
         let prev_fn = self.cur_fn;
         self.cur_fn = Some(func);
         self.builder.position_at_end(entry);
-
         for (i, (pname, pty_str)) in params.iter().enumerate() {
             let pty = self.ty(pty_str);
             let alloca = self.builder.build_alloca(pty, pname).unwrap();
@@ -346,15 +328,12 @@ impl<'ctx> CG<'ctx> {
             self.builder.build_store(alloca, param_val).unwrap();
             self.syms.insert(pname.clone(), (alloca, pty));
         }
-
         self.nodes(body);
-
         if ret_ty_str.is_none() && self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.builder.build_return(None).unwrap();
         }
         self.cur_fn = prev_fn;
     }
-
     fn system(&self) -> FunctionValue<'ctx> {
         self.module.get_function("system").unwrap_or_else(|| {
             let ptr_t = self.ctx.ptr_type(AddressSpace::default());
@@ -365,7 +344,6 @@ impl<'ctx> CG<'ctx> {
             )
         })
     }
-
     fn printf(&self) -> FunctionValue<'ctx> {
         self.module.get_function("printf").unwrap_or_else(|| {
             let ptr_t = self.ctx.ptr_type(AddressSpace::default());
@@ -376,7 +354,6 @@ impl<'ctx> CG<'ctx> {
             )
         })
     }
-
     fn gc_root(&self, ptr: PointerValue<'ctx>) {
         let null = self.ctx.ptr_type(AddressSpace::default()).const_null();
         let gcroot = self.module.get_function("llvm.gcroot").unwrap_or_else(|| {
@@ -391,70 +368,44 @@ impl<'ctx> CG<'ctx> {
         self.builder.build_call(gcroot, &[ptr.into(), null.into()], "gcroot").unwrap();
     }
 }
-
 // ─────────────────────────────────────────────────────────────
 // Główna funkcja kompilacji
 // ─────────────────────────────────────────────────────────────
-
 pub fn compile_command(file: String, output: String, verbose: bool) -> bool {
-    let plsa_path = find_plsa();
-    let output_plsa = Command::new(&plsa_path)
-    .arg(&file)
-    .arg("--json")
-    .output();
-
-    let out = match output_plsa {
-        Ok(out) => {
-            if !out.status.success() {
-                eprintln!("{}", String::from_utf8_lossy(&out.stderr));
-                return false;
+    let mut seen_libs = HashSet::new();
+    let parse_result = parse_file(&file, true, verbose, &mut seen_libs);
+    let mut ast = match parse_result {
+        Ok(ast) => ast,
+        Err(errors) => {
+            for error in errors {
+                eprintln!("{}", error);
             }
-            out
-        }
-        Err(err) => {
-            eprintln!("Cannot run hl-plsa: {}", err);
             return false;
         }
     };
-
-    let mut ast: AnalysisResult = match serde_json::from_slice(&out.stdout) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("JSON parse error: {}", e);
-            return false;
-        }
-    };
-
     optimise(&mut ast);
-
     if verbose {
         println!("{} Generating LLVM IR...", "[]".green());
     }
-
     let ctx = Context::create();
     let module = ctx.create_module("hackerlang");
     let mut cg = CG::new(&ctx, module);
-
     let i32_ty = ctx.i32_type();
     let main_fn = cg.module.add_function("main", i32_ty.fn_type(&[], false), None);
     let entry = ctx.append_basic_block(main_fn, "entry");
     cg.builder.position_at_end(entry);
     cg.cur_fn = Some(main_fn);
     cg.nodes(&ast.main_body);
-
     if cg.builder.get_insert_block().unwrap().get_terminator().is_none() {
         cg.builder.build_return(Some(&i32_ty.const_zero())).unwrap();
     }
     cg.cur_fn = None;
-
-    for (name, (params, ret_ty, body)) in &ast.functions {
+    for (name, (params, ret_ty, body, _)) in &ast.functions {
         cg.emit_fn(name, params, ret_ty.as_deref(), body);
     }
-
     // ─────────────────────────────────────────────────────────────
     // NEW PASS MANAGER (LLVM 14+)
     // ─────────────────────────────────────────────────────────────
-
     Target::initialize_native(&InitializationConfig::default()).unwrap();
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).unwrap();
@@ -466,30 +417,24 @@ pub fn compile_command(file: String, output: String, verbose: bool) -> bool {
         RelocMode::PIC,
         CodeModel::Default,
     ).unwrap();
-
     if verbose {
         println!("{} Optimizing with New Pass Manager...", "[]".green());
     }
-
     let pb_options = PassBuilderOptions::create();
     pb_options.set_verify_each(true);
     pb_options.set_debug_logging(verbose);
-
     if let Err(e) = cg.module.run_passes("default<O3>", &tm, pb_options) {
         eprintln!("Optimization failed: {:?}", e);
         return false;
     }
-
     let obj_path = format!("{}.o", output);
     if let Err(e) = tm.write_to_file(&cg.module, FileType::Object, Path::new(&obj_path)) {
         eprintln!("Failed to write object file: {}", e);
         return false;
     }
-
     if verbose {
         println!("{} Linking...", "[]".green());
     }
-
     let mut linker = Command::new("clang");
     linker
     .arg(&obj_path)
@@ -501,32 +446,19 @@ pub fn compile_command(file: String, output: String, verbose: bool) -> bool {
     .arg("-Wl,--gc-sections")
     .arg("-Wl,--strip-all")
     .arg("-lhl_runtime");
-
-    match linker.status() {
-        Ok(status) if status.success() => {
+    if let Ok(status) = linker.status() {
+        if status.success() {
             let _ = std::fs::remove_file(&obj_path);
             if verbose {
                 println!("{} {}", "[OK]".green(), output);
             }
             true
-        }
-        Ok(_) => {
+        } else {
             eprintln!("{} Linking failed", "[ERROR]".red());
             false
         }
-        Err(e) => {
-            eprintln!("Cannot run clang: {}", e);
-            false
-        }
+    } else {
+        eprintln!("Cannot run clang");
+        false
     }
-}
-
-fn find_plsa() -> PathBuf {
-    let home = dirs::home_dir().expect("No $HOME directory");
-    let path = home.join(".hackeros/hacker-lang/bin").join(PLSA_BIN_NAME);
-    if !path.exists() {
-        eprintln!("hl-plsa binary not found at {:?}", path);
-        std::process::exit(127);
-    }
-    path
 }
