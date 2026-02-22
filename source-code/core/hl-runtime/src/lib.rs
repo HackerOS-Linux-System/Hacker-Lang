@@ -13,7 +13,6 @@ use dynasmrt::{dynasm, DynasmApi, AssemblyOffset};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use hl_plsa::{AnalysisResult, ProgramNode, Stmt};
-
 const CACHE_DIR: &str = "/tmp/hl_cache";
 const PLSA_BIN_NAME: &str = "hl-plsa";
 // ═══════════════════════════════════════════════════════════
@@ -557,7 +556,7 @@ impl Compiler {
     }
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Raw(s) => {
+            Stmt::Raw { mode: _, cmd: s } => {
                 let i = self.pool.str_idx(s.clone());
                 self.ops.push(Op::Exec(i, false));
             }
@@ -566,13 +565,36 @@ impl Compiler {
                 let slot = fnv16(key);
                 self.ops.push(Op::StoreVar(slot));
             }
-            Stmt::If { cond, body } => {
+            Stmt::If { cond, body, else_ifs, else_body } => {
                 self.emit_expr(cond);
+                let mut patches: Vec<usize> = vec![];
                 let patch = self.ops.len();
                 self.ops.push(Op::JumpFalse(0));
                 self.emit_stmts(body);
+                let jump_out = self.ops.len();
+                self.ops.push(Op::Jump(0));
+                patches.push(jump_out);
                 let target = self.ops.len() as i32 - patch as i32;
                 if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = target; }
+                for (cond, body) in else_ifs {
+                    self.emit_expr(cond);
+                    let patch = self.ops.len();
+                    self.ops.push(Op::JumpFalse(0));
+                    self.emit_stmts(body);
+                    let jump_out = self.ops.len();
+                    self.ops.push(Op::Jump(0));
+                    patches.push(jump_out);
+                    let target = self.ops.len() as i32 - patch as i32;
+                    if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = target; }
+                }
+                if let Some(body) = else_body {
+                    self.emit_stmts(body);
+                }
+                let out = self.ops.len() as i32;
+                for p in patches {
+                    let dist = out - p as i32 - 1;
+                    if let Op::Jump(ref mut off) = self.ops[p] { *off = dist; }
+                }
             }
             Stmt::While { cond, body } => {
                 let loop_start = self.ops.len();
@@ -606,7 +628,7 @@ impl Compiler {
                 self.emit_expr(expr);
                 self.ops.push(Op::Return);
             }
-            Stmt::LoopTimes { count, body } => {
+            Stmt::Repeat { count, body } => {
                 for _ in 0..*count { self.emit_stmts(body); }
             }
             Stmt::Background(nodes) => {
@@ -617,7 +639,7 @@ impl Compiler {
     }
     fn emit_node(&mut self, node: &ProgramNode) {
         match &node.content {
-            Stmt::Raw(s) => {
+            Stmt::Raw { mode: _, cmd: s } => {
                 let i = self.pool.str_idx(s.clone());
                 self.ops.push(Op::Exec(i, node.is_sudo));
             }
@@ -626,13 +648,36 @@ impl Compiler {
                 let slot = fnv16(key);
                 self.ops.push(Op::StoreVar(slot));
             }
-            Stmt::If { cond, body } => {
+            Stmt::If { cond, body, else_ifs, else_body } => {
                 self.emit_expr(cond);
+                let mut patches: Vec<usize> = vec![];
                 let patch = self.ops.len();
                 self.ops.push(Op::JumpFalse(0));
                 self.emit_stmts(body);
+                let jump_out = self.ops.len();
+                self.ops.push(Op::Jump(0));
+                patches.push(jump_out);
                 let target = self.ops.len() as i32 - patch as i32;
                 if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = target; }
+                for (cond, body) in else_ifs {
+                    self.emit_expr(cond);
+                    let patch = self.ops.len();
+                    self.ops.push(Op::JumpFalse(0));
+                    self.emit_stmts(body);
+                    let jump_out = self.ops.len();
+                    self.ops.push(Op::Jump(0));
+                    patches.push(jump_out);
+                    let target = self.ops.len() as i32 - patch as i32;
+                    if let Op::JumpFalse(ref mut off) = self.ops[patch] { *off = target; }
+                }
+                if let Some(body) = else_body {
+                    self.emit_stmts(body);
+                }
+                let out = self.ops.len() as i32;
+                for p in patches {
+                    let dist = out - p as i32 - 1;
+                    if let Op::Jump(ref mut off) = self.ops[p] { *off = dist; }
+                }
             }
             Stmt::While { cond, body } => {
                 let loop_start = self.ops.len();
@@ -666,7 +711,7 @@ impl Compiler {
                 self.emit_expr(expr);
                 self.ops.push(Op::Return);
             }
-            Stmt::LoopTimes { count, body } => {
+            Stmt::Repeat { count, body } => {
                 for _ in 0..*count { self.emit_stmts(body); }
             }
             Stmt::Background(nodes) => {
@@ -725,7 +770,7 @@ fn compile_ast(ast: &AnalysisResult) -> Program {
     c.emit_nodes(&ast.main_body);
     c.ops.push(Op::Exit);
     // emit top-level functions
-    for (_name, (_params, _ret, body)) in &ast.functions {
+    for (_name, (_params, _ret, body, _is_quick)) in &ast.functions {
         let fidx = c.fidx; c.fidx += 1;
         let skip = c.ops.len();
         c.ops.push(Op::Jump(0));
