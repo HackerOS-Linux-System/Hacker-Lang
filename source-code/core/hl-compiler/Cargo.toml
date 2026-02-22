@@ -1,14 +1,12 @@
 [package]
 name = "hl-compiler"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 
 [dependencies]
 # Using master branch for modern LLVM support (NPM requires LLVM 14+)
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm17-0"] }
 either = "1.9"
-serde_json = "1.0"
 colored = "2.0"
 dirs = "5.0"
-serde = { version = "1.0", features = ["derive"] }
 hl-plsa = { path = "../hl-plsa" }
