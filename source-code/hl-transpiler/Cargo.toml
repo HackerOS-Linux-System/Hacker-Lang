@@ -1,0 +1,12 @@
+[package]
+name = "hl-transpiler"
+version = "1.7.1"
+edition = "2021"
+
+[dependencies]
+colored = "2.0"
+sha2 = "0.10"
+hex = "0.4"
+indicatif = "0.17"
+hl-plsa = { path = "../hl-plsa" }
+tempfile = "3.10"
