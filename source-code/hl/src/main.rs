@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 use owo_colors::colors::*;
 use hl_transpiler::compile_command;
 use hl_transpiler::run_command;
-const VERSION: &str = "1.7.1";
+const VERSION: &str = "1.7.0";
 const HACKER_DIR: &str = ".hackeros/hacker-lang";
 const BIN_DIR: &str = "bin";
 fn main() -> ExitCode {
@@ -32,9 +32,9 @@ fn main() -> ExitCode {
 			Short('h') | Long("help") => show_help = true,
 			Short('o') | Long("output") => {
 				output = Some(
-					parser.value().unwrap().into_string().unwrap(),
+					parser.value().unwrap().into_string().unwrap()
 				)
-			}
+			},
 			Long("verbose") => verbose = true,
 			Value(val) => {
 				let s = val.into_string().unwrap();
@@ -50,7 +50,7 @@ fn main() -> ExitCode {
 					);
 					show_help = true;
 				}
-			}
+			},
 			_ => {}
 		}
 	}
@@ -117,6 +117,81 @@ fn main() -> ExitCode {
 				eprintln!("{}", "ERROR: Expected a <file> argument.".red().bold());
 				println!("Usage: hl compile <file> [-o output] [--verbose]");
 				false
+			}
+		}
+		"check" => {
+			if let Some(f) = file {
+				let verbose_suffix = if verbose { " (verbose)" } else { "" };
+				println!(
+					"{} {}{}",
+			 "INFO: Checking syntax:".cyan().bold(),
+						 f,
+			 verbose_suffix
+				);
+				let home = match std::env::var("HOME") {
+					Ok(h) => h,
+					Err(_) => {
+						eprintln!("{}", "ERROR: HOME not set.".red().bold());
+						return ExitCode::from(1);
+					}
+				};
+				let bin_path = Path::new(&home).join(HACKER_DIR).join(BIN_DIR);
+				if !bin_path.exists() {
+					if let Err(e) = fs::create_dir_all(&bin_path) {
+						eprintln!("{} {}", "Failed to create bin dir:".red().bold(), e);
+						return ExitCode::from(1);
+					}
+				}
+				let temp_out = bin_path.join("check_temp");
+				let out_str = temp_out.to_str().unwrap().to_string();
+				let ok = compile_command(f, out_str.clone(), verbose);
+				if ok {
+					println!("{}", "SUCCESS: Syntax is correct.".green().bold());
+					let _ = fs::remove_file(&temp_out);
+				} else {
+					println!("{}", "ERROR: Syntax check failed.".red().bold());
+					let _ = fs::remove_file(&temp_out);
+				}
+				ok
+			} else {
+				eprintln!("{}", "ERROR: Expected a <file> argument.".red().bold());
+				println!("Usage: hl check <file> [--verbose]");
+				false
+			}
+		}
+		"clean" => {
+			if file.is_some() || output.is_some() {
+				eprintln!("{}", "ERROR: clean command takes no additional arguments.".red().bold());
+				println!("Usage: hl clean [--verbose]");
+				false
+			} else {
+				println!("{}", "INFO: Cleaning cache directory.".cyan().bold());
+				let home = match std::env::var("HOME") {
+					Ok(h) => h,
+					Err(_) => {
+						eprintln!("{}", "ERROR: HOME not set.".red().bold());
+						return ExitCode::from(1);
+					}
+				};
+				let cache_path = Path::new(&home).join(".cache").join("hacker-lang");
+				if !cache_path.exists() {
+					println!("{}", "INFO: Cache directory does not exist, nothing to clean.".cyan().bold());
+					true
+				} else {
+					match fs::remove_dir_all(&cache_path) {
+						Ok(_) => {
+							if let Err(e) = fs::create_dir_all(&cache_path) {
+								eprintln!("{} {}", "Warning: Failed to recreate cache dir:".red().bold(), e);
+							}
+							println!("{}", "SUCCESS: Cache cleaned.".green().bold());
+							true
+						}
+						Err(e) => {
+							eprintln!("{} {}", "ERROR: Failed to remove cache:".red().bold(), e);
+							false
+						}
+					}
+				}
 			}
 		}
 		"help" => {
@@ -230,6 +305,18 @@ fn help_command(show_banner: bool) -> bool {
 		"compile".cyan(),
 			 "Compile to native executable",
 		  "hl compile <file> [-o out] [--verbose]".yellow()
+	);
+	println!(
+		"{:<12} {:<32} {:<40}",
+		"check".cyan(),
+			 "Check syntax correctness",
+		  "hl check <file> [--verbose]".yellow()
+	);
+	println!(
+		"{:<12} {:<32} {:<40}",
+		"clean".cyan(),
+			 "Remove contents of cache directory",
+		  "hl clean".yellow()
 	);
 	println!(
 		"{:<12} {:<32} {:<40}",
