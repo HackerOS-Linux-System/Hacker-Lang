@@ -33,7 +33,7 @@ pub enum Expr {
     List(Vec<Expr>),
     Map(HashMap<String, Expr>),
     Wildcard,
-    Spawn { body: Vec<Stmt> },
+    Spawn { body: Vec<ProgramNode> },
     Await(Box<Expr>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,32 +41,31 @@ pub enum Stmt {
     Raw { mode: String, cmd: String },
     AssignGlobal { key: String, ty: Option<String>, val: Expr },
     AssignLocal { key: String, ty: Option<String>, val: Expr },
-    Repeat { count: u64, body: Vec<Stmt> },
-    If { cond: Expr, body: Vec<Stmt>, else_ifs: Vec<(Expr, Vec<Stmt>)>, else_body: Option<Vec<Stmt>> },
-    Background(Vec<Stmt>),
+    Repeat { count: u64, body: Vec<ProgramNode> },
+    If { cond: Expr, body: Vec<ProgramNode>, else_ifs: Vec<(Expr, Vec<ProgramNode>)>, else_body: Option<Vec<ProgramNode>> },
     Plugin { name: String, is_super: bool },
-    Function { name: String, params: Vec<(String, String)>, ret_ty: Option<String>, body: Vec<Stmt>, is_quick: bool },
+    Function { name: String, params: Vec<(String, String)>, ret_ty: Option<String>, body: Vec<ProgramNode>, is_quick: bool },
     Return { expr: Expr },
     Object {
         name: String,
         fields: Vec<(bool, String, String, Option<Expr>)>,
-        methods: HashMap<String, (Vec<(String, String)>, Option<String>, Vec<Stmt>)>,
+        methods: HashMap<String, (Vec<(String, String)>, Option<String>, Vec<ProgramNode>)>,
     },
-    Try { body: Vec<Stmt>, catches: Vec<(String, String, Vec<Stmt>)>, else_body: Option<Vec<Stmt>>, finally: Option<Vec<Stmt>> },
-    Match { expr: Expr, arms: Vec<(Expr, Vec<Stmt>)> },
-    For { var: String, iter: Expr, body: Vec<Stmt> },
-    ForIndexed { idx: String, var: String, iter: Expr, body: Vec<Stmt> },
-    While { cond: Expr, body: Vec<Stmt> },
+    Try { body: Vec<ProgramNode>, catches: Vec<(String, String, Vec<ProgramNode>)>, else_body: Option<Vec<ProgramNode>>, finally: Option<Vec<ProgramNode>> },
+    Match { expr: Expr, arms: Vec<(Expr, Vec<ProgramNode>)> },
+    For { var: String, iter: Expr, body: Vec<ProgramNode> },
+    ForIndexed { idx: String, var: String, iter: Expr, body: Vec<ProgramNode> },
+    While { cond: Expr, body: Vec<ProgramNode> },
     Break,
     Continue,
     Import { prefix: String, name: String, version: Option<String> },
     Expr(Expr),
-    Block(Vec<Stmt>),
+    Block(Vec<ProgramNode>),
     Log(String),
     Lock(String),
     Unlock(String),
-    WithLock { var: String, body: Vec<Stmt> },
-    Module { name: String, body: Vec<Stmt> },
+    WithLock { var: String, body: Vec<ProgramNode> },
+    Module { name: String, body: Vec<ProgramNode> },
 }
 impl Default for Stmt {
     fn default() -> Self {
@@ -168,9 +167,11 @@ fn build_expr(pair: Pair<'_, Rule>) -> Expr {
             let mut inners = pair.into_inner();
             let name = inners.next().unwrap().as_str().to_string();
             let mut args = vec![];
-            if let Some(arg_pair) = inners.next() {
-                for a in arg_pair.into_inner() {
-                    args.push(build_expr(a));
+            if let Some(args_pair) = inners.next() {
+                let mut arg_inners = args_pair.into_inner();
+                args.push(build_expr(arg_inners.next().unwrap()));
+                while arg_inners.next().is_some() {
+                    args.push(build_expr(arg_inners.next().unwrap()));
                 }
             }
             Expr::Call { name, args }
@@ -228,7 +229,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             }
             let ret_ty = inners.next().and_then(|r| r.into_inner().next()).map(|r| r.as_str().to_string());
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::Function { name, params, ret_ty, body, is_quick }
         }
         Rule::ret => {
@@ -247,8 +248,12 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             if let Some(fp) = fields_pair {
                 for f in fp.into_inner() {
                     let mut f_inners = f.into_inner();
-                    let mut_ = f_inners.next().is_some();
-                    let f_name = f_inners.next().unwrap().as_str().to_string();
+                    let first = f_inners.next().unwrap();
+                    let (mut_, f_name) = if first.as_str() == "mut" {
+                        (true, f_inners.next().unwrap().as_str().to_string())
+                    } else {
+                        (false, first.as_str().to_string())
+                    };
                     let f_ty = f_inners.next().unwrap().as_str().to_string();
                     let init = f_inners.next().and_then(|i| i.into_inner().next()).map(build_expr);
                     fields.push((mut_, f_name, f_ty, init));
@@ -267,7 +272,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
                 }
                 let m_ret_ty = m_inners.next().and_then(|mr| mr.into_inner().next()).map(|mr| mr.as_str().to_string());
                 let m_body_pair = m_inners.next().unwrap();
-                let m_body: Vec<Stmt> = m_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+                let m_body: Vec<ProgramNode> = m_body_pair.into_inner().map(build_program_node).collect();
                 methods.insert(m_name, (m_params, m_ret_ty, m_body));
             }
             Stmt::Object { name, fields, methods }
@@ -275,7 +280,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
         Rule::try_stmt => {
             let mut inners = pair.into_inner();
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             let mut catches = vec![];
             let mut else_body = None;
             let mut finally = None;
@@ -286,16 +291,16 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
                         let var = c_inners.next().unwrap().as_str().to_string();
                         let ty = c_inners.next().unwrap().as_str().to_string();
                         let c_body_pair = c_inners.next().unwrap();
-                        let c_body: Vec<Stmt> = c_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+                        let c_body: Vec<ProgramNode> = c_body_pair.into_inner().map(build_program_node).collect();
                         catches.push((var, ty, c_body));
                     }
                     Rule::else_body => {
                         let e_body_pair = next.into_inner().next().unwrap();
-                        else_body = Some(e_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect());
+                        else_body = Some(e_body_pair.into_inner().map(build_program_node).collect());
                     }
                     Rule::finally => {
                         let f_body_pair = next.into_inner().next().unwrap();
-                        finally = Some(f_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect());
+                        finally = Some(f_body_pair.into_inner().map(build_program_node).collect());
                     }
                     _ => unreachable!(),
                 }
@@ -311,7 +316,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
                 let mut a_inners = a.into_inner();
                 let pattern = build_expr(a_inners.next().unwrap());
                 let a_body_pair = a_inners.next().unwrap();
-                let a_body: Vec<Stmt> = a_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+                let a_body: Vec<ProgramNode> = a_body_pair.into_inner().map(build_program_node).collect();
                 arms.push((pattern, a_body));
             }
             Stmt::Match { expr, arms }
@@ -321,7 +326,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             let var = inners.next().unwrap().as_str().to_string();
             let iter = build_expr(inners.next().unwrap());
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::For { var, iter, body }
         }
         Rule::for_indexed => {
@@ -330,21 +335,21 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             let var = inners.next().unwrap().as_str().to_string();
             let iter = build_expr(inners.next().unwrap());
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::ForIndexed { idx, var, iter, body }
         }
         Rule::while_stmt => {
             let mut inners = pair.into_inner();
             let cond = build_expr(inners.next().unwrap());
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::While { cond, body }
         }
         Rule::if_stmt => {
             let mut inners = pair.into_inner();
             let cond = build_expr(inners.next().unwrap());
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             let mut else_ifs = vec![];
             let mut else_body = None;
             while let Some(next) = inners.next() {
@@ -353,12 +358,12 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
                         let mut el_inners = next.into_inner();
                         let el_cond = build_expr(el_inners.next().unwrap());
                         let el_body_pair = el_inners.next().unwrap();
-                        let el_body: Vec<Stmt> = el_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+                        let el_body: Vec<ProgramNode> = el_body_pair.into_inner().map(build_program_node).collect();
                         else_ifs.push((el_cond, el_body));
                     }
                     Rule::else_body => {
                         let e_body_pair = next.into_inner().next().unwrap();
-                        else_body = Some(e_body_pair.into_inner().map(build_program_node).map(|n| n.content).collect());
+                        else_body = Some(e_body_pair.into_inner().map(build_program_node).collect());
                     }
                     _ => unreachable!(),
                 }
@@ -369,7 +374,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             let mut inners = pair.into_inner();
             let count: u64 = inners.next().unwrap().as_str().parse().unwrap();
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::Repeat { count, body }
         }
         Rule::break_stmt => Stmt::Break,
@@ -386,13 +391,14 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             Stmt::Plugin { name, is_super: false }
         }
         Rule::raw => {
-            let mut inners = pair.into_inner();
-            let mode = inners.next().unwrap().as_str().to_string();
-            let cmd = inners.next().unwrap().as_str().trim().to_string();
+            let s = pair.as_str();
+            let mode_len = if s.starts_with(">>>") { 3 } else if s.starts_with(">>") { 2 } else if s.starts_with(">") { 1 } else { 0 };
+            let mode = s[0..mode_len].to_string();
+            let cmd = s[mode_len..].trim().to_string();
             Stmt::Raw { mode, cmd }
         }
         Rule::block => {
-            let body: Vec<Stmt> = pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = pair.into_inner().map(build_program_node).collect();
             Stmt::Block(body)
         }
         Rule::expr_stmt => Stmt::Expr(build_expr(pair.into_inner().next().unwrap())),
@@ -406,14 +412,14 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Stmt {
             let mut inners = pair.into_inner();
             let var = inners.next().unwrap().as_str().to_string();
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::WithLock { var, body }
         }
         Rule::module_stmt => {
             let mut inners = pair.into_inner();
             let name = inners.next().unwrap().as_str().to_string();
             let body_pair = inners.next().unwrap();
-            let body: Vec<Stmt> = body_pair.into_inner().map(build_program_node).map(|n| n.content).collect();
+            let body: Vec<ProgramNode> = body_pair.into_inner().map(build_program_node).collect();
             Stmt::Module { name, body }
         }
         Rule::await_stmt => Stmt::Expr(Expr::Await(Box::new(build_expr(pair.into_inner().next().unwrap())))),
@@ -438,7 +444,7 @@ fn build_program_node(pair: Pair<'_, Rule>) -> ProgramNode {
     if is_bg {
         content = match content {
             Stmt::Block(body) => Stmt::Expr(Expr::Spawn { body }),
-            s => Stmt::Expr(Expr::Spawn { body: vec![s] }),
+            s => Stmt::Expr(Expr::Spawn { body: vec![ProgramNode { content: s, span: (start, end), original_text: "".to_string(), ..Default::default() }] }),
         };
     }
     ProgramNode {
@@ -450,15 +456,34 @@ fn build_program_node(pair: Pair<'_, Rule>) -> ProgramNode {
     }
 }
 fn is_dangerous(stmt: &Stmt) -> bool {
-    if let Stmt::Raw { cmd, .. } = stmt {
-        let dangerous_patterns = ["rm -rf", "mkfs", "dd if=", ":(){:|:&};:", "> /dev/sda"];
-        for pat in dangerous_patterns {
-            if cmd.contains(pat) {
-                return true;
-            }
+    match stmt {
+        Stmt::Raw { cmd, .. } => {
+            let dangerous_patterns = ["rm -rf", "mkfs", "dd if=", ":(){:|:&};:", "> /dev/sda"];
+            dangerous_patterns.iter().any(|pat| cmd.contains(pat))
         }
+        Stmt::If { body, else_ifs, else_body, .. } => {
+            body.iter().any(|n| is_dangerous(&n.content)) ||
+            else_ifs.iter().any(|(_, b)| b.iter().any(|n| is_dangerous(&n.content))) ||
+                else_body.as_ref().map_or(false, |b| b.iter().any(|n| is_dangerous(&n.content)))
+        }
+        Stmt::While { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::For { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::ForIndexed { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::Repeat { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::Try { body, catches, else_body, finally, .. } => {
+            body.iter().any(|n| is_dangerous(&n.content)) ||
+            catches.iter().any(|(_, _, b)| b.iter().any(|n| is_dangerous(&n.content))) ||
+            else_body.as_ref().map_or(false, |b| b.iter().any(|n| is_dangerous(&n.content))) ||
+                finally.as_ref().map_or(false, |f| f.iter().any(|n| is_dangerous(&n.content)))
+        }
+        Stmt::Match { arms, .. } => arms.iter().any(|(_, b)| b.iter().any(|n| is_dangerous(&n.content))),
+        Stmt::Block(body) => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::WithLock { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::Module { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::Function { body, .. } => body.iter().any(|n| is_dangerous(&n.content)),
+        Stmt::Object { methods, .. } => methods.values().any(|(_, _, b)| b.iter().any(|n| is_dangerous(&n.content))),
+        _ => false,
     }
-    false
 }
 fn validate_ast(nodes: &[ProgramNode], in_func: bool, is_quick: bool, path: &str, content: &str) -> Vec<ParseError> {
     let mut errors = Vec::new();
@@ -479,70 +504,54 @@ fn validate_ast(nodes: &[ProgramNode], in_func: bool, is_quick: bool, path: &str
                 });
             }
             Stmt::Function { body, is_quick: func_quick, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, true, *func_quick, path, content));
+                errors.extend(validate_ast(body, true, *func_quick, path, content));
             }
             Stmt::If { body, else_ifs, else_body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
                 for (_, b) in else_ifs {
-                    let b_nodes: Vec<ProgramNode> = b.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                    errors.extend(validate_ast(&b_nodes, in_func, is_quick, path, content));
+                    errors.extend(validate_ast(b, in_func, is_quick, path, content));
                 }
                 if let Some(b) = else_body {
-                    let b_nodes: Vec<ProgramNode> = b.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                    errors.extend(validate_ast(&b_nodes, in_func, is_quick, path, content));
+                    errors.extend(validate_ast(b, in_func, is_quick, path, content));
                 }
             }
             Stmt::While { body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             Stmt::For { body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             Stmt::ForIndexed { body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             Stmt::Repeat { body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             Stmt::Try { body, catches, else_body, finally, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
                 for (_, _, b) in catches {
-                    let b_nodes: Vec<ProgramNode> = b.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                    errors.extend(validate_ast(&b_nodes, in_func, is_quick, path, content));
+                    errors.extend(validate_ast(b, in_func, is_quick, path, content));
                 }
                 if let Some(b) = else_body {
-                    let b_nodes: Vec<ProgramNode> = b.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                    errors.extend(validate_ast(&b_nodes, in_func, is_quick, path, content));
+                    errors.extend(validate_ast(b, in_func, is_quick, path, content));
                 }
                 if let Some(f) = finally {
-                    let f_nodes: Vec<ProgramNode> = f.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                    errors.extend(validate_ast(&f_nodes, in_func, is_quick, path, content));
+                    errors.extend(validate_ast(f, in_func, is_quick, path, content));
                 }
             }
             Stmt::Match { arms, .. } => {
                 for (_, b) in arms {
-                    let b_nodes: Vec<ProgramNode> = b.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                    errors.extend(validate_ast(&b_nodes, in_func, is_quick, path, content));
+                    errors.extend(validate_ast(b, in_func, is_quick, path, content));
                 }
             }
             Stmt::Block(body) => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             Stmt::WithLock { body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             Stmt::Module { body, .. } => {
-                let body_nodes: Vec<ProgramNode> = body.iter().map(|s| ProgramNode { content: s.clone(), span: node.span, ..Default::default() }).collect();
-                errors.extend(validate_ast(&body_nodes, in_func, is_quick, path, content));
+                errors.extend(validate_ast(body, in_func, is_quick, path, content));
             }
             _ => {}
         }
@@ -659,8 +668,7 @@ pub fn parse_file(
         }
         match &node.content {
             Stmt::Function { name, params, ret_ty, body, is_quick } => {
-                let body_nodes = body.iter().map(|s| ProgramNode { content: s.clone(), ..Default::default() }).collect();
-                result.functions.insert(name.clone(), (params.clone(), ret_ty.clone(), body_nodes, *is_quick));
+                result.functions.insert(name.clone(), (params.clone(), ret_ty.clone(), body.clone(), *is_quick));
             }
             Stmt::Object { name, .. } => {
                 result.objects.insert(name.clone(), node.clone());
@@ -689,6 +697,10 @@ pub fn parse_file(
                             PathBuf::from(path).parent().unwrap().to_path_buf()
                         } else if prefix == "core" {
                             PathBuf::from("/usr/lib/Hacker-Lang/libs/core")
+                        } else if prefix == "virus" {
+                            dirs::home_dir().unwrap().join(HACKER_DIR_SUFFIX).join(".virus")
+                        } else if prefix == "vira" {
+                            dirs::home_dir().unwrap().join(HACKER_DIR_SUFFIX).join(".vira")
                         } else {
                             dirs::home_dir().unwrap().join(HACKER_DIR_SUFFIX).join("libs")
                         };
