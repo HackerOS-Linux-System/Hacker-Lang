@@ -1,8 +1,0 @@
-! Lista repozytoriów źródłowych (sources) dla Hacker Lang
-[public]
--> pillar => https://github.com/Bytes-Repository/pillar-lib.git
--> containerized => https://github.com/Bytes-Repository/containerized-lib.git
--> crypto => 
-
-[community]
-! Sekcja na wtyczki i biblioteki od społeczności
