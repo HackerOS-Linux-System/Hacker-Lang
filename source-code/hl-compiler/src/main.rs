@@ -1,502 +1,763 @@
-use std::collections::HashSet;
-use std::env;
-use std::fs;
+use clap::Parser;
+use colored::*;
+use inkwell::AddressSpace;
+use inkwell::context::Context;
+use inkwell::module::{Linkage, Module};
+use inkwell::builder::Builder;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
+use inkwell::OptimizationLevel;
+use inkwell::values::FunctionValue;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Instant;
-use colored::Colorize;
-use sha2::{Digest, Sha256};
-use hex;
-use indicatif::{ProgressBar, ProgressStyle};
-use hl_plsa::{AnalysisResult, Expr, ProgramNode, Stmt};
-use tempfile::tempdir;
+use std::process::{Command, exit};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-// ─── Progress bar helpers ─────────────────────────────────────────────────────
+const PLSA_BIN_NAME: &str = "hl-plsa";
 
-fn make_bar(label: &str) -> ProgressBar {
-    let pb = ProgressBar::new(100);
-    pb.set_style(
-        ProgressStyle::with_template(
-            " {spinner:.magenta} {prefix:<12} [{bar:40.magenta/238}] {pos:>3}% {msg}",
-        )
-        .unwrap()
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✔"])
-        .progress_chars("=>."),
-    );
-    pb.set_prefix(label.to_string());
-    pb.enable_steady_tick(std::time::Duration::from_millis(60));
-    pb
+// ─────────────────────────────────────────────────────────────
+// Globalny licznik unikalnych nazw symboli LLVM
+// ─────────────────────────────────────────────────────────────
+static GLOBAL_CTR: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn uid(prefix: &str) -> String {
+    format!("{}_{}", prefix, GLOBAL_CTR.fetch_add(1, Ordering::Relaxed))
 }
 
-fn bar_done(pb: &ProgressBar, msg: &str) {
-    pb.set_position(100);
-    pb.set_style(
-        ProgressStyle::with_template(
-            " {spinner:.magenta} {prefix:<12} [{bar:40.magenta/238}] {pos:>3}% {msg}",
-        )
-        .unwrap()
-        .tick_strings(&["✔"])
-        .progress_chars("=>."),
-    );
-    pb.finish_with_message(msg.to_string());
+// ─────────────────────────────────────────────────────────────
+// CLI
+// ─────────────────────────────────────────────────────────────
+#[derive(Parser, Debug)]
+#[command(
+author  = "HackerOS",
+version = "2.2.0",
+about   = "hacker-lang compiler — .hl → native binary via LLVM + gcc"
+)]
+struct Args {
+    /// Plik .hl do kompilacji
+    file: String,
+
+    /// Plik wyjściowy (domyślnie: nazwa pliku bez rozszerzenia)
+    #[arg(short, long)]
+    output: Option<String>,
+
+    /// Szczegółowe wyjście
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Emituj tylko plik obiektowy .o (bez linkowania)
+    #[arg(long)]
+    emit_obj: bool,
+
+    /// Emituj LLVM IR jako .ll (do debugowania)
+    #[arg(long)]
+    emit_ir: bool,
+
+    /// Poziom optymalizacji: 0=brak 1=mało 2=domyślny 3=agresywny
+    #[arg(long, default_value = "2")]
+    opt: u8,
+
+    /// Wymuś PIE (Position Independent Executable) — domyślnie wyłączone
+    #[arg(long)]
+    pie: bool,
 }
 
-fn bar_fail(pb: &ProgressBar, msg: &str) {
-    pb.set_style(
-        ProgressStyle::with_template(
-            " {spinner:.red} {prefix:<12} [{bar:40.red/238}] {pos:>3}% {msg}",
-        )
-        .unwrap()
-        .tick_strings(&["✖"])
-        .progress_chars("=>."),
-    );
-    pb.finish_with_message(msg.to_string());
+// ─────────────────────────────────────────────────────────────
+// AST — identyczne z hl-plsa
+// ─────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LibType {
+    Source,
+    Core,
+    Bytes,
+    Github,
+    Virus,
+    Vira,
 }
 
-// ─── Transpiler ───────────────────────────────────────────────────────────────
-
-struct Transpiler {
-    main_body: String,
-    fn_codes: Vec<String>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibRef {
+    pub lib_type: LibType,
+    pub name:     String,
+    pub version:  Option<String>,
 }
 
-impl Transpiler {
-    fn new() -> Self {
-        Transpiler { main_body: String::new(), fn_codes: Vec::new() }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CommandType {
+    RawNoSub(String),
+    RawSub(String),
+    Isolated(String),
+    AssignEnv    { key: String, val: String },
+    AssignLocal  { key: String, val: String, is_raw: bool },
+    Loop         { count: u64, cmd: String },
+    If           { cond: String, cmd: String },
+    Elif         { cond: String, cmd: String },
+    Else         { cmd: String },
+    While        { cond: String, cmd: String },
+    For          { var: String, in_: String, cmd: String },
+    Background(String),
+    Call(String),
+    Plugin       { name: String, args: String, is_super: bool },
+    Log(String),
+    Lock         { key: String, val: String },
+    Unlock       { key: String },
+    Extern       { path: String, static_link: bool },
+    Enum         { name: String, variants: Vec<String> },
+    Import       { resource: String },
+    Struct       { name: String, fields: Vec<(String, String)> },
+    Try          { try_cmd: String, catch_cmd: String },
+    End          { code: i32 },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProgramNode {
+    pub line_num:      usize,
+    pub is_sudo:       bool,
+    pub content:       CommandType,
+    pub original_text: String,
+    pub span:          (usize, usize),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnalysisResult {
+    pub deps:                  Vec<String>,
+    pub libs:                  Vec<LibRef>,
+    pub functions:             HashMap<String, (bool, Vec<ProgramNode>)>,
+    pub main_body:             Vec<ProgramNode>,
+    pub is_potentially_unsafe: bool,
+    pub safety_warnings:       Vec<String>,
+}
+
+// ─────────────────────────────────────────────────────────────
+// Ścieżki
+// ─────────────────────────────────────────────────────────────
+fn get_plsa_path() -> PathBuf {
+    let home = dirs::home_dir().expect("HOME not set");
+    let path = home.join(".hackeros/hacker-lang/bin").join(PLSA_BIN_NAME);
+    if !path.exists() {
+        eprintln!(
+            "{} Krytyczny błąd: {} nie znaleziony pod {:?}",
+            "[x]".red(), PLSA_BIN_NAME, path
+        );
+        exit(127);
     }
+    path
+}
 
-    fn transpile_ast(&mut self, ast: &AnalysisResult) {
-        self.main_body += "let globals = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, Value>::new()));\n";
-        self.main_body += "let env: std::collections::HashMap<String, String> = std::env::vars().collect();\n";
-        for node in &ast.main_body {
-            self.main_body += &self.transpile_node(node);
+fn get_plugins_root() -> PathBuf {
+    dirs::home_dir()
+    .expect("HOME not set")
+    .join(".hackeros/hacker-lang/plugins")
+}
+
+fn get_libs_base() -> PathBuf {
+    dirs::home_dir()
+    .expect("HOME not set")
+    .join(".hackeros/hacker-lang/libs")
+}
+
+/// Domyślna nazwa wyjściowa: plik bez rozszerzenia, w tym samym katalogu
+fn default_output(input: &str) -> String {
+    let path = PathBuf::from(input);
+    path.with_extension("")
+    .to_str()
+    .unwrap_or("a.out")
+    .to_string()
+}
+
+// ─────────────────────────────────────────────────────────────
+// Codegen
+// ─────────────────────────────────────────────────────────────
+struct Codegen<'ctx> {
+    ctx:          &'ctx Context,
+    module:       Module<'ctx>,
+    builder:      Builder<'ctx>,
+    verbose:      bool,
+
+    system_fn:    FunctionValue<'ctx>,
+    setenv_fn:    FunctionValue<'ctx>,
+    gc_malloc_fn: FunctionValue<'ctx>,
+    gc_unmark_fn: FunctionValue<'ctx>,
+    gc_sweep_fn:  FunctionValue<'ctx>,
+    gc_full_fn:   FunctionValue<'ctx>,
+    exit_fn:      FunctionValue<'ctx>,
+
+    hl_functions: HashMap<String, FunctionValue<'ctx>>,
+    pub extern_libs: Vec<(String, bool)>,
+}
+
+impl<'ctx> Codegen<'ctx> {
+    fn new(ctx: &'ctx Context, verbose: bool) -> Self {
+        let module  = ctx.create_module("hacker_module");
+        let builder = ctx.create_builder();
+
+        let i32_t  = ctx.i32_type();
+        let i64_t  = ctx.i64_type();
+        let void_t = ctx.void_type();
+        let ptr_t  = ctx.ptr_type(AddressSpace::default());
+
+        let system_fn = module.add_function(
+            "system",
+            i32_t.fn_type(&[ptr_t.into()], false),
+                                            Some(Linkage::External),
+        );
+        let setenv_fn = module.add_function(
+            "setenv",
+            i32_t.fn_type(&[ptr_t.into(), ptr_t.into(), i32_t.into()], false),
+                                            Some(Linkage::External),
+        );
+        let gc_malloc_fn = module.add_function(
+            "gc_malloc",
+            ptr_t.fn_type(&[i64_t.into()], false),
+                                               Some(Linkage::External),
+        );
+        let gc_unmark_fn = module.add_function(
+            "gc_unmark_all",
+            void_t.fn_type(&[], false),
+                                               Some(Linkage::External),
+        );
+        let gc_sweep_fn = module.add_function(
+            "gc_sweep",
+            void_t.fn_type(&[], false),
+                                              Some(Linkage::External),
+        );
+        let gc_full_fn = module.add_function(
+            "gc_collect_full",
+            void_t.fn_type(&[], false),
+                                             Some(Linkage::External),
+        );
+        let exit_fn = module.add_function(
+            "exit",
+            void_t.fn_type(&[i32_t.into()], false),
+                                          Some(Linkage::External),
+        );
+
+        Codegen {
+            ctx, module, builder, verbose,
+            system_fn, setenv_fn, gc_malloc_fn,
+            gc_unmark_fn, gc_sweep_fn, gc_full_fn, exit_fn,
+            hl_functions: HashMap::new(),
+            extern_libs:  Vec::new(),
         }
-        for (name, (params, ret, body, is_quick)) in &ast.functions {
-            self.transpile_fn(name, params, ret, body, *is_quick);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────
+
+    fn str_ptr(&self, s: &str, prefix: &str) -> inkwell::values::PointerValue<'ctx> {
+        let name   = uid(prefix);
+        let cs     = self.ctx.const_string(s.as_bytes(), true);
+        let arr_t  = cs.get_type();
+        let global = self.module.add_global(arr_t, None, &name);
+        global.set_initializer(&cs);
+        global.set_linkage(Linkage::Internal);
+        global.set_constant(true);
+
+        let zero = self.ctx.i64_type().const_int(0, false);
+        unsafe {
+            self.builder
+            .build_gep(arr_t, global.as_pointer_value(), &[zero, zero], &uid("gep"))
+            .unwrap()
         }
     }
 
-    fn finish(self) -> String {
-        let mut code = String::new();
-        code += "use std::collections::HashMap;\n";
-        code += "use std::process::Command;\n";
-        code += "use std::env;\n";
-        code += "use std::sync::{Arc, Mutex};\n";
-        code += "use std::thread;\n";
-        code += "use gc::{Gc, Finalize, Trace};\n";
-        code += "use gc_derive::{Trace, Finalize};\n";
-        code += r#"
-        #[derive(Clone, Debug, Trace, Finalize)]
-        enum Value {
-        F64(f64),
-        I32(i32),
-        Bool(bool),
-        Nil,
-        Str(String),
-        List(Vec<Value>),
-        Map(HashMap<Value, Value>),
-        Obj(Gc<Obj>),
-    }
-    impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-    match (self, other) {
-    (Value::F64(a), Value::F64(b)) => a == b,
-    (Value::I32(a), Value::I32(b)) => a == b,
-    (Value::Bool(a), Value::Bool(b)) => a == b,
-    (Value::Nil, Value::Nil) => true,
-    (Value::Str(a), Value::Str(b)) => a == b,
-    (Value::List(a), Value::List(b)) => a == b,
-    (Value::Map(a), Value::Map(b)) => a == b,
-    (Value::Obj(a), Value::Obj(b)) => *a == *b,
-    _ => false,
-    }
-    }
-    }
-    impl Eq for Value {}
-    impl std::hash::Hash for Value {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-    match self {
-    Value::F64(f) => f.to_bits().hash(state),
-    Value::I32(i) => i.hash(state),
-    Value::Bool(b) => b.hash(state),
-    Value::Nil => 0u64.hash(state),
-    Value::Str(s) => s.hash(state),
-    Value::List(l) => l.hash(state),
-    Value::Map(m) => { for (k, v) in m { k.hash(state); v.hash(state); } },
-    Value::Obj(o) => o.hash(state),
-    }
-    }
-    }
-    impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-    match self {
-    Value::F64(n) => write!(f, "{}", n),
-    Value::I32(n) => write!(f, "{}", n),
-    Value::Bool(b) => write!(f, "{}", b),
-    Value::Nil => write!(f, "nil"),
-    Value::Str(s) => write!(f, "{}", s),
-    Value::List(l) => write!(f, "{:?}", l),
-    Value::Map(m) => write!(f, "{:?}", m),
-    Value::Obj(o) => write!(f, "{:?}", o),
-    }
-    }
-    }
-    #[derive(Clone, PartialEq, Eq, Trace, Finalize)]
-    struct Obj {
-    name: String,
-    fields: HashMap<String, Value>,
-    methods: HashMap<String, fn(Vec<Value>) -> Value>,
-    }
-    impl std::hash::Hash for Obj {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-    self.name.hash(state);
-    for (k, v) in &self.fields { k.hash(state); v.hash(state); }
-    for k in self.methods.keys() { k.hash(state); }
-    }
-    }
-    impl std::fmt::Debug for Obj {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-    write!(f, "Obj {{ name: {}, fields: {:?} }}", self.name, self.fields)
-    }
-    }
-    impl Value {
-    fn is_i32(&self) -> bool { matches!(self, Value::I32(_)) }
-    fn as_i32(&self) -> i32 { if let Value::I32(i) = self { *i } else { 0 } }
-    fn as_f64(&self) -> f64 {
-    match self { Value::I32(i) => *i as f64, Value::F64(f) => *f, _ => 0.0 }
-    }
-    fn as_bool(&self) -> bool {
-    match self {
-    Value::Bool(b) => *b, Value::Nil => false,
-    Value::I32(i) => *i != 0, Value::F64(f) => *f != 0.0,
-    Value::Str(s) => !s.is_empty(), _ => true,
-    }
-    }
-    }
-    fn substitute(text: &str, globals: &Arc<Mutex<HashMap<String, Value>>>, env: &HashMap<String, String>) -> String {
-    let g = globals.lock().unwrap();
-    let mut r = text.to_string();
-    for (k, v) in g.iter() { r = r.replace(&format!("@{}", k), &v.to_string()); }
-    for (k, v) in env { r = r.replace(&format!("${}", k), v); }
-    r
-    }
-    fn bin_op(a: &Value, op: &str, b: &Value) -> Value {
-    match op {
-    "+" => if a.is_i32() && b.is_i32() { Value::I32(a.as_i32().wrapping_add(b.as_i32())) } else { Value::F64(a.as_f64() + b.as_f64()) },
-    "-" => if a.is_i32() && b.is_i32() { Value::I32(a.as_i32().wrapping_sub(b.as_i32())) } else { Value::F64(a.as_f64() - b.as_f64()) },
-    "*" => if a.is_i32() && b.is_i32() { Value::I32(a.as_i32().wrapping_mul(b.as_i32())) } else { Value::F64(a.as_f64() * b.as_f64()) },
-    "/" => Value::F64(a.as_f64() / b.as_f64()),
-    "==" => Value::Bool(a == b),
-    "!=" => Value::Bool(a != b),
-    "<" => Value::Bool(if a.is_i32() && b.is_i32() { a.as_i32() < b.as_i32() } else { a.as_f64() < b.as_f64() }),
-    ">" => Value::Bool(if a.is_i32() && b.is_i32() { a.as_i32() > b.as_i32() } else { a.as_f64() > b.as_f64() }),
-    "<=" => Value::Bool(if a.is_i32() && b.is_i32() { a.as_i32() <= b.as_i32() } else { a.as_f64() <= b.as_f64() }),
-    ">=" => Value::Bool(if a.is_i32() && b.is_i32() { a.as_i32() >= b.as_i32() } else { a.as_f64() >= b.as_f64() }),
-    _ => Value::Nil,
-    }
-    }
-    fn to_iter(v: &Value) -> Vec<Value> {
-    if let Value::List(l) = v { l.clone() } else { vec![] }
-    }
-    "#;
-    code += &self.fn_codes.join("\n");
-    code += "fn main() {\n";
-    code += &self.main_body;
-    code += "}\n";
-    code
+    fn emit_system(&self, cmd: &str) {
+        if self.verbose {
+            eprintln!("    {} {}", "→".dimmed(), cmd.dimmed());
+        }
+        let ptr = self.str_ptr(cmd, "cmd");
+        self.builder
+        .build_call(self.system_fn, &[ptr.into()], &uid("sys"))
+        .unwrap();
     }
 
-    fn transpile_node(&self, node: &ProgramNode) -> String {
-        self.transpile_stmt(&node.content, node.is_sudo)
+    fn wrap_sudo(sudo: bool, cmd: &str) -> String {
+        if sudo {
+            format!("sudo sh -c '{}'", cmd.replace('\'', "'\\''"))
+        } else {
+            cmd.to_string()
+        }
     }
 
-    fn transpile_stmt(&self, stmt: &Stmt, sudo: bool) -> String {
-        match stmt {
-            Stmt::Raw { mode, cmd } => {
-                let mut s = String::new();
-                s += &format!("let cmd = \"{}\";\n", cmd.replace('\\', "\\\\").replace('"', "\\\""));
-                s += "let full = substitute(&cmd, &globals, &env);\n";
-                let shell_prefix = if sudo { r#"Command::new("sudo").arg("sh")"# }
-                else { r#"Command::new("sh")"# };
-                s += &format!("let mut shell_cmd = {};\n", shell_prefix);
-                s += "shell_cmd.arg(\"-c\").arg(&full);\n";
-                match mode.as_str() {
-                    ">" => s += "shell_cmd.status().unwrap();\n",
-                    ">>" => s += "let _ = shell_cmd.output().unwrap();\n",
-                    ">>>" => s += "shell_cmd.spawn().unwrap();\n",
-                    _ => s += "shell_cmd.status().unwrap();\n",
+    // ── Przeddeklaracja funkcji ───────────────────────────────
+    fn predeclare_functions(&mut self, ast: &AnalysisResult) {
+        let fn_t = self.ctx.i32_type().fn_type(&[], false);
+        let mut names: Vec<&String> = ast.functions.keys().collect();
+        names.sort();
+        for name in names {
+            let llvm_name = format!(
+                "hl_{}",
+                name.replace('.', "_").replace('-', "_")
+            );
+            let func = self.module.add_function(&llvm_name, fn_t, None);
+            self.hl_functions.insert(name.clone(), func);
+            if self.verbose {
+                eprintln!("{} Predeclare: {} → {}()", "[f]".blue(), name, llvm_name);
+            }
+        }
+    }
+
+    // ── Kompilacja ciała ──────────────────────────────────────
+    fn compile_body(&mut self, nodes: &[ProgramNode]) -> bool {
+        let mut i = 0;
+        while i < nodes.len() {
+            let node = nodes[i].clone();
+            let sudo = node.is_sudo;
+
+            match &node.content {
+                CommandType::RawNoSub(cmd) | CommandType::RawSub(cmd) => {
+                    self.emit_system(&Self::wrap_sudo(sudo, cmd));
                 }
-                s
-            }
-            Stmt::AssignGlobal { key, ty: _, val } | Stmt::AssignLocal { key, ty: _, val } => {
-                let v = self.transpile_expr(val);
-                format!("globals.lock().unwrap().insert(\"{}\".to_string(), {});\n", key, v)
-            }
-            Stmt::If { cond, body, else_ifs, else_body } => {
-                let mut s = String::new();
-                let c = self.transpile_expr(cond);
-                s += &format!("if {}.as_bool() {{\n", c);
-                for st in body.iter() { s += &self.transpile_stmt(&st.content, st.is_sudo); }
-                s += "}\n";
-                for (ec, eb) in else_ifs.iter() {
-                    let ec = self.transpile_expr(ec);
-                    s += &format!("else if {}.as_bool() {{\n", ec);
-                    for st in eb.iter() { s += &self.transpile_stmt(&st.content, st.is_sudo); }
-                    s += "}\n";
+                CommandType::Isolated(cmd) => {
+                    self.emit_system(&Self::wrap_sudo(sudo, &format!("( {} )", cmd)));
                 }
-                if let Some(eb) = else_body {
-                    s += "else {\n";
-                    for st in eb.iter() { s += &self.transpile_stmt(&st.content, st.is_sudo); }
-                    s += "}\n";
+                CommandType::Background(cmd) => {
+                    self.emit_system(&Self::wrap_sudo(sudo, &format!("{} &", cmd)));
                 }
-                s
+
+                CommandType::If { cond, cmd } => {
+                    let mut sh = format!("if {}; then {}; ", cond, cmd);
+                    i += 1;
+                    loop {
+                        if i >= nodes.len() { break; }
+                        match &nodes[i].content {
+                            CommandType::Elif { cond, cmd } => {
+                                sh += &format!("elif {}; then {}; ", cond, cmd);
+                                i  += 1;
+                            }
+                            CommandType::Else { cmd } => {
+                                sh += &format!("else {}; ", cmd);
+                                i  += 1;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    sh += "fi";
+                    self.emit_system(&Self::wrap_sudo(sudo, &sh));
+                    continue;
+                }
+
+                CommandType::Loop { count, cmd } => {
+                    let sh = format!("for _hl_i in $(seq 1 {}); do {}; done", count, cmd);
+                    self.emit_system(&Self::wrap_sudo(sudo, &sh));
+                }
+                CommandType::While { cond, cmd } => {
+                    self.emit_system(&Self::wrap_sudo(sudo,
+                                                      &format!("while {}; do {}; done", cond, cmd)));
+                }
+                CommandType::For { var, in_, cmd } => {
+                    self.emit_system(&Self::wrap_sudo(sudo,
+                                                      &format!("for {} in {}; do {}; done", var, in_, cmd)));
+                }
+
+                CommandType::Try { try_cmd, catch_cmd } => {
+                    self.emit_system(&Self::wrap_sudo(sudo,
+                                                      &format!("( {} ) || ( {} )", try_cmd, catch_cmd)));
+                }
+
+                CommandType::Log(msg) => {
+                    self.emit_system(&format!("echo {}", msg));
+                }
+
+                CommandType::AssignEnv { key, val } => {
+                    let kp = self.str_ptr(key, "ekey");
+                    let vp = self.str_ptr(val, "eval");
+                    let ow = self.ctx.i32_type().const_int(1, false);
+                    self.builder
+                    .build_call(self.setenv_fn, &[kp.into(), vp.into(), ow.into()], &uid("setenv"))
+                    .unwrap();
+                }
+
+                CommandType::AssignLocal { key, val, is_raw: _ } => {
+                    let is_dynamic = val.contains('$')
+                    || val.contains('`')
+                    || val.contains("$(");
+
+                    if !is_dynamic {
+                        let kp = self.str_ptr(key, "lkey");
+                        let vp = self.str_ptr(val, "lval");
+                        let ow = self.ctx.i32_type().const_int(1, false);
+                        self.builder
+                        .build_call(self.setenv_fn, &[kp.into(), vp.into(), ow.into()], &uid("setenv_l"))
+                        .unwrap();
+                    } else {
+                        self.emit_system(&format!("export {}={}", key, val));
+                    }
+                }
+
+                CommandType::Call(name) => {
+                    let clean = name.trim_start_matches('.');
+                    let func  = self.hl_functions.get(clean).copied().or_else(|| {
+                        self.hl_functions
+                        .iter()
+                        .find(|(k, _)| k.ends_with(&format!(".{}", clean)))
+                        .map(|(_, v)| *v)
+                    });
+                    match func {
+                        Some(f) => {
+                            self.builder
+                            .build_call(f, &[], &uid("call"))
+                            .unwrap();
+                        }
+                        None => {
+                            if self.verbose {
+                                eprintln!("{} Call '{}' nie znaleziony — pomijam", "[!]".yellow(), clean);
+                            }
+                        }
+                    }
+                }
+
+                CommandType::Plugin { name, args, is_super } => {
+                    let root     = get_plugins_root();
+                    let bin_path = root.join(name);
+                    let hl_path  = root.join(format!("{}.hl", name));
+                    let base = if bin_path.exists() {
+                        bin_path.to_str().unwrap().to_string()
+                    } else if hl_path.exists() {
+                        format!("hl {}", hl_path.display())
+                    } else {
+                        if self.verbose {
+                            eprintln!("{} Plugin '{}' nie znaleziony", "[!]".yellow(), name);
+                        }
+                        i += 1;
+                        continue;
+                    };
+                    let cmd = if args.is_empty() { base } else { format!("{} {}", base, args) };
+                    self.emit_system(&Self::wrap_sudo(*is_super, &cmd));
+                }
+
+                CommandType::Lock { key: _, val } => {
+                    let size = val.parse::<u64>().unwrap_or(64);
+                    let sz   = self.ctx.i64_type().const_int(size, false);
+                    self.builder
+                    .build_call(self.gc_malloc_fn, &[sz.into()], &uid("lock"))
+                    .unwrap();
+                }
+
+                CommandType::Unlock { key: _ } => {
+                    self.builder.build_call(self.gc_unmark_fn, &[], &uid("unmark")).unwrap();
+                    self.builder.build_call(self.gc_sweep_fn,  &[], &uid("sweep")).unwrap();
+                }
+
+                CommandType::End { code } => {
+                    self.builder.build_call(self.gc_full_fn, &[], &uid("gcfull")).unwrap();
+                    let cv = self.ctx.i32_type().const_int(*code as u64, true);
+                    self.builder.build_call(self.exit_fn, &[cv.into()], &uid("exit")).unwrap();
+                    self.builder.build_unreachable().unwrap();
+                    return true;
+                }
+
+                CommandType::Extern { path, static_link } => {
+                    self.extern_libs.push((path.clone(), *static_link));
+                }
+
+                // Metadane — brak kodu
+                CommandType::Enum   { .. } => {}
+                CommandType::Struct { .. } => {}
+                CommandType::Import { .. } => {}
+                CommandType::Elif   { .. } => {}
+                CommandType::Else   { .. } => {}
             }
-            Stmt::While { cond, body } => {
-                let mut s = String::new();
-                let c = self.transpile_expr(cond);
-                s += &format!("while {}.as_bool() {{\n", c);
-                for st in body.iter() { s += &self.transpile_stmt(&st.content, st.is_sudo); }
-                s += "}\n";
-                s
+
+            i += 1;
+        }
+        false
+    }
+
+    fn compile_functions(&mut self, ast: &AnalysisResult) {
+        let mut names: Vec<&String> = ast.functions.keys().collect();
+        names.sort();
+        for name in names {
+            let (is_unsafe, nodes) = &ast.functions[name];
+            let func               = self.hl_functions[name];
+            if self.verbose {
+                eprintln!("{} Kompilacja: {} (unsafe={})", "[f]".green(), name, is_unsafe);
             }
-            Stmt::For { var, iter, body } => {
-                let mut s = String::new();
-                let i = self.transpile_expr(iter);
-                s += &format!("for v in to_iter(&{}) {{\n", i);
-                s += &format!("globals.lock().unwrap().insert(\"{}\".to_string(), v);\n", var);
-                for st in body.iter() { s += &self.transpile_stmt(&st.content, st.is_sudo); }
-                s += "}\n";
-                s
+            let entry = self.ctx.append_basic_block(func, "entry");
+            self.builder.position_at_end(entry);
+            let nodes_c = nodes.clone();
+            if !self.compile_body(&nodes_c) {
+                let zero = self.ctx.i32_type().const_int(0, false);
+                self.builder.build_return(Some(&zero)).unwrap();
             }
-            Stmt::Return { expr } => {
-                format!("return {};\n", self.transpile_expr(expr))
-            }
-            Stmt::Repeat { count, body } => {
-                let mut s = format!("for _ in 0..{} {{\n", count);
-                for st in body.iter() { s += &self.transpile_stmt(&st.content, st.is_sudo); }
-                s += "}\n";
-                s
-            }
-            _ => String::new(),
         }
     }
 
-    fn transpile_expr(&self, expr: &Expr) -> String {
-        match expr {
-            Expr::Lit(hl_plsa::Value::I32(n)) => format!("Value::I32({})", n),
-            Expr::Lit(hl_plsa::Value::F64(f)) => format!("Value::F64({})", f),
-            Expr::Lit(hl_plsa::Value::Bool(b)) => format!("Value::Bool({})", b),
-            Expr::Lit(hl_plsa::Value::Str(s)) => {
-                format!("Value::Str(\"{}\".to_string())", s.replace('"', "\\\""))
-            }
-            Expr::Lit(_) => "Value::Nil".to_string(),
-            Expr::Var(name) => {
-                format!("globals.lock().unwrap().get(\"{}\").cloned().unwrap_or(Value::Nil)", name)
-            }
-            Expr::BinOp { op, left, right } => {
-                format!("bin_op(&{}, \"{}\", &{})",
-                    self.transpile_expr(left), op, self.transpile_expr(right))
-            }
-            Expr::Call { name, args } => {
-                let args_s = args.iter()
-                .map(|a| self.transpile_expr(a))
-                .collect::<Vec<_>>()
-                .join(", ");
-                format!("{}(vec![{}])", name, args_s)
-            }
-            _ => "Value::Nil".to_string(),
+    fn compile_main(&mut self, ast: &AnalysisResult) {
+        let i32_t   = self.ctx.i32_type();
+        let main_fn = self.module.add_function("main", i32_t.fn_type(&[], false), None);
+        let entry   = self.ctx.append_basic_block(main_fn, "entry");
+        self.builder.position_at_end(entry);
+        let nodes = ast.main_body.clone();
+        if !self.compile_body(&nodes) {
+            self.builder.build_call(self.gc_full_fn, &[], "gc_final").unwrap();
+            self.builder.build_return(Some(&i32_t.const_int(0, false))).unwrap();
         }
-    }
-
-    fn transpile_fn(
-        &mut self,
-        name: &str,
-        params: &[(String, String)],
-                    _ret_ty: &Option<String>,
-                    body: &Vec<ProgramNode>,
-                    _is_quick: bool,
-    ) {
-        let mut f = format!("fn {}(args: Vec<Value>) -> Value {{\n", name);
-        for (i, (pname, _)) in params.iter().enumerate() {
-            f += &format!("let {} = args.get({}).cloned().unwrap_or(Value::Nil);\n", pname, i);
-        }
-        for node in body { f += &self.transpile_stmt(&node.content, node.is_sudo); }
-        f += "Value::Nil\n}\n";
-        self.fn_codes.push(f);
     }
 }
 
-// ─── Shared compile pipeline ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────
+fn main() {
+    let args = Args::parse();
 
-struct CompileResult { bin_path: PathBuf }
+    let output_name = args.output.clone()
+    .unwrap_or_else(|| default_output(&args.file));
 
-fn do_compile(file: &str, verbose: bool) -> Result<CompileResult, ()> {
-    let home = std::env::var("HOME").expect("HOME environment variable not set");
-    let mut cache_dir = PathBuf::from(home);
-    cache_dir.push(".cache");
-    cache_dir.push("hacker-lang");
-    let _ = fs::create_dir_all(&cache_dir);
-    println!();
-    println!(" {} {}", "▸".magenta().bold(), file.bold());
-    println!();
-    let total = Instant::now();
-    // 1. hash ──────────────────────────────────────────────────────────────────
-    let pb = make_bar("hashing");
-    pb.set_message("reading source...");
-    pb.set_position(40);
-    let hash = hash_file(file);
-    bar_done(&pb, &format!("sha256 {}...", &hash[..12]));
-    let bin_path = cache_dir.join(&hash);
-    if bin_path.exists() {
-        println!("\n {} cache hit — skipping compilation\n", "◆".yellow().bold());
-        return Ok(CompileResult { bin_path });
+    // ── 1. hl-plsa ────────────────────────────────────────────
+    let plsa = get_plsa_path();
+
+    if args.verbose {
+        eprintln!("{} Analizuję: {}", "[*]".green(), args.file);
     }
-    // 2. parse ─────────────────────────────────────────────────────────────────
-    let pb = make_bar("parsing");
-    pb.set_message("building AST...");
-    pb.set_position(10);
-    let t = Instant::now();
-    let mut seen = HashSet::new();
-    let ast = match hl_plsa::parse_file(file, true, verbose, &mut seen) {
-        Ok(a) => a,
-        Err(errors) => {
-            bar_fail(&pb, "parse error");
-            println!();
-            for e in errors { eprintln!(" {} {:?}", "│".red(), e); }
-            return Err(());
-        }
-    };
-    let fn_count = ast.functions.len();
-    let stmt_count = ast.main_body.len();
-    bar_done(&pb, &format!("{} stmts · {} fns · {}ms",
-                           stmt_count, fn_count, t.elapsed().as_millis()));
-    if verbose && ast.is_potentially_unsafe {
-        println!(" {} script uses privileged (sudo) commands", "⚠".yellow());
-    }
-    // 3. transpile ─────────────────────────────────────────────────────────────
-    let pb = make_bar("transpiling");
-    pb.set_message("hl -> rust...");
-    pb.set_position(20);
-    let t = Instant::now();
-    let mut transpiler = Transpiler::new();
-    transpiler.transpile_ast(&ast);
-    pb.set_position(70);
-    pb.set_message("writing source...");
-    let rs_code = transpiler.finish();
-    let rs_bytes = rs_code.len();
-    let rs_path = cache_dir.join(format!("{}.rs", hash));
-    fs::write(&rs_path, &rs_code).map_err(|e| {
-        bar_fail(&pb, "write failed");
-        eprintln!(" {}", e);
-    })?;
-    bar_done(&pb, &format!("{} bytes · {}ms", rs_bytes, t.elapsed().as_millis()));
-    // 4. cargo ─────────────────────────────────────────────────────────────────
-    let pb = make_bar("compiling");
-    pb.set_message("cargo build --release...");
-    pb.set_position(5);
-    let temp_dir = tempdir().map_err(|e| {
-        bar_fail(&pb, "tempdir failed");
-        eprintln!(" {}", e);
-    })?;
-    fs::write(temp_dir.path().join("Cargo.toml"), format!(
-        "[package]\nname = \"hl_{hash}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-[dependencies]\ngc = \"0.5\"\ngc_derive = \"0.5\"\n"
-    )).map_err(|e| { bar_fail(&pb, "Cargo.toml"); eprintln!(" {}", e); })?;
-    let src_dir = temp_dir.path().join("src");
-    fs::create_dir(&src_dir).map_err(|e| { bar_fail(&pb, "src dir"); eprintln!(" {}", e); })?;
-    fs::write(src_dir.join("main.rs"), &rs_code)
-    .map_err(|e| { bar_fail(&pb, "main.rs"); eprintln!(" {}", e); })?;
-    pb.set_position(15);
-    let t = Instant::now();
-    let output = Command::new("cargo")
-    .current_dir(temp_dir.path())
-    .arg("build")
-    .arg("--release")
+
+    let plsa_out = Command::new(&plsa)
+    .arg(&args.file)
+    .arg("--json")
     .output()
-    .map_err(|e| { bar_fail(&pb, "cargo not found"); eprintln!(" {}", e); })?;
-    pb.set_position(95);
-    if !output.status.success() {
-        bar_fail(&pb, "compilation failed");
-        println!();
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr).red());
-        return Err(());
+    .unwrap_or_else(|e| {
+        eprintln!("{} Nie można uruchomić hl-plsa: {}", "[x]".red(), e);
+        exit(1);
+    });
+
+    if !plsa_out.status.success() {
+        eprintln!("{} hl-plsa błąd:\n{}", "[x]".red(),
+                  String::from_utf8_lossy(&plsa_out.stderr));
+        exit(1);
     }
-    let compiled_bin = temp_dir.path()
-    .join("target/release")
-    .join(format!("hl_{}", hash));
-    let bin_size = fs::metadata(&compiled_bin).map(|m| m.len()).unwrap_or(0);
-    fs::copy(&compiled_bin, &bin_path).map_err(|e| {
-        bar_fail(&pb, "cache failed");
-        eprintln!(" {}", e);
-    })?;
-    bar_done(&pb, &format!("{} KB · {}ms", bin_size / 1024, t.elapsed().as_millis()));
-    println!();
-    println!(" {} ready in {:.2}s\n", "◆".magenta().bold(), total.elapsed().as_secs_f64());
-    Ok(CompileResult { bin_path })
-}
 
-// ─── Public commands ──────────────────────────────────────────────────────────
+    let ast: AnalysisResult = serde_json::from_slice(&plsa_out.stdout)
+    .unwrap_or_else(|e| {
+        let preview = &plsa_out.stdout[..plsa_out.stdout.len().min(512)];
+        eprintln!("{} JSON z PLSA nieprawidłowy: {}\n{}",
+                  "[x]".red(), e, String::from_utf8_lossy(preview));
+        exit(1);
+    });
 
-pub fn run_command(file: String, verbose: bool) -> bool {
-    let result = match do_compile(&file, verbose) {
-        Ok(r) => r,
-        Err(_) => return false,
+    if args.verbose {
+        eprintln!("{} AST: {} funkcji  {} węzłów  {} libs",
+                  "[i]".blue(), ast.functions.len(), ast.main_body.len(), ast.libs.len());
+        if ast.is_potentially_unsafe {
+            eprintln!("{} Skrypt zawiera sudo (^):", "[!]".yellow());
+            for w in &ast.safety_warnings { eprintln!("    {}", w.yellow()); }
+        }
+    }
+
+    // ── 2. LLVM init ──────────────────────────────────────────
+    Target::initialize_native(&InitializationConfig::default())
+    .unwrap_or_else(|e| {
+        eprintln!("{} LLVM init nieudana: {}", "[x]".red(), e);
+        exit(1);
+    });
+
+    let context = Context::create();
+    let mut cg  = Codegen::new(&context, args.verbose);
+
+    // ── 3. Codegen ───────────────────────────────────────────
+    if args.verbose { eprintln!("{} Generuję LLVM IR...", "[*]".green()); }
+
+    cg.predeclare_functions(&ast);
+    cg.compile_functions(&ast);
+    cg.compile_main(&ast);
+
+    // Zbierz Extern z ciał funkcji
+    for (_, (_, nodes)) in &ast.functions {
+        for node in nodes {
+            if let CommandType::Extern { path, static_link } = &node.content {
+                cg.extern_libs.push((path.clone(), *static_link));
+            }
+        }
+    }
+
+    // ── 4. Weryfikacja ────────────────────────────────────────
+    if let Err(e) = cg.module.verify() {
+        eprintln!("{} Błąd weryfikacji IR:\n{}", "[x]".red(), e);
+        if args.verbose || args.emit_ir { cg.module.print_to_stderr(); }
+        exit(1);
+    }
+
+    // ── 5. Emituj .ll (opcjonalnie) ───────────────────────────
+    if args.emit_ir {
+        let ll = format!("{}.ll", output_name);
+        cg.module.print_to_file(std::path::Path::new(&ll)).ok();
+        eprintln!("{} IR: {}", "[*]".green(), ll);
+    }
+
+    // ── 6. TargetMachine ─────────────────────────────────────
+    let opt_level = match args.opt {
+        0 => OptimizationLevel::None,
+        1 => OptimizationLevel::Less,
+        3 => OptimizationLevel::Aggressive,
+        _ => OptimizationLevel::Default,
     };
-    let pb = make_bar("running");
-    pb.set_message(file.dimmed().to_string());
-    pb.set_position(5);
-    let t = Instant::now();
-    let status = Command::new(&result.bin_path).status();
-    match status {
-        Ok(s) if s.success() => {
-            bar_done(&pb, &format!("exited ok · {}ms", t.elapsed().as_millis()));
-            println!();
-            true
-        }
-        Ok(s) => {
-            let code = s.code().unwrap_or(-1);
-            bar_fail(&pb, &format!("exit code {}", code));
-            println!();
-            false
-        }
-        Err(e) => {
-            bar_fail(&pb, &format!("exec error: {}", e));
-            println!();
-            false
-        }
-    }
-}
 
-pub fn compile_command(file: String, output: String, verbose: bool) -> bool {
-    let result = match do_compile(&file, verbose) {
-        Ok(r) => r,
-        Err(_) => return false,
+    let triple = TargetMachine::get_default_triple();
+
+    if args.verbose {
+        eprintln!("{} Triple: {}", "[i]".blue(),
+                  triple.as_str().to_str().unwrap_or("unknown"));
+    }
+
+    let target = Target::from_triple(&triple).unwrap_or_else(|e| {
+        eprintln!("{} Target error: {}", "[x]".red(), e);
+        exit(1);
+    });
+
+    // UWAGA dot. RelocMode na Debianie:
+    //   Debian/Ubuntu domyślnie kompiluje z PIE włączonym w gcc (hardening).
+    //   Gdy używamy RelocMode::Default, LLVM emituje relokacje absolutne
+    //   (R_X86_64_32), które są niezgodne z PIE.
+    //
+    //   Rozwiązania (wybieramy jedno z dwóch):
+    //     A) RelocMode::PIC   — .o jest PIC-compatible, gcc linkuje jako PIE  ← alternatywa
+    //     B) RelocMode::Default + gcc -no-pie  ← WYBRANE (prostsze, mniejszy kod)
+    //
+    //   Używamy opcji B: RelocMode::Default w LLVM + "-no-pie" w gcc poniżej.
+    //   Jeśli użytkownik jawnie chce PIE (--pie), używamy RelocMode::PIC.
+    let reloc_mode = if args.pie {
+        RelocMode::PIC
+    } else {
+        RelocMode::Default
     };
-    let out_stem = if let Some(p) = file.rfind('.') { &file[..p] } else { &file };
-    let out = if output.is_empty() { out_stem.to_string() } else { output };
-    let pb = make_bar("writing");
-    pb.set_message(format!("-> {}", out.magenta()));
-    pb.set_position(20);
-    match fs::copy(&result.bin_path, &out) {
-        Ok(bytes) => {
-            bar_done(&pb, &format!("-> {} ({} KB)", out, bytes / 1024));
-            println!();
-            true
+
+    let tm = target
+    .create_target_machine(
+        &triple,
+        "",               // CPU: pusty string = domyślny dla triple
+        "",               // features: pusty
+        opt_level,
+        reloc_mode,
+        CodeModel::Default,
+    )
+    .unwrap_or_else(|| {
+        eprintln!("{} Nie można utworzyć TargetMachine", "[x]".red());
+        exit(1);
+    });
+
+    // ── 7. Emituj .o ─────────────────────────────────────────
+    let obj_path = format!("{}.o", output_name);
+
+    tm.write_to_file(&cg.module, FileType::Object, std::path::Path::new(&obj_path))
+    .unwrap_or_else(|e| {
+        eprintln!("{} Błąd zapisu .o: {}", "[x]".red(), e);
+        exit(1);
+    });
+
+    if args.verbose { eprintln!("{} Obiekt: {}", "[*]".green(), obj_path); }
+    if args.emit_obj {
+        eprintln!("{} Gotowy: {}", "[+]".green(), obj_path);
+        return;
+    }
+
+    // ── 8. Linkowanie przez gcc ───────────────────────────────
+    if args.verbose { eprintln!("{} Linkuję...", "[*]".green()); }
+
+    let mut linker = Command::new("gcc");
+    linker.arg(&obj_path).arg("-o").arg(&output_name);
+
+    // ── KLUCZOWA POPRAWKA DLA DEBIANA ────────────────────────
+    // Debian domyślnie włącza PIE w gcc (opcja -pie w specs).
+    // Nasze .o jest skompilowane z RelocMode::Default (relokacje absolutne),
+    // co jest NIEZGODNE z PIE → błąd R_X86_64_32.
+    // Rozwiązanie: przekaż -no-pie do gcc żeby wyłączyć PIE podczas linkowania.
+    // Jeśli użytkownik chce PIE (--pie flag), pomijamy -no-pie.
+    if !args.pie {
+        linker.arg("-no-pie");
+    }
+
+    // Szukaj libgc.a
+    let gc_search_paths = {
+        let mut v: Vec<PathBuf> = vec![];
+        if let Some(home) = dirs::home_dir() {
+            v.push(home.join(".hackeros/hacker-lang/lib"));
         }
-        Err(e) => {
-            bar_fail(&pb, "copy failed");
-            eprintln!(" {}", e);
-            println!();
-            false
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(d) = exe.parent() { v.push(d.to_path_buf()); }
+        }
+        v.push(PathBuf::from("/usr/local/lib/hacker-lang"));
+        v
+    };
+
+    let mut gc_found = false;
+    for p in &gc_search_paths {
+        let libgc = p.join("libgc.a");
+        if libgc.exists() {
+            linker.arg(&libgc);
+            gc_found = true;
+            if args.verbose { eprintln!("{} GC: {}", "[+]".blue(), libgc.display()); }
+            break;
         }
     }
-}
+    if !gc_found {
+        eprintln!(
+            "{} libgc.a nie znaleziona.\n  \
+Uruchom raz: cargo build --release  (w katalogu hl-compiler)\n  \
+lub skopiuj ręcznie do ~/.hackeros/hacker-lang/lib/libgc.a",
+"[!]".yellow()
+        );
+        linker.arg("-lgc");
+    }
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
+    // Biblioteki z AST
+    let libs_base = get_libs_base();
+    for lib in &ast.libs {
+        match lib.lib_type {
+            LibType::Bytes | LibType::Virus => {
+                let lib_dir = libs_base.join("bytes").join(&lib.name);
+                let so = lib_dir.join(format!("{}.so", lib.name));
+                let a  = lib_dir.join(format!("{}.a",  lib.name));
+                if so.exists() {
+                    linker.arg(format!("-L{}", lib_dir.display()));
+                    linker.arg(format!("-Wl,-rpath,{}", lib_dir.display()));
+                    linker.arg(format!("-l:{}.so", lib.name));
+                } else if a.exists() {
+                    linker.arg(a.to_str().unwrap());
+                } else if args.verbose {
+                    eprintln!("{} Lib '{}' nie znaleziona", "[!]".yellow(), lib.name);
+                }
+            }
+            LibType::Github => {
+                let lib_dir = libs_base.join("github").join(&lib.name);
+                if lib_dir.exists() {
+                    linker.arg(format!("-L{}", lib_dir.display()));
+                    linker.arg(format!("-l:{}.so", lib.name));
+                }
+            }
+            LibType::Source | LibType::Core | LibType::Vira => {}
+        }
+    }
 
-fn hash_file(path: &str) -> String {
-    let b = fs::read(path).unwrap_or_default();
-    let mut h = Sha256::new();
-    h.update(&b);
-    hex::encode(h.finalize())
+    // Extern
+    for (path, is_static) in &cg.extern_libs {
+        let clean = path.trim_matches('"');
+        if *is_static {
+            linker.arg(format!("-l:{}.a", clean));
+        } else {
+            linker.arg(format!("-l:{}.so", clean));
+        }
+    }
+
+    linker.arg("-lm").arg("-ldl");
+
+    if args.verbose { eprintln!("  {:?}", linker); }
+
+    let status = linker.status().unwrap_or_else(|e| {
+        eprintln!("{} Nie można uruchomić gcc: {}", "[x]".red(), e);
+        exit(1);
+    });
+
+    let _ = std::fs::remove_file(&obj_path);
+
+    if status.success() {
+        eprintln!("{} Skompilowano: {}", "[+]".green(), output_name);
+    } else {
+        eprintln!("{} Linkowanie nieudane", "[x]".red());
+        exit(1);
+    }
 }
