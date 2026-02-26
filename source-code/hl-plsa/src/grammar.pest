@@ -1,81 +1,87 @@
-WHITESPACE = _{ " " | "\t" | "\r" | "\n" | line_comment }
-line_comment = _{ "!" ~ (!"\n" ~ ANY)* ~ ("\n" | EOI) }
-file = { SOI ~ stmt* ~ EOI }
-stmt = { sudo? ~ bg? ~ inner_stmt }
+WHITESPACE = _{ " " | "\t" }
+
+ident    = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+number   = @{ ASCII_DIGIT+ }
+str_lit  = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+version  = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
+lib_name = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "/")+ }
+lib_type = @{ "source" | "core" | "bytes" | "github" | "virus" | "vira" }
+lib_ref  =  { "<" ~ lib_type ~ "/" ~ lib_name ~ (":" ~ version)? ~ ">" }
+
+rest     = @{ (!EOI ~ ANY)+ }
+cond     = @{ (!(" > " | " |> " | " <| ") ~ !EOI ~ ANY)+ }
+try_body = @{ (!(" catch ") ~ !EOI ~ ANY)+ }
+call_path = @{ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")*)+ }
+cpfx      = { "|>" | "<|" | ">" }
+
+// Reguła line jest wywoływana TYLKO gdy Rust stwierdzi że linia NIE jest przypisaniem
+line = { SOI ~ sudo? ~ stmt ~ EOI }
 sudo = { "^" }
-bg = { "&" }
-inner_stmt = { assign_global | assign_local | func_def | ret | obj_def | try_stmt | match_stmt | for_indexed | for_stmt | while_stmt | if_stmt | repeat_stmt | break_stmt | continue_stmt | import_stmt | plugin | raw | block | expr_stmt | log_stmt | lock_stmt | unlock_stmt | withlock_stmt | module_stmt | await_stmt }
-qual_ident = { ident ~ ("::" ~ ident)* }
-ident = { (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
-ty = { ident ~ ("<" ~ ty ~ ("," ~ ty)* ~ ">")? }
-expr = { logical_or }
-or_op = { "||" }
-logical_or = { logical_and ~ (or_op ~ logical_and)* }
-and_op = { "&&" }
-logical_and = { comparison ~ (and_op ~ comparison)* }
-comp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
-comparison = { sum ~ (comp_op ~ sum)* }
-add_op = { "+" | "-" }
-sum = { product ~ (add_op ~ product)* }
-mul_op = { "*" | "/" }
-product = { pipe ~ (mul_op ~ pipe)* }
-pipe_op = { "|>" }
-pipe = { atom ~ (pipe_op ~ expr)* }
-atom = { lit | call | var | paren_expr | list | map | wildcard }
-lit = { float | int | bool_true | bool_false | str | none }
-float = { int ~ "." ~ int }
-int = { ASCII_DIGIT+ }
-bool_true = { "true" }
-bool_false = { "false" }
-str = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-none = { "none" }
-call = { qual_ident ~ "(" ~ args? ~ ")" }
-args = { expr ~ ("," ~ expr)* }
-var = { qual_ident }
-paren_expr = { "(" ~ expr ~ ")" }
-list = { "[" ~ (expr ~ ("," ~ expr)*)? ~ "]" }
-map = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
-map_entry = { ident ~ ":" ~ expr }
-wildcard = { "_" }
-assign_global = { "@" ~ qual_ident ~ ty_opt ~ "=" ~ expr }
-assign_local = { "$" ~ qual_ident ~ ty_opt ~ "=" ~ expr }
-ty_opt = { (":" ~ ty)? }
-func_def = { func_prefix ~ qual_ident ~ params ~ ret_ty_opt ~ body }
-func_prefix = { "::" | ":" }
-params = { "(" ~ (param ~ ("," ~ param)*)? ~ ")" }
-param = { qual_ident ~ ":" ~ ty }
-ret_ty_opt = { ("->" ~ ty)? }
-body = { "[" ~ stmt* ~ "]" }
-ret = { "<-" ~ expr }
-field = { "mut"? ~ qual_ident ~ ":" ~ ty ~ ("=" ~ expr)? }
-method = { ":" ~ qual_ident ~ params ~ ret_ty_opt ~ body }
-obj_def = { ";;" ~ qual_ident ~ "[" ~ (field ~ ("," ~ field)*)? ~ method* ~ "]" }
-catch = { "catch" ~ "(" ~ qual_ident ~ ":" ~ qual_ident ~ ")" ~ body }
-try_stmt = { "try" ~ body ~ catch* ~ else_body? ~ finally? }
-else_body = { "else" ~ body }
-finally = { "finally" ~ body }
-arm = { (expr | wildcard) ~ body }
-match_stmt = { "match" ~ expr ~ "[" ~ arm* ~ "]" }
-for_stmt = { "for" ~ qual_ident ~ "in" ~ expr ~ body }
-for_indexed = { "for" ~ qual_ident ~ "," ~ qual_ident ~ "in" ~ "enumerate(" ~ expr ~ ")" ~ body }
-while_stmt = { "while" ~ expr ~ body }
-elif = { "elif" ~ expr ~ body }
-if_stmt = { "if" ~ expr ~ body ~ elif* ~ else_body? }
-repeat_stmt = { "repeat" ~ int ~ body }
-break_stmt = { "break" }
-continue_stmt = { "continue" }
-prefix = { "virus" | "vira" | "bytes" | "local" | "github" | "core" | "crates" }
-pkg_name = { (!(":" | ">") ~ ANY)+ }
-version = { (! ">" ~ ANY)+ }
-import_stmt = { "#" ~ "<" ~ prefix ~ "/" ~ pkg_name ~ (":" ~ version)? ~ ">" }
-plugin = { "\"" ~ qual_ident ~ "\"" }
-raw = { raw_mode ~ (!"\n" ~ ANY)* }
-raw_mode = { ">>>" | ">>" | ">" }
-log_stmt = { "log" ~ str }
-lock_stmt = { "lock" ~ qual_ident }
-unlock_stmt = { "unlock" ~ qual_ident }
-withlock_stmt = { "withlock" ~ qual_ident ~ body }
-module_stmt = { "module" ~ qual_ident ~ body }
-block = { body }
-expr_stmt = { expr }
-await_stmt = { "await" ~ expr }
+
+stmt = {
+    class_def   |
+    unsafe_def  |
+    func_def    |
+    func_done   |
+    call_stmt   |
+    sys_dep     |
+    lib_stmt    |
+    sep_cmd     |
+    raw_cmd     |
+    expl_cmd    |
+    try_stmt    |
+    while_stmt  |
+    for_stmt    |
+    log_stmt    |
+    lock_stmt   |
+    unlock_stmt |
+    loop_stmt   |
+    elif_stmt   |
+    else_stmt   |
+    if_stmt     |
+    bg_stmt     |
+    plugin_stmt |
+    extern_stmt |
+    enum_stmt   |
+    struct_stmt |
+    import_stmt |
+    raw_blk_s   |
+    raw_blk_e   |
+    end_stmt
+}
+
+class_def  = { ";;" ~ ident ~ "def" }
+unsafe_def = { "::" ~ ident ~ "def" }
+func_def   = { ":"  ~ ident ~ "def" }
+func_done  = { "done" }
+call_stmt  = { call_path }
+sys_dep    = { "//" ~ rest }
+lib_stmt   = { "#" ~ lib_ref }
+sep_cmd    = { ">>>" ~ rest }
+raw_cmd    = { ">>"  ~ rest }
+expl_cmd   = { cpfx  ~ rest }
+loop_stmt  = { "="   ~ number   ~ cpfx ~ rest }
+elif_stmt  = { "??"  ~ cond     ~ cpfx ~ rest }
+else_stmt  = { "?:"  ~ cpfx     ~ rest }
+if_stmt    = { "?"   ~ cond     ~ cpfx ~ rest }
+while_stmt = { "while" ~ cond   ~ cpfx ~ rest }
+for_stmt   = { "for" ~ ident ~ "in" ~ cond ~ cpfx ~ rest }
+bg_stmt    = { "&"      ~ rest }
+log_stmt   = { "log"    ~ str_lit }
+lock_stmt  = { "lock"   ~ "$" ~ ident ~ "=" ~ rest }
+unlock_stmt = { "unlock" ~ "$" ~ ident }
+
+// \\ plugin_name [args] — ~/.hackeros/hacker-lang/plugins/<name> lub <name>.hl
+plugin_stmt = { "\\\\" ~ rest }
+
+// -- [static] path — linkowanie zewnętrzne
+extern_stmt = { "--" ~ rest }
+
+enum_stmt   = { "==" ~ ident ~ "[" ~ (ident ~ ("," ~ ident)*)? ~ "]" }
+struct_stmt = { "struct" ~ ident ~ "[" ~ (sf ~ ("," ~ sf)*)? ~ "]" }
+sf          = { ident ~ ":" ~ ident }
+import_stmt = { "<<" ~ str_lit }
+try_stmt    = { "try" ~ try_body ~ "catch" ~ rest }
+raw_blk_s   = { "[" }
+raw_blk_e   = { "]" }
+end_stmt    = { "end" ~ number? }
