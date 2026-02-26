@@ -1,12 +1,8 @@
 // golang
-// odin
+// python3.13
 // cargo
-// pyhon3.13
+// odin
 
-> cd source-code
-> cd core
->>> cd hl-compiler && cargo build --release && cd .. && cd hl-runtime && cargo build --release && cd .. && cd hl-plsa && cargo build --release && cd .. && cd hl-containers && go get hl-containers && go build
-
-> cd ..
-> cd cli
->>> cd hli && cargo build --release && cd .. && cd hl && odin build . && cd .. && cd hlh && odin build . && cd .. && cd hla && odin build .
+> cargo build --release
+! > cd source-code && cd virus && cargo build --release
+! ^^^^ build virus if you need
