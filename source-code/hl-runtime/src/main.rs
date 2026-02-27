@@ -8,276 +8,451 @@ use std::fs;
 use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 
-const CACHE_DIR: &str = "/tmp/Hacker-Lang/cache";
 const PLSA_BIN_NAME: &str = "hl-plsa";
+/// Wersja 4 — nowy format OpCode z JumpIfFalse/Jump
+const CACHE_SCHEMA_VERSION: u32 = 4;
 
 // ─────────────────────────────────────────────────────────────
 // CLI
 // ─────────────────────────────────────────────────────────────
 #[derive(Parser, Debug)]
-#[command(author, version, about = "hacker-lang runtime v1.6.3")]
+#[command(
+author  = "HackerOS",
+version = "2.2.0",
+about   = "hacker-lang runtime — generacyjny GC, bytecode VM z VM-level branching"
+)]
 struct Args {
-    /// Plik .hl do uruchomienia
     file: String,
-    /// Szczegółowe wyjście
-    #[arg(long, short)]
-    verbose: bool,
-    /// Nie używaj cache bytecode
-    #[arg(long)]
-    no_cache: bool,
+    #[arg(long, short)] verbose:  bool,
+    #[arg(long)]        no_cache: bool,
+    #[arg(long)]        gc_stats: bool,
+    #[arg(long)]        dry_run:  bool,
 }
 
 // ─────────────────────────────────────────────────────────────
-// Typy AST — muszą być IDENTYCZNE z hl-plsa
+// AST — identyczne z hl-plsa/main.rs
 // ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum LibType {
-    Source,
-    Core,
-    Bytes,
-    Github,
-    Virus,
-    Vira,
-}
+pub enum LibType { Source, Core, Bytes, Github, Virus, Vira }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibRef {
     pub lib_type: LibType,
-    pub name: String,
-    pub version: Option<String>,
+    pub name:     String,
+    pub version:  Option<String>,
 }
 
-/// KLUCZOWA POPRAWKA: tag = "type", content = "data" — identycznie jak w hl-plsa
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CommandType {
     RawNoSub(String),
     RawSub(String),
     Isolated(String),
-    AssignEnv {
-        key: String,
-        val: String,
-    },
-    AssignLocal {
-        key: String,
-        val: String,
-        is_raw: bool,
-    },
-    Loop {
-        count: u64,
-        cmd: String,
-    },
-    If {
-        cond: String,
-        cmd: String,
-    },
-    Elif {
-        cond: String,
-        cmd: String,
-    },
-    Else {
-        cmd: String,
-    },
-    While {
-        cond: String,
-        cmd: String,
-    },
-    For {
-        var: String,
-        in_: String,
-        cmd: String,
-    },
+    AssignEnv    { key: String, val: String },
+    AssignLocal  { key: String, val: String, is_raw: bool },
+    Loop         { count: u64, cmd: String },
+    If           { cond: String, cmd: String },
+    Elif         { cond: String, cmd: String },
+    Else         { cmd: String },
+    While        { cond: String, cmd: String },
+    For          { var: String, in_: String, cmd: String },
     Background(String),
     Call(String),
-    /// KLUCZOWA POPRAWKA: dodano brakujące pole args
-    Plugin {
-        name: String,
-        args: String,
-        is_super: bool,
-    },
+    Plugin       { name: String, args: String, is_super: bool },
     Log(String),
-    Lock {
-        key: String,
-        val: String,
-    },
-    Unlock {
-        key: String,
-    },
-    Extern {
-        path: String,
-        static_link: bool,
-    },
-    Enum {
-        name: String,
-        variants: Vec<String>,
-    },
-    Import {
-        resource: String,
-    },
-    Struct {
-        name: String,
-        fields: Vec<(String, String)>,
-    },
-    Try {
-        try_cmd: String,
-        catch_cmd: String,
-    },
-    End {
-        code: i32,
-    },
+    Lock         { key: String, val: String },
+    Unlock       { key: String },
+    Extern       { path: String, static_link: bool },
+    Enum         { name: String, variants: Vec<String> },
+    Import       { resource: String },
+    Struct       { name: String, fields: Vec<(String, String)> },
+    Try          { try_cmd: String, catch_cmd: String },
+    End          { code: i32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramNode {
-    pub line_num: usize,
-    pub is_sudo: bool,
-    pub content: CommandType,
+    pub line_num:      usize,
+    pub is_sudo:       bool,
+    pub content:       CommandType,
     pub original_text: String,
-    pub span: (usize, usize),
+    pub span:          (usize, usize),
 }
 
-/// KLUCZOWA POPRAWKA: libs to Vec<LibRef>, nie Vec<String>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisResult {
-    pub deps: Vec<String>,
-    pub libs: Vec<LibRef>,
-    pub functions: HashMap<String, (bool, Vec<ProgramNode>)>,
-    pub main_body: Vec<ProgramNode>,
+    pub deps:                  Vec<String>,
+    pub libs:                  Vec<LibRef>,
+    pub functions:             HashMap<String, (bool, Vec<ProgramNode>)>,
+    pub main_body:             Vec<ProgramNode>,
     pub is_potentially_unsafe: bool,
-    pub safety_warnings: Vec<String>,
+    pub safety_warnings:       Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────
-// Bytecode VM
+// Bytecode — rozszerzony o JumpIfFalse i Jump
 // ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum OpCode {
-    /// Wykonaj polecenie powłoki
-    Exec { cmd: String, sudo: bool },
+    /// Wykonaj komendę shell przez: bash -c CMD
+    Exec        { cmd: String, sudo: bool },
     /// Ustaw zmienną środowiskową
-    SetEnv { key: String, val: String },
-    /// Ustaw zmienną lokalną
-    SetLocal { key: String, val: String, is_raw: bool },
-    /// Wywołaj funkcję
-    CallFunc { func_name: String },
-    /// Uruchom plugin
-    Plugin { name: String, args: String, sudo: bool },
-    /// Zablokuj bufor na stercie GC
-    Lock { key: String, val: String },
-    /// Zwolnij bufor ze sterty GC
-    Unlock { key: String },
-    /// Powrót z funkcji
+    SetEnv      { key: String, val: String },
+    /// Ustaw zmienną lokalną (zarządzaną przez GC lub Raw)
+    SetLocal    { key: String, val: String, is_raw: bool },
+    /// Wywołaj funkcję HL (push ip+1 na call stack, skocz do addr)
+    CallFunc    { func_name: String },
+    /// Uruchom plugin z ~/.hackeros/hacker-lang/plugins/
+    Plugin      { name: String, args: String, sudo: bool },
+    /// Zaalokuj blok pamięci heap
+    Lock        { key: String, val: String },
+    /// Zwolnij blok pamięci heap
+    Unlock      { key: String },
+    /// Powrót z funkcji HL (pop call stack)
     Return,
-    /// Zakończ program
+    /// Zakończ program z kodem wyjścia
     Exit(i32),
+    /// Ewaluuj warunek COND przez bash.
+    /// Jeśli FALSE (exit code != 0) → ip = target.
+    /// Jeśli TRUE  (exit code == 0) → fall-through (ip + 1).
+    JumpIfFalse { cond: String, target: usize },
+    /// Bezwarunkowy skok do ops[target].
+    /// Używany po każdej gałęzi if/elif żeby przeskoczyć pozostałe gałęzie.
+    Jump        { target: usize },
 }
 
 #[derive(Serialize, Deserialize)]
 struct BytecodeProgram {
-    ops: Vec<OpCode>,
-    /// Nazwa funkcji → indeks pierwszej instrukcji
-    functions: HashMap<String, usize>,
+    schema_version: u32,
+    ops:            Vec<OpCode>,
+    functions:      HashMap<String, usize>,
 }
 
 // ─────────────────────────────────────────────────────────────
-// GC (linkowany z gc.c)
+// Cache metadata
+// ─────────────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize)]
+struct CacheMeta {
+    sha256:         String,
+    mtime:          u64,
+    file_size:      u64,
+    schema_version: u32,
+}
+
+// ─────────────────────────────────────────────────────────────
+// GC FFI — gc.c v2
 // ─────────────────────────────────────────────────────────────
 extern "C" {
     fn gc_malloc(size: usize) -> *mut c_void;
+    fn gc_alloc_old(size: usize) -> *mut c_void;
     fn gc_mark(ptr: *mut c_void);
     fn gc_unmark_all();
     fn gc_sweep();
+    fn gc_collect_full();
+    fn gc_stats_print();
+    fn gc_stats_get(minor_out: *mut u64, major_out: *mut u64, promoted_out: *mut u64, total_out: *mut u64);
 }
 
 // ─────────────────────────────────────────────────────────────
 // Ścieżki
 // ─────────────────────────────────────────────────────────────
+fn cache_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        let p = PathBuf::from(xdg).join("hacker-lang");
+        if fs::create_dir_all(&p).is_ok() { return p; }
+    }
+    let p = dirs::home_dir().expect("HOME not set").join(".cache").join("hacker-lang");
+    fs::create_dir_all(&p).ok();
+    p
+}
+
 fn get_plsa_path() -> PathBuf {
-    let home = dirs::home_dir().expect("HOME not set");
-    let path = home
+    let path = dirs::home_dir().expect("HOME not set")
     .join(".hackeros/hacker-lang/bin")
     .join(PLSA_BIN_NAME);
     if !path.exists() {
-        eprintln!(
-            "{} Krytyczny błąd: {} nie znaleziony pod {:?}",
-            "[x]".red(),
-                  PLSA_BIN_NAME,
-                  path
-        );
+        eprintln!("{} Krytyczny błąd: {} nie znaleziony pod {:?}", "[x]".red(), PLSA_BIN_NAME, path);
         std::process::exit(127);
     }
     path
 }
 
 fn get_plugins_root() -> PathBuf {
-    dirs::home_dir()
-    .expect("HOME not set")
-    .join(".hackeros/hacker-lang/plugins")
+    dirs::home_dir().expect("HOME not set").join(".hackeros/hacker-lang/plugins")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Cache — SHA-256 + mtime hybryda
+// ─────────────────────────────────────────────────────────────
+fn file_mtime_size(path: &str) -> Option<(u64, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mt   = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some((mt, meta.len()))
+}
+
+fn file_sha256(path: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(fs::read(path).unwrap_or_default());
+    format!("{:x}", h.finalize())
+}
+
+fn cache_paths(src: &str) -> (PathBuf, PathBuf) {
+    let mut h = Sha256::new();
+    h.update(src.as_bytes());
+    let key = format!("{:x}", h.finalize());
+    let d   = cache_dir();
+    (d.join(format!("{}.bc", key)), d.join(format!("{}.meta", key)))
+}
+
+fn cache_load(src_path: &str, verbose: bool) -> Option<BytecodeProgram> {
+    let (bc_path, meta_path) = cache_paths(src_path);
+    let meta: CacheMeta = bincode::deserialize(&fs::read(&meta_path).ok()?).ok()?;
+
+    if meta.schema_version != CACHE_SCHEMA_VERSION {
+        if verbose { eprintln!("{} Cache: nieaktualna wersja schematu, regeneruję.", "[*]".yellow()); }
+        return None;
+    }
+
+    if let Some((mtime, size)) = file_mtime_size(src_path) {
+        if mtime == meta.mtime && size == meta.file_size {
+            if verbose { eprintln!("{} Cache hit (mtime+size): {}", "[*]".green(), bc_path.display()); }
+            return load_bc(&bc_path, verbose);
+        }
+        let sha = file_sha256(src_path);
+        if sha == meta.sha256 {
+            if verbose { eprintln!("{} Cache hit (sha256): {}", "[*]".green(), bc_path.display()); }
+            let nm = CacheMeta { sha256: sha, mtime, file_size: size, schema_version: CACHE_SCHEMA_VERSION };
+            if let Ok(d) = bincode::serialize(&nm) { let _ = fs::write(&meta_path, d); }
+            return load_bc(&bc_path, verbose);
+        }
+        if verbose { eprintln!("{} Cache miss: {}", "[!]".yellow(), src_path); }
+    }
+    None
+}
+
+fn load_bc(path: &PathBuf, verbose: bool) -> Option<BytecodeProgram> {
+    match bincode::deserialize::<BytecodeProgram>(&fs::read(path).ok()?) {
+        Ok(p) if p.schema_version == CACHE_SCHEMA_VERSION => Some(p),
+        Ok(_)  => { if verbose { eprintln!("{} Cache: niezgodna wersja.", "[!]".yellow()); } None }
+        Err(e) => { if verbose { eprintln!("{} Błąd cache: {}", "[!]".yellow(), e); } None }
+    }
+}
+
+fn cache_save(src_path: &str, prog: &BytecodeProgram, verbose: bool) {
+    let (bc_path, meta_path) = cache_paths(src_path);
+    let sha256 = file_sha256(src_path);
+    let (mtime, file_size) = file_mtime_size(src_path).unwrap_or((0, 0));
+    let meta = CacheMeta { sha256, mtime, file_size, schema_version: CACHE_SCHEMA_VERSION };
+
+    if let Ok(d) = bincode::serialize(prog) {
+        if let Err(e) = fs::write(&bc_path, d) {
+            if verbose { eprintln!("{} Błąd zapisu .bc: {}", "[!]".yellow(), e); }
+            return;
+        }
+    }
+    if let Ok(d) = bincode::serialize(&meta) {
+        if let Err(e) = fs::write(&meta_path, d) {
+            if verbose { eprintln!("{} Błąd zapisu .meta: {}", "[!]".yellow(), e); }
+        } else if verbose {
+            eprintln!("{} Cache zapisany: {}", "[*]".green(), cache_dir().display());
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pomocniki kompilacji
+// ─────────────────────────────────────────────────────────────
+
+/// Opakuj warunek w [[ ]] gdy zawiera operatory porównania.
+/// Warunki już zaczynające się od [ lub (( zostają bez zmian.
+fn wrap_cond(cond: &str) -> String {
+    let t = cond.trim();
+    if t.starts_with('[') || t.starts_with("((") { return t.to_string(); }
+    let needs = t.contains(" == ") || t.contains(" != ")
+    || t.contains(" -eq ") || t.contains(" -ne ")
+    || t.contains(" -lt ") || t.contains(" -le ")
+    || t.contains(" -gt ") || t.contains(" -ge ");
+    if needs { format!("[[ {} ]]", t) } else { t.to_string() }
+}
+
+/// Czy cmd to wywołanie funkcji HL? (.FuncName, .Class.method, ...)
+fn is_hl_call(cmd: &str) -> bool {
+    let t = cmd.trim();
+    if !t.starts_with('.') || t.len() < 2 { return false; }
+    let c = t.chars().nth(1).unwrap_or(' ');
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+/// Wyciągnij nazwę funkcji z HL call cmd.
+/// ".new_project $a $b" → "new_project"
+/// ".Utils.danger_clean" → "Utils.danger_clean"
+fn extract_hl_func(cmd: &str) -> String {
+    cmd.trim()
+    .trim_start_matches('.')
+    .split_whitespace()
+    .next()
+    .unwrap_or("")
+    .to_string()
+}
+
+/// Tłumaczy cmd na komendę shell gdy NIE jest wywołaniem HL.
+/// Obsługuje: log "msg" → echo "msg", end N → exit N,
+/// prefix > (ExplCmd) → usunięcie prefiksu.
+fn shell_inline(cmd: &str) -> String {
+    let t = cmd.trim();
+    if let Some(r) = t.strip_prefix("log ")  { return format!("echo {}", r); }
+    if let Some(r) = t.strip_prefix("end ")  { return format!("exit {}", r.trim().parse::<i32>().unwrap_or(0)); }
+    if t == "end"                             { return "exit 0".to_string(); }
+    if let Some(r) = t.strip_prefix("> ")    { return r.to_string(); }
+    if let Some(r) = t.strip_prefix('>')     { return r.trim().to_string(); }
+    t.to_string()
 }
 
 // ─────────────────────────────────────────────────────────────
 // Kompilacja AST → Bytecode
 // ─────────────────────────────────────────────────────────────
+
+/// Jedna gałąź bloku if/elif/else zebrana przez compile_body.
+struct Branch {
+    /// Warunek (None = gałąź else)
+    cond: Option<String>,
+    /// Treść gałęzi
+    body: BranchBody,
+    sudo: bool,
+}
+
+/// Klasyfikacja body gałęzi
+enum BranchBody {
+    /// Zwykła komenda shell
+    Shell(String),
+    /// Wywołanie funkcji HL — emitowane jako CallFunc opcode
+    HlCall(String),
+}
+
 fn compile_to_bytecode(ast: &AnalysisResult) -> BytecodeProgram {
-    let mut ops: Vec<OpCode> = Vec::new();
+    let mut ops:       Vec<OpCode>            = Vec::with_capacity(ast.main_body.len() + 32);
     let mut functions: HashMap<String, usize> = HashMap::new();
 
-    // Kompiluj ciało główne
     compile_body(&ast.main_body, &mut ops);
     ops.push(OpCode::Exit(0));
 
-    // Kompiluj funkcje
+    // Kompiluj funkcje HL
     for (name, (_is_unsafe, nodes)) in &ast.functions {
         functions.insert(name.clone(), ops.len());
         compile_body(nodes, &mut ops);
         ops.push(OpCode::Return);
     }
 
-    BytecodeProgram { ops, functions }
+    BytecodeProgram { schema_version: CACHE_SCHEMA_VERSION, ops, functions }
 }
 
 fn compile_body(nodes: &[ProgramNode], ops: &mut Vec<OpCode>) {
     let mut i = 0;
     while i < nodes.len() {
-        let node = &nodes[i];
-        match &node.content {
-            // Scalaj If/Elif/Else w jedno polecenie powłoki
+        match &nodes[i].content {
+
+            // ── If — zbierz cały blok (If + Elif* + Else?) i emituj jako VM branches ──
             CommandType::If { cond, cmd } => {
-                let mut shell_cmd = format!("if {}; then {}; ", cond, cmd);
-                let mut sudo = node.is_sudo;
+                let mut branches: Vec<Branch> = vec![Branch {
+                    cond: Some(wrap_cond(cond)),
+                    body: classify(cmd),
+                    sudo: nodes[i].is_sudo,
+                }];
                 i += 1;
+
+                // Zbierz kolejne Elif i opcjonalny Else
                 loop {
-                    if i >= nodes.len() {
-                        break;
-                    }
+                    if i >= nodes.len() { break; }
                     match &nodes[i].content {
                         CommandType::Elif { cond, cmd } => {
-                            shell_cmd += &format!("elif {}; then {}; ", cond, cmd);
-                            sudo = sudo || nodes[i].is_sudo;
+                            branches.push(Branch {
+                                cond: Some(wrap_cond(cond)),
+                                          body: classify(cmd),
+                                          sudo: nodes[i].is_sudo,
+                            });
                             i += 1;
                         }
                         CommandType::Else { cmd } => {
-                            shell_cmd += &format!("else {}; ", cmd);
-                            sudo = sudo || nodes[i].is_sudo;
+                            branches.push(Branch { cond: None, body: classify(cmd), sudo: nodes[i].is_sudo });
                             i += 1;
                             break;
                         }
                         _ => break,
                     }
                 }
-                shell_cmd += "fi";
-                ops.push(OpCode::Exec {
-                    cmd: shell_cmd,
-                    sudo,
-                });
+
+                emit_if_block(branches, ops);
+                // i już zinkrementowane — continue bez dodatkowego i+=1
+                continue;
             }
+
             _ => {
-                compile_node(node, ops);
+                compile_node(&nodes[i], ops);
                 i += 1;
             }
+        }
+    }
+}
+
+fn classify(cmd: &str) -> BranchBody {
+    if is_hl_call(cmd) {
+        BranchBody::HlCall(extract_hl_func(cmd))
+    } else {
+        BranchBody::Shell(shell_inline(cmd))
+    }
+}
+
+/// Emituj bytecode dla całego bloku if/elif/else używając backpatchingu.
+///
+/// Algorytm:
+///   Dla każdej gałęzi z warunkiem:
+///     1. Emituj JumpIfFalse { cond, target: PLACEHOLDER }
+///     2. Emituj body (Shell/HlCall)
+///     3. Emituj Jump { target: PLACEHOLDER } (skok na koniec całego bloku)
+///     4. Backpatch JumpIfFalse.target = ops.len() (= start następnej gałęzi)
+///   Dla gałęzi else (bez warunku):
+///     1. Emituj body
+///     2. Emituj Jump (dla spójności)
+///   Na końcu: backpatch wszystkie Jump.target = ops.len()
+fn emit_if_block(branches: Vec<Branch>, ops: &mut Vec<OpCode>) {
+    let mut end_jumps: Vec<usize> = Vec::new();
+
+    for branch in branches {
+        // 1. JumpIfFalse dla If/Elif (Else go nie ma)
+        let jif_idx: Option<usize> = branch.cond.map(|cond| {
+            let idx = ops.len();
+            ops.push(OpCode::JumpIfFalse { cond, target: 0 }); // backpatch później
+            idx
+        });
+
+        // 2. Body gałęzi
+        match branch.body {
+            BranchBody::Shell(cmd)      => ops.push(OpCode::Exec { cmd, sudo: branch.sudo }),
+            BranchBody::HlCall(fname)   => ops.push(OpCode::CallFunc { func_name: fname }),
+        }
+
+        // 3. Jump na koniec całego bloku (backpatch później)
+        let jump_idx = ops.len();
+        ops.push(OpCode::Jump { target: 0 });
+        end_jumps.push(jump_idx);
+
+        // 4. Backpatch JumpIfFalse → wskazuje na START następnej gałęzi
+        if let Some(idx) = jif_idx {
+            let next = ops.len();
+            if let OpCode::JumpIfFalse { target, .. } = &mut ops[idx] {
+                *target = next;
+            }
+        }
+    }
+
+    // 5. Backpatch wszystkich Jump → END całego bloku
+    let end = ops.len();
+    for idx in end_jumps {
+        if let OpCode::Jump { target } = &mut ops[idx] {
+            *target = end;
         }
     }
 }
@@ -285,36 +460,17 @@ fn compile_body(nodes: &[ProgramNode], ops: &mut Vec<OpCode>) {
 fn compile_node(node: &ProgramNode, ops: &mut Vec<OpCode>) {
     let sudo = node.is_sudo;
     match &node.content {
-        CommandType::RawNoSub(s) => {
-            ops.push(OpCode::Exec {
-                cmd: s.clone(),
-                     sudo,
-            });
-        }
-        CommandType::RawSub(s) => {
-            ops.push(OpCode::Exec {
-                cmd: s.clone(),
-                     sudo,
-            });
+        CommandType::RawNoSub(s) | CommandType::RawSub(s) => {
+            ops.push(OpCode::Exec { cmd: s.clone(), sudo });
         }
         CommandType::Isolated(s) => {
-            ops.push(OpCode::Exec {
-                cmd: format!("( {} )", s),
-                     sudo,
-            });
+            ops.push(OpCode::Exec { cmd: format!("( {} )", s), sudo });
         }
         CommandType::AssignEnv { key, val } => {
-            ops.push(OpCode::SetEnv {
-                key: key.clone(),
-                     val: val.clone(),
-            });
+            ops.push(OpCode::SetEnv { key: key.clone(), val: val.clone() });
         }
         CommandType::AssignLocal { key, val, is_raw } => {
-            ops.push(OpCode::SetLocal {
-                key: key.clone(),
-                     val: val.clone(),
-                     is_raw: *is_raw,
-            });
+            ops.push(OpCode::SetLocal { key: key.clone(), val: val.clone(), is_raw: *is_raw });
         }
         CommandType::Loop { count, cmd } => {
             ops.push(OpCode::Exec {
@@ -324,7 +480,7 @@ fn compile_node(node: &ProgramNode, ops: &mut Vec<OpCode>) {
         }
         CommandType::While { cond, cmd } => {
             ops.push(OpCode::Exec {
-                cmd: format!("while {}; do {}; done", cond, cmd),
+                cmd: format!("while {}; do {}; done", wrap_cond(cond), cmd),
                      sudo,
             });
         }
@@ -335,10 +491,7 @@ fn compile_node(node: &ProgramNode, ops: &mut Vec<OpCode>) {
             });
         }
         CommandType::Background(s) => {
-            ops.push(OpCode::Exec {
-                cmd: format!("{} &", s),
-                     sudo,
-            });
+            ops.push(OpCode::Exec { cmd: format!("{} &", s), sudo });
         }
         CommandType::Call(name) => {
             ops.push(OpCode::CallFunc {
@@ -346,23 +499,13 @@ fn compile_node(node: &ProgramNode, ops: &mut Vec<OpCode>) {
             });
         }
         CommandType::Plugin { name, args, is_super } => {
-            ops.push(OpCode::Plugin {
-                name: name.clone(),
-                     args: args.clone(),
-                     sudo: *is_super,
-            });
+            ops.push(OpCode::Plugin { name: name.clone(), args: args.clone(), sudo: *is_super });
         }
         CommandType::Log(msg) => {
-            ops.push(OpCode::Exec {
-                cmd: format!("echo {}", msg),
-                     sudo,
-            });
+            ops.push(OpCode::Exec { cmd: format!("echo {}", msg), sudo });
         }
-        CommandType::Lock { key, val } => {
-            ops.push(OpCode::Lock {
-                key: key.clone(),
-                     val: val.clone(),
-            });
+        CommandType::Lock   { key, val } => {
+            ops.push(OpCode::Lock   { key: key.clone(), val: val.clone() });
         }
         CommandType::Unlock { key } => {
             ops.push(OpCode::Unlock { key: key.clone() });
@@ -376,76 +519,52 @@ fn compile_node(node: &ProgramNode, ops: &mut Vec<OpCode>) {
         CommandType::End { code } => {
             ops.push(OpCode::Exit(*code));
         }
-        CommandType::Extern { path, static_link } => {
-            // Extern jest metadaną linkowania — tylko logujemy w verbose, nie wykonujemy
-            let _ = (path, static_link);
-        }
-        CommandType::Enum { name, variants } => {
-            // Enum jest metadaną typów — tylko logujemy
-            let _ = (name, variants);
-        }
-        CommandType::Struct { name, fields } => {
-            // Struct jest metadaną typów — tylko logujemy
-            let _ = (name, fields);
-        }
-        CommandType::Import { resource } => {
-            // Import obsługiwany przez PLSA (resolve_libs) — runtime ignoruje
-            let _ = resource;
-        }
-        // If/Elif/Else obsługiwane w compile_body()
-        CommandType::If { .. } | CommandType::Elif { .. } | CommandType::Else { .. } => {}
+        // Metadane — PLSA obsługuje, runtime ignoruje
+        CommandType::Extern  { .. }
+        | CommandType::Enum  { .. }
+        | CommandType::Struct { .. }
+        | CommandType::Import { .. } => {}
+        // If/Elif/Else — obsługiwane przez compile_body()
+        CommandType::If   { .. }
+        | CommandType::Elif { .. }
+        | CommandType::Else { .. } => {}
     }
 }
 
 // ─────────────────────────────────────────────────────────────
 // VM
 // ─────────────────────────────────────────────────────────────
-#[derive(Debug)]
 enum LocalVal {
-    Raw(String),
     Managed(*mut c_char),
+    Raw(String),
 }
-
-// SAFETY: VM jest jednowątkowa
 unsafe impl Send for LocalVal {}
 unsafe impl Sync for LocalVal {}
 
 struct VM {
-    env: HashMap<String, String>,
-    locals: HashMap<String, LocalVal>,
-    /// Bufory zaalokowane przez lock
-    heap: HashMap<String, Vec<u8>>,
+    env:     HashMap<String, String>,
+    locals:  HashMap<String, LocalVal>,
+    heap:    HashMap<String, Vec<u8>>,
     verbose: bool,
 }
 
 impl VM {
     fn new(verbose: bool) -> Self {
-        Self {
-            env: std::env::vars().collect(),
-            locals: HashMap::new(),
-            heap: HashMap::new(),
-            verbose,
-        }
+        Self { env: std::env::vars().collect(), locals: HashMap::new(), heap: HashMap::new(), verbose }
     }
 
-    /// Podmienia $VAR i ${VAR} na wartości ze zmiennych lokalnych i środowiskowych
+    #[inline]
     fn substitute(&self, text: &str) -> String {
+        if !text.contains('$') { return text.to_string(); }
         let mut res = text.to_string();
-        // Lokalne zmienne — najpierw (wyższy priorytet)
         for (k, val) in &self.locals {
-            let v_str = match val {
-                LocalVal::Raw(s) => s.clone(),
-                LocalVal::Managed(p) => unsafe {
-                    CStr::from_ptr(*p)
-                    .to_str()
-                    .unwrap_or("")
-                    .to_string()
-                },
+            let v = match val {
+                LocalVal::Raw(s)     => s.clone(),
+                LocalVal::Managed(p) => unsafe { CStr::from_ptr(*p).to_str().unwrap_or("").to_string() },
             };
-            res = res.replace(&format!("${{{}}}", k), &v_str);
-            res = res.replace(&format!("${}", k), &v_str);
+            res = res.replace(&format!("${{{}}}", k), &v);
+            res = res.replace(&format!("${}", k), &v);
         }
-        // Zmienne środowiskowe
         for (k, v) in &self.env {
             res = res.replace(&format!("${{{}}}", k), v);
             res = res.replace(&format!("${}", k), v);
@@ -453,329 +572,239 @@ impl VM {
         res
     }
 
-    /// Mark-and-sweep GC dla zarządzanych wartości lokalnych
-    fn collect(&mut self) {
+    fn gc_collect(&mut self) {
         unsafe {
             gc_unmark_all();
             for (_, val) in &self.locals {
-                if let LocalVal::Managed(p) = val {
-                    gc_mark(*p as *mut c_void);
-                }
+                if let LocalVal::Managed(p) = val { gc_mark(*p as *mut c_void); }
             }
             gc_sweep();
         }
     }
 
+    fn alloc_local(&mut self, key: &str, val: &str) {
+        match CString::new(val) {
+            Ok(cstr) => {
+                let size = cstr.as_bytes_with_nul().len();
+                let ptr  = unsafe { gc_malloc(size) } as *mut c_char;
+                let ptr  = if ptr.is_null() {
+                    let p2 = unsafe { gc_alloc_old(size) } as *mut c_char;
+                    if p2.is_null() {
+                        eprintln!("{} GC: alokacja nieudana dla '{}'", "[x]".red(), key);
+                        self.locals.insert(key.to_string(), LocalVal::Raw(val.to_string()));
+                        return;
+                    }
+                    p2
+                } else { ptr };
+                unsafe { std::ptr::copy_nonoverlapping(cstr.as_ptr(), ptr, size); }
+                self.locals.insert(key.to_string(), LocalVal::Managed(ptr));
+            }
+            Err(_) => {
+                if self.verbose { eprintln!("{} Zmienna '{}' zawiera bajt null — Raw", "[!]".yellow(), key); }
+                self.locals.insert(key.to_string(), LocalVal::Raw(val.to_string()));
+            }
+        }
+    }
+
+    /// Ewaluuj warunek przez bash.
+    /// Zwraca true gdy bash exit code == 0 (warunek spełniony).
+    fn eval_cond(&self, cond: &str) -> bool {
+        let expanded = self.substitute(cond);
+        let script   = format!("if {}; then exit 0; else exit 1; fi", expanded);
+        if self.verbose {
+            eprintln!("{} eval_cond: {}", "[?]".cyan(), script.dimmed());
+        }
+        match Command::new("bash").arg("-c").arg(&script).status() {
+            Ok(s)  => s.code().unwrap_or(1) == 0,
+            Err(e) => { eprintln!("{} eval_cond błąd: {}", "[x]".red(), e); false }
+        }
+    }
+
     fn run(&mut self, prog: &BytecodeProgram) -> i32 {
-        let mut ip: usize = 0;
-        let mut call_stack: Vec<usize> = Vec::new();
+        let mut ip:         usize      = 0;
+        let mut call_stack: Vec<usize> = Vec::with_capacity(32);
 
         while ip < prog.ops.len() {
             match &prog.ops[ip] {
+
+                // ── Exec ──────────────────────────────────────────────
                 OpCode::Exec { cmd, sudo } => {
-                    let final_cmd = self.substitute(cmd);
-                    if self.verbose {
-                        eprintln!("{} [{}] {}", "[>]".cyan(), ip, final_cmd.dimmed());
-                    }
-                    let status = if *sudo {
-                        Command::new("sudo")
-                        .arg("sh")
-                        .arg("-c")
-                        .arg(&final_cmd)
-                        .status()
+                    let c = self.substitute(cmd);
+                    if self.verbose { eprintln!("{} [{}] {}", "[>]".cyan(), ip, c.dimmed()); }
+                    let st = if *sudo {
+                        Command::new("sudo").arg("bash").arg("-c").arg(&c).status()
                     } else {
-                        Command::new("sh")
-                        .arg("-c")
-                        .arg(&final_cmd)
-                        .status()
+                        Command::new("bash").arg("-c").arg(&c).status()
                     };
-                    match status {
-                        Ok(s) if !s.success() => {
-                            if self.verbose {
-                                eprintln!(
-                                    "{} Polecenie zakończone kodem: {}",
-                                    "[!]".yellow(),
-                                          s.code().unwrap_or(-1)
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("{} Błąd wykonania: {}", "[x]".red(), e);
-                        }
+                    match st {
+                        Ok(s) if !s.success() && self.verbose =>
+                        eprintln!("{} exit: {}", "[!]".yellow(), s.code().unwrap_or(-1)),
+                        Err(e) => eprintln!("{} exec błąd: {}", "[x]".red(), e),
                         _ => {}
                     }
                 }
 
+                // ── JumpIfFalse ───────────────────────────────────────
+                // Serce obsługi if/elif/else.
+                // Ewaluuje warunek (poprzez bash exit code).
+                // TRUE  → fall-through do body gałęzi (ip+1)
+                // FALSE → skok do następnej gałęzi lub końca bloku
+                OpCode::JumpIfFalse { cond, target } => {
+                    let expanded = self.substitute(cond);
+                    let result   = self.eval_cond(&expanded);
+                    if self.verbose {
+                        eprintln!(
+                            "{} [{}] JumpIfFalse [[ {} ]] → {}",
+                            "[?]".cyan(), ip, expanded.dimmed(),
+                                  if result { "TRUE (fall-through)".green().to_string() }
+                                  else      { format!("FALSE → jump {}", target).red().to_string() }
+                        );
+                    }
+                    if !result {
+                        ip = *target;
+                        continue;
+                    }
+                }
+
+                // ── Jump ──────────────────────────────────────────────
+                // Bezwarunkowy skok — po wykonaniu body gałęzi
+                // przeskakuje pozostałe elif/else.
+                OpCode::Jump { target } => {
+                    if self.verbose { eprintln!("{} [{}] Jump → {}", "[j]".cyan(), ip, target); }
+                    ip = *target;
+                    continue;
+                }
+
+                // ── CallFunc ──────────────────────────────────────────
                 OpCode::CallFunc { func_name } => {
-                    // Obsłuż wywołania kwalifikowane: Storage.init → "Storage.init"
-                    // oraz niekwalifikowane: "init"
-                    let resolved = self.resolve_func(func_name, &prog.functions);
-                    match resolved {
+                    match self.resolve_func(func_name, &prog.functions) {
                         Some(addr) => {
-                            if self.verbose {
-                                eprintln!(
-                                    "{} Call: {} → ip {}",
-                                    "[f]".green(),
-                                          func_name,
-                                          addr
-                                );
-                            }
+                            if self.verbose { eprintln!("{} Call: {} → ip={}", "[f]".green(), func_name, addr); }
                             call_stack.push(ip + 1);
                             ip = addr;
                             continue;
                         }
-                        None => {
-                            eprintln!(
-                                "{} Błąd runtime: funkcja '{}' nie znaleziona",
-                                "[x]".red(),
-                                      func_name
-                            );
-                            // Nie przerywamy — kontynuujemy
-                        }
+                        None => eprintln!("{} Runtime: funkcja '{}' nie znaleziona", "[x]".red(), func_name),
                     }
                 }
 
+                // ── Return ────────────────────────────────────────────
                 OpCode::Return => {
-                    if let Some(ret_addr) = call_stack.pop() {
-                        ip = ret_addr;
-                        continue;
+                    match call_stack.pop() {
+                        Some(ret) => { ip = ret; continue; }
+                        None      => { self.gc_collect(); return 0; }
                     }
-                    // Return na poziomie głównym == exit 0
-                    return 0;
                 }
 
-                OpCode::Exit(code) => {
-                    self.collect();
-                    return *code;
-                }
+                // ── Exit ──────────────────────────────────────────────
+                OpCode::Exit(code) => { self.gc_collect(); return *code; }
 
+                // ── SetEnv ────────────────────────────────────────────
                 OpCode::SetEnv { key, val } => {
                     let v = self.substitute(val);
-                    if self.verbose {
-                        eprintln!("{} SetEnv: {}={}", "[e]".blue(), key, v);
-                    }
-                    self.env.insert(key.clone(), v.clone());
-                    // Propaguj do środowiska procesu
+                    if self.verbose { eprintln!("{} env: {}={}", "[e]".blue(), key, v); }
                     std::env::set_var(key, &v);
+                    self.env.insert(key.clone(), v);
                 }
 
+                // ── SetLocal ──────────────────────────────────────────
                 OpCode::SetLocal { key, val, is_raw } => {
                     let v = self.substitute(val);
-                    if self.verbose {
-                        eprintln!(
-                            "{} SetLocal: {}={} (raw={})",
-                                  "[l]".blue(),
-                                  key,
-                                  v,
-                                  is_raw
-                        );
-                    }
-                    if *is_raw {
-                        self.locals.insert(key.clone(), LocalVal::Raw(v));
-                    } else {
-                        // Wartość zarządzana przez GC
-                        match CString::new(v) {
-                            Ok(cstr) => {
-                                let size = cstr.as_bytes_with_nul().len();
-                                let ptr = unsafe { gc_malloc(size) } as *mut c_char;
-                                if ptr.is_null() {
-                                    eprintln!("{} Alokacja GC nieudana dla: {}", "[x]".red(), key);
-                                    return 1;
-                                }
-                                unsafe {
-                                    std::ptr::copy_nonoverlapping(cstr.as_ptr(), ptr, size);
-                                }
-                                self.locals.insert(key.clone(), LocalVal::Managed(ptr));
-                            }
-                            Err(_) => {
-                                // Wartość zawiera null — przechowaj jako Raw
-                                eprintln!(
-                                    "{} Ostrzeżenie: wartość '{}' zawiera bajt null — przechowuję jako Raw",
-                                    "[!]".yellow(),
-                                          key
-                                );
-                                self.locals.insert(
-                                    key.clone(),
-                                                   LocalVal::Raw("[invalid: null byte]".to_string()),
-                                );
-                            }
-                        }
-                    }
+                    if self.verbose { eprintln!("{} local: {}={} (raw={})", "[l]".blue(), key, v, is_raw); }
+                    if *is_raw { self.locals.insert(key.clone(), LocalVal::Raw(v)); }
+                    else       { self.alloc_local(key, &v); }
                 }
 
+                // ── Plugin ────────────────────────────────────────────
                 OpCode::Plugin { name, args, sudo } => {
-                    let root = get_plugins_root();
-                    let plugin_bin = root.join(name);
-                    let plugin_hl = PathBuf::from(format!("{}.hl", plugin_bin.display()));
+                    let root     = get_plugins_root();
+                    let bin      = root.join(name);
+                    let hl       = PathBuf::from(format!("{}.hl", bin.display()));
+                    let fa       = self.substitute(args);
+                    if self.verbose { eprintln!("{} Plugin: \\\\{} {} (sudo={})", "[p]".cyan(), name, fa, sudo); }
 
-                    let final_args = self.substitute(args);
-
-                    if self.verbose {
-                        eprintln!(
-                            "{} Plugin: \\\\{} {} (sudo={})",
-                                  "[p]".cyan(),
-                                  name,
-                                  final_args,
-                                  sudo
-                        );
-                    }
-
-                    // Szukaj binarki, potem .hl
-                    let target = if plugin_bin.exists() {
-                        Some(plugin_bin.to_str().unwrap().to_string())
-                    } else if plugin_hl.exists() {
-                        // Uruchom .hl przez hl-runtime
+                    let tgt = if bin.exists() {
+                        Some(bin.to_str().unwrap().to_string())
+                    } else if hl.exists() {
                         let rt = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hl"));
-                        Some(format!(
-                            "{} {}",
-                            rt.display(),
-                                     plugin_hl.display()
-                        ))
+                        Some(format!("{} {}", rt.display(), hl.display()))
                     } else {
-                        eprintln!(
-                            "{} Plugin '{}' nie znaleziony pod: {}",
-                            "[!]".yellow(),
-                                  name,
-                                  root.display()
-                        );
+                        eprintln!("{} Plugin '{}' nie znaleziony: {}", "[!]".yellow(), name, root.display());
                         None
                     };
 
-                    if let Some(cmd_str) = target {
-                        let full_cmd = if final_args.is_empty() {
-                            cmd_str
+                    if let Some(base) = tgt {
+                        let full = if fa.is_empty() { base } else { format!("{} {}", base, fa) };
+                        let st = if *sudo {
+                            Command::new("sudo").arg("bash").arg("-c").arg(&full).status()
                         } else {
-                            format!("{} {}", cmd_str, final_args)
+                            Command::new("bash").arg("-c").arg(&full).status()
                         };
-                        let status = if *sudo {
-                            Command::new("sudo")
-                            .arg("sh")
-                            .arg("-c")
-                            .arg(&full_cmd)
-                            .status()
-                        } else {
-                            Command::new("sh").arg("-c").arg(&full_cmd).status()
-                        };
-                        if let Err(e) = status {
-                            eprintln!("{} Błąd pluginu '{}': {}", "[x]".red(), name, e);
-                        }
+                        if let Err(e) = st { eprintln!("{} Błąd pluginu '{}': {}", "[x]".red(), name, e); }
                     }
                 }
 
+                // ── Lock ──────────────────────────────────────────────
                 OpCode::Lock { key, val } => {
-                    let k = self.substitute(key);
-                    let v = self.substitute(val);
-                    // val to rozmiar bufora lub string seed
-                    let size = v.parse::<usize>().unwrap_or(v.len());
-                    if self.verbose {
-                        eprintln!("{} Lock: {} ({} bajtów)", "[m]".magenta(), k, size);
-                    }
+                    let k    = self.substitute(key);
+                    let v    = self.substitute(val);
+                    let size = v.parse::<usize>().unwrap_or(v.len().max(1));
+                    if self.verbose { eprintln!("{} Lock: {} ({} B)", "[m]".magenta(), k, size); }
                     self.heap.insert(k, vec![0u8; size]);
                 }
 
+                // ── Unlock ────────────────────────────────────────────
                 OpCode::Unlock { key } => {
                     let k = self.substitute(key);
-                    if self.verbose {
-                        eprintln!("{} Unlock: {}", "[m]".magenta(), k);
-                    }
+                    if self.verbose { eprintln!("{} Unlock: {}", "[m]".magenta(), k); }
                     self.heap.remove(&k);
                 }
             }
             ip += 1;
         }
 
-        self.collect();
+        self.gc_collect();
         0
     }
 
-    /// Rozwiązuje nazwę funkcji — obsługuje:
-    ///   ".Storage.init"  → "Storage.init"
-    ///   ".Tasks.add"     → "Tasks.add"
-    ///   ".banner"        → "banner"
-    fn resolve_func<'a>(
-        &self,
-        name: &str,
-        functions: &'a HashMap<String, usize>,
-    ) -> Option<usize> {
-        // Usuń wiodące kropki z call_path
-        let clean = name.trim_start_matches('.');
-        if let Some(&addr) = functions.get(clean) {
-            return Some(addr);
-        }
-        // Próbuj dopasowanie sufiksowe: "init" może pasować do "Storage.init"
-        for (fname, &addr) in functions {
-            if fname.ends_with(&format!(".{}", clean)) || fname == clean {
-                return Some(addr);
-            }
+    fn resolve_func<'a>(&self, name: &str, fns: &'a HashMap<String, usize>) -> Option<usize> {
+        let c = name.trim_start_matches('.');
+        if let Some(&a) = fns.get(c) { return Some(a); }
+        for (fname, &addr) in fns {
+            if fname == c || fname.ends_with(&format!(".{}", c)) { return Some(addr); }
         }
         None
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-// Cache & generowanie bytecode
+// Generowanie bytecode przez hl-plsa
 // ─────────────────────────────────────────────────────────────
-fn get_file_hash(path: &str) -> String {
-    let bytes = fs::read(path).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
 fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
-    if verbose {
-        eprintln!("{} Cache miss — analizuję źródło: {}", "[*]".yellow(), file_path);
-    }
+    if verbose { eprintln!("{} Cache miss — analizuję: {}", "[*]".yellow(), file_path); }
 
-    let plsa_path = get_plsa_path();
-
-    let output = Command::new(&plsa_path)
-    .arg(file_path)
-    .arg("--json")
-    .arg("--resolve-libs")
+    let out = Command::new(get_plsa_path())
+    .args([file_path, "--json", "--resolve-libs"])
     .output()
-    .unwrap_or_else(|e| {
-        eprintln!(
-            "{} Nie można uruchomić hl-plsa ({:?}): {}",
-                  "[x]".red(),
-                  plsa_path,
-                  e
-        );
-        std::process::exit(1);
-    });
+    .unwrap_or_else(|e| { eprintln!("{} hl-plsa: {}", "[x]".red(), e); std::process::exit(1); });
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("{} hl-plsa zakończył z błędem:\n{}", "[x]".red(), stderr);
+    if !out.status.success() {
+        eprintln!("{} hl-plsa błąd:\n{}", "[x]".red(), String::from_utf8_lossy(&out.stderr));
         std::process::exit(1);
     }
 
-    let ast: AnalysisResult = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
-        eprintln!(
-            "{} Nieprawidłowy JSON z PLSA: {}\n--- stdout ---\n{}",
-            "[x]".red(),
-                  e,
-                  String::from_utf8_lossy(&output.stdout)
-        );
+    let ast: AnalysisResult = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        eprintln!("{} Nieprawidłowy JSON z PLSA: {}\n{}",
+                  "[x]".red(), e, &String::from_utf8_lossy(&out.stdout)[..out.stdout.len().min(512)]);
         std::process::exit(1);
     });
 
     if verbose {
-        eprintln!(
-            "{} AST: {} funkcji, {} węzłów main, {} zależności",
-            "[i]".blue(),
-                  ast.functions.len(),
-                  ast.main_body.len(),
-                  ast.deps.len()
-        );
+        eprintln!("{} AST: {} funkcji, {} węzłów, {} deps",
+                  "[i]".blue(), ast.functions.len(), ast.main_body.len(), ast.deps.len());
         if ast.is_potentially_unsafe {
-            eprintln!(
-                "{} Ostrzeżenie: skrypt zawiera komendy uprzywilejowane (^/sudo):",
-                      "[!]".yellow()
-            );
-            for w in &ast.safety_warnings {
-                eprintln!("    {}", w.yellow());
-            }
+            eprintln!("{} Sudo (^):", "[!]".yellow());
+            for w in &ast.safety_warnings { eprintln!("    {}", w.yellow()); }
         }
     }
 
@@ -788,76 +817,49 @@ fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
 fn main() {
     let args = Args::parse();
 
-    // Utwórz katalog cache
-    if let Err(e) = fs::create_dir_all(CACHE_DIR) {
-        if args.verbose {
-            eprintln!("{} Nie można utworzyć cache dir: {}", "[!]".yellow(), e);
-        }
-    }
-
-    let hash = get_file_hash(&args.file);
-    let bc_path = PathBuf::from(CACHE_DIR).join(format!("{}.bc", hash));
-
-    let program: BytecodeProgram = if !args.no_cache && bc_path.exists() {
-        if args.verbose {
-            eprintln!("{} Cache hit: {}", "[*]".green(), bc_path.display());
-        }
-        match fs::read(&bc_path) {
-            Ok(data) => match bincode::deserialize::<BytecodeProgram>(&data) {
-                Ok(p) => p,
-                Err(e) => {
-                    if args.verbose {
-                        eprintln!("{} Błąd odczytu cache ({}), regeneruję.", "[!]".yellow(), e);
-                    }
-                    let p = generate_bytecode(&args.file, args.verbose);
-                    save_cache(&bc_path, &p, args.verbose);
-                    p
-                }
-            },
-            Err(_) => {
+    let program: BytecodeProgram = if !args.no_cache {
+        match cache_load(&args.file, args.verbose) {
+            Some(p) => p,
+            None    => {
                 let p = generate_bytecode(&args.file, args.verbose);
-                save_cache(&bc_path, &p, args.verbose);
+                cache_save(&args.file, &p, args.verbose);
                 p
             }
         }
     } else {
-        let p = generate_bytecode(&args.file, args.verbose);
-        if !args.no_cache {
-            save_cache(&bc_path, &p, args.verbose);
-        }
-        p
+        generate_bytecode(&args.file, args.verbose)
     };
 
-    let mut vm = VM::new(args.verbose);
-    let start = Instant::now();
-    let exit_code = vm.run(&program);
+    if args.dry_run {
+        eprintln!("{} Dry run: {} ops, {} funkcji.", "[✓]".green(), program.ops.len(), program.functions.len());
+        if args.verbose {
+            for (i, op) in program.ops.iter().enumerate() {
+                eprintln!("  {:>4}: {:?}", i, op);
+            }
+        }
+        return;
+    }
 
-    if args.verbose {
-        eprintln!(
-            "{} Czas wykonania: {:?}",
-            "[INFO]".blue(),
-                  start.elapsed()
-        );
+    let mut vm    = VM::new(args.verbose);
+    let start     = Instant::now();
+    let exit_code = vm.run(&program);
+    let elapsed   = start.elapsed();
+
+    unsafe { gc_collect_full(); }
+
+    if args.verbose { eprintln!("{} Czas: {:?}", "[INFO]".blue(), elapsed); }
+
+    if args.gc_stats || args.verbose {
+        let (mut minor, mut major, mut promoted, mut total) = (0u64, 0u64, 0u64, 0u64);
+        unsafe { gc_stats_get(&mut minor, &mut major, &mut promoted, &mut total); }
+        eprintln!("{}", "━━━ GC Statistics ━━━━━━━━━━━━━━━━━━━━━━".cyan());
+        eprintln!("  allocs total : {}", total.to_string().yellow());
+        eprintln!("  minor GC     : {}", minor.to_string().green());
+        eprintln!("  major GC     : {}", major.to_string().red());
+        eprintln!("  promoted     : {}", promoted.to_string().magenta());
+        eprintln!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".cyan());
+        if args.verbose { unsafe { gc_stats_print(); } }
     }
 
     std::process::exit(exit_code);
-}
-
-fn save_cache(path: &PathBuf, prog: &BytecodeProgram, verbose: bool) {
-    match bincode::serialize(prog) {
-        Ok(data) => {
-            if let Err(e) = fs::write(path, data) {
-                if verbose {
-                    eprintln!("{} Nie można zapisać cache: {}", "[!]".yellow(), e);
-                }
-            } else if verbose {
-                eprintln!("{} Cache zapisany: {}", "[*]".green(), path.display());
-            }
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("{} Błąd serializacji cache: {}", "[!]".yellow(), e);
-            }
-        }
-    }
 }
