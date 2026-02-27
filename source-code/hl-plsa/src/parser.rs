@@ -233,14 +233,32 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
              LineOp::For(v, i, fi.next()?.as_str().to_string())
          },
 
-         Rule::bg_stmt     => LineOp::Bg(node.into_inner().next()?.as_str().to_string()),
-         Rule::log_stmt    => LineOp::Log(node.into_inner().next()?.as_str().to_string()),
-         Rule::lock_stmt   => {
+         Rule::bg_stmt  => LineOp::Bg(node.into_inner().next()?.as_str().to_string()),
+         Rule::log_stmt => LineOp::Log(node.into_inner().next()?.as_str().to_string()),
+
+         // NAPRAWA: into_inner() zwraca teraz [lock_key, rest]
+         // lock_key = { "$" ~ ident } — nazwana reguła, widoczna przez into_inner()
+         // "$" i "=" to literały — pest ich NIE zwraca przez into_inner()
+         // Poprzedni kod: fi.next() → lock_key (ok), fi.next() → próba skip "=" (błąd! "=" jest
+         // literałem niewidocznym), fi.next() → None zamiast rest → lock_stmt failował cicho
+         Rule::lock_stmt => {
              let mut fi = node.into_inner();
-             let k = fi.next()?.as_str().to_string(); fi.next();
-             LineOp::Lock(k, fi.next()?.as_str().to_string())
+             // fi.next() → lock_key ("$CARGO_READY") — bierzemy tylko ident z jego wnętrza
+             let lock_key = fi.next()?;
+             let k = lock_key.into_inner().next()?.as_str().to_string(); // ident wewnątrz lock_key
+             // fi.next() → rest ("true" / "$val" / ...) — "=" jest literałem, niewidoczne
+             let v = fi.next()?.as_str().to_string();
+             LineOp::Lock(k, v)
          },
-         Rule::unlock_stmt => LineOp::Unlock(node.into_inner().next()?.as_str().to_string()),
+
+         // NAPRAWA: unlock_stmt = { "unlock" ~ lock_key }
+         // lock_key = { "$" ~ ident } — ident wyciągamy z jego wnętrza
+         // Poprzedni kod: fi.next() zwracał lock_key jako całość zamiast samego ident
+         Rule::unlock_stmt => {
+             let lock_key = node.into_inner().next()?;
+             let k = lock_key.into_inner().next()?.as_str().to_string();
+             LineOp::Unlock(k)
+         },
 
          Rule::enum_stmt => {
              let mut fi = node.into_inner();
