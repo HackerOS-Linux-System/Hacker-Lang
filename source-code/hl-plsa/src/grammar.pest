@@ -1,5 +1,4 @@
 WHITESPACE = _{ " " | "\t" }
-
 ident    = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
 number   = @{ ASCII_DIGIT+ }
 str_lit  = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
@@ -7,7 +6,6 @@ version  = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
 lib_name = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "/")+ }
 lib_type = @{ "source" | "core" | "bytes" | "github" | "virus" | "vira" }
 lib_ref  =  { "<" ~ lib_type ~ "/" ~ lib_name ~ (":" ~ version)? ~ ">" }
-
 rest     = @{ (!EOI ~ ANY)+ }
 cond     = @{ (!(" > " | " |> " | " <| ") ~ !EOI ~ ANY)+ }
 try_body = @{ (!(" catch ") ~ !EOI ~ ANY)+ }
@@ -68,15 +66,18 @@ while_stmt = { "while" ~ cond   ~ cpfx ~ rest }
 for_stmt   = { "for" ~ ident ~ "in" ~ cond ~ cpfx ~ rest }
 bg_stmt    = { "&"      ~ rest }
 log_stmt   = { "log"    ~ str_lit }
-lock_stmt  = { "lock"   ~ "$" ~ ident ~ "=" ~ rest }
-unlock_stmt = { "unlock" ~ "$" ~ ident }
+
+// NAPRAWA: lock_key jako nazwana reguła — into_inner() zwraca [lock_key, rest]
+// bez tego pest zwraca literały "$" i "=" jako anonimowe tokeny niewidoczne
+// przez into_inner(), co powodowało że fi.next() w parser.rs trafiało w złe miejsce
+lock_key    = { "$" ~ ident }
+lock_stmt   = { "lock"   ~ lock_key ~ "=" ~ rest }
+unlock_stmt = { "unlock" ~ lock_key }
 
 // \\ plugin_name [args] — ~/.hackeros/hacker-lang/plugins/<name> lub <name>.hl
 plugin_stmt = { "\\\\" ~ rest }
-
 // -- [static] path — linkowanie zewnętrzne
 extern_stmt = { "--" ~ rest }
-
 enum_stmt   = { "==" ~ ident ~ "[" ~ (ident ~ ("," ~ ident)*)? ~ "]" }
 struct_stmt = { "struct" ~ ident ~ "[" ~ (sf ~ ("," ~ sf)*)? ~ "]" }
 sf          = { ident ~ ":" ~ ident }
