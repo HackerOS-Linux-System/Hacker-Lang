@@ -1,9 +1,8 @@
 [workspace]
 members = [
-    "source-code/core/hl-runtime",
-    "source-code/core/hl-plsa",
-    "source-code/core/hl-compiler",
+    "source-code/hl-runtime",
+    "source-code/hl-plsa",
+    "source-code/hl-compiler",
     "source-code/cli/virus",
-    "source-code/cli/hl",
 ]
 resolver = "2"
