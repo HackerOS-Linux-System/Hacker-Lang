@@ -17,11 +17,12 @@ struct HlParser;
 
 #[derive(Debug, Clone)]
 pub enum LineOp {
+    // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────────
     ClassDef(String),
-    UnsafeDef(String),
-    FuncDef(String),
+    UnsafeDef(String, Option<String>),
+    FuncDef(String, Option<String>),
     FuncDone,
-    Call(String),
+    Call(String, String),
     SysDep(String),
     Lib(LibRef),
     SepCmd(String),
@@ -42,12 +43,24 @@ pub enum LineOp {
     Unlock(String),
     Extern(String, bool),           // path, is_static
     Enum(String, Vec<String>),
-    Import(String),
+    Import(String, Option<String>),
     Try(String, String),
     Struct(String, Vec<(String, String)>),
     RawBlockStart,
     RawBlockEnd,
     End(i32),
+    Out(String),
+    // ── NOWE ─────────────────────────────────────────────────────
+    Percent(String, String),                    // % key = val — stała
+    Spawn(String),                              // spawn rest
+    Await(String),                              // await rest
+    Assert(String, Option<String>),             // assert cond [msg]
+    Match(String),                              // match cond |>
+    MatchArm(String, String),                   // val > cmd
+    Pipe(Vec<String>),                          // a |> b |> c
+    // ── NOWE: przypisanie wyniku spawn/await ─────────────────────
+    AssignSpawn(String, String),                // key = spawn rest
+    AssignAwait(String, String),                // key = await rest
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +97,8 @@ fn lib_path(lib: &LibRef) -> Option<PathBuf> {
 //   ~n = $(...)          is_raw=true
 //   done_    = $(...)    zwykłe lokalne
 //   title_   = $1        zwykłe lokalne
+//   job = spawn .task    is_spawn=true (wykrywane po value)
+//   got = await .fetch   is_await=true (wykrywane po value)
 //
 // Odrzuca (zwraca None):
 //   done                 (brak '=')
@@ -125,7 +140,7 @@ fn is_assignment(line: &str) -> Option<(String, String, bool, bool)> {
 
     // musi być '=' ale NIE '=='
     let rest = rest.strip_prefix('=')?;
-    if rest.starts_with('=') { return None; }  // to jest '=='
+    if rest.starts_with('=') { return None; } // to jest '=='
 
     let value = rest.trim_start_matches(|c| c == ' ' || c == '\t').to_string();
 
@@ -133,7 +148,53 @@ fn is_assignment(line: &str) -> Option<(String, String, bool, bool)> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Parsowanie przez pest
+// is_percent — wykrywa stałą % PRZED pest
+// %APP_NAME = "HackerOS"
+// %MAX_CONN = 100
+// ─────────────────────────────────────────────────────────────
+fn is_percent(line: &str) -> Option<(String, String)> {
+    let s = line.strip_prefix('%')?;
+    // zbierz ident
+    let first = s.chars().next()?;
+    if !first.is_ascii_alphabetic() && first != '_' { return None; }
+    let ident_len = s.chars()
+    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+    .map(|c| c.len_utf8())
+    .sum::<usize>();
+    if ident_len == 0 { return None; }
+    let key  = s[..ident_len].to_string();
+    let rest = s[ident_len..].trim_start_matches(|c| c == ' ' || c == '\t');
+    let rest = rest.strip_prefix('=')?;
+    if rest.starts_with('=') { return None; }
+    let value = rest.trim_start_matches(|c| c == ' ' || c == '\t').to_string();
+    Some((key, value))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_spawn_assign — wykrywa `key = spawn rest` PRZED pest
+// job  = spawn .heavy_task $data
+// ─────────────────────────────────────────────────────────────
+fn is_spawn_assign(line: &str) -> Option<(String, String)> {
+    let (key, val, _, _) = is_assignment(line)?;
+    let rest = val.strip_prefix("spawn")?;
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_alphanumeric()) { return None; }
+    Some((key, rest.trim_start().to_string()))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_await_assign — wykrywa `key = await rest` PRZED pest
+// got = await $job
+// got = await .fetch_users
+// ─────────────────────────────────────────────────────────────
+fn is_await_assign(line: &str) -> Option<(String, String)> {
+    let (key, val, _, _) = is_assignment(line)?;
+    let rest = val.strip_prefix("await")?;
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_alphanumeric()) { return None; }
+    Some((key, rest.trim_start().to_string()))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Parsowanie przez pest — funkcje pomocnicze
 // ─────────────────────────────────────────────────────────────
 fn parse_extern(raw: &str) -> (String, bool) {
     let t = raw.trim();
@@ -167,6 +228,9 @@ fn parse_lib_ref(pair: Pair<Rule>) -> LibRef {
     LibRef { lib_type, name: nm, version: ver }
 }
 
+// ─────────────────────────────────────────────────────────────
+// line_to_op — główna funkcja konwersji pest → LineOp
+// ─────────────────────────────────────────────────────────────
 fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
     let mut inner = line_pair.into_inner();
     if inner.peek().map(|p| p.as_rule()) == Some(Rule::sudo) { inner.next(); }
@@ -174,22 +238,37 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
     let node = stmt.into_inner().next()?;
 
     Some(match node.as_rule() {
+
+        // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────
         Rule::class_def  => LineOp::ClassDef(node.into_inner().next()?.as_str().to_string()),
-         Rule::unsafe_def => LineOp::UnsafeDef(node.into_inner().next()?.as_str().to_string()),
-         Rule::func_def   => LineOp::FuncDef(node.into_inner().next()?.as_str().to_string()),
+         Rule::unsafe_def => {
+             let mut fi = node.into_inner();
+             let name = fi.next()?.as_str().to_string();
+             let sig  = fi.next().map(|p| p.as_str().to_string());
+             LineOp::UnsafeDef(name, sig)
+         },
+         Rule::func_def => {
+             let mut fi = node.into_inner();
+             let name = fi.next()?.as_str().to_string();
+             let sig  = fi.next().map(|p| p.as_str().to_string());
+             LineOp::FuncDef(name, sig)
+         },
          Rule::func_done  => LineOp::FuncDone,
-         Rule::call_stmt  => LineOp::Call(node.into_inner().next()?.as_str().to_string()),
+         Rule::call_stmt  => {
+             let mut fi = node.into_inner();
+             let path = fi.next()?.as_str().to_string();
+             let args = fi.next().map(|p| p.as_str().to_string()).unwrap_or_default();
+             LineOp::Call(path, args)
+         },
          Rule::sys_dep    => LineOp::SysDep(node.into_inner().next()?.as_str().to_string()),
          Rule::lib_stmt   => LineOp::Lib(parse_lib_ref(node.into_inner().next()?)),
-
-         Rule::sep_cmd  => LineOp::SepCmd(node.into_inner().next()?.as_str().to_string()),
-         Rule::raw_cmd  => LineOp::RawCmd(node.into_inner().next()?.as_str().to_string()),
-         Rule::expl_cmd => {
+         Rule::sep_cmd    => LineOp::SepCmd(node.into_inner().next()?.as_str().to_string()),
+         Rule::raw_cmd    => LineOp::RawCmd(node.into_inner().next()?.as_str().to_string()),
+         Rule::expl_cmd   => {
              let mut fi = node.into_inner();
              fi.next(); // cpfx
              LineOp::ExplCmd(fi.next()?.as_str().to_string())
          },
-
          Rule::plugin_stmt => {
              let (name, args) = split_plugin(node.into_inner().next()?.as_str());
              LineOp::Plugin(name, args)
@@ -198,7 +277,6 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
              let (path, is_static) = parse_extern(node.into_inner().next()?.as_str());
              LineOp::Extern(path, is_static)
          },
-
          Rule::loop_stmt => {
              let mut fi = node.into_inner();
              let n: u64 = fi.next()?.as_str().parse().unwrap_or(0);
@@ -232,43 +310,29 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
              fi.next();
              LineOp::For(v, i, fi.next()?.as_str().to_string())
          },
-
-         Rule::bg_stmt  => LineOp::Bg(node.into_inner().next()?.as_str().to_string()),
-         Rule::log_stmt => LineOp::Log(node.into_inner().next()?.as_str().to_string()),
-
-         // NAPRAWA: into_inner() zwraca teraz [lock_key, rest]
-         // lock_key = { "$" ~ ident } — nazwana reguła, widoczna przez into_inner()
-         // "$" i "=" to literały — pest ich NIE zwraca przez into_inner()
-         // Poprzedni kod: fi.next() → lock_key (ok), fi.next() → próba skip "=" (błąd! "=" jest
-         // literałem niewidocznym), fi.next() → None zamiast rest → lock_stmt failował cicho
-         Rule::lock_stmt => {
-             let mut fi = node.into_inner();
-             // fi.next() → lock_key ("$CARGO_READY") — bierzemy tylko ident z jego wnętrza
+         Rule::bg_stmt    => LineOp::Bg(node.into_inner().next()?.as_str().to_string()),
+         Rule::log_stmt   => LineOp::Log(node.into_inner().next()?.as_str().to_string()),
+         Rule::lock_stmt  => {
+             let mut fi   = node.into_inner();
              let lock_key = fi.next()?;
-             let k = lock_key.into_inner().next()?.as_str().to_string(); // ident wewnątrz lock_key
-             // fi.next() → rest ("true" / "$val" / ...) — "=" jest literałem, niewidoczne
+             let k = lock_key.into_inner().next()?.as_str().to_string();
              let v = fi.next()?.as_str().to_string();
              LineOp::Lock(k, v)
          },
-
-         // NAPRAWA: unlock_stmt = { "unlock" ~ lock_key }
-         // lock_key = { "$" ~ ident } — ident wyciągamy z jego wnętrza
-         // Poprzedni kod: fi.next() zwracał lock_key jako całość zamiast samego ident
          Rule::unlock_stmt => {
              let lock_key = node.into_inner().next()?;
              let k = lock_key.into_inner().next()?.as_str().to_string();
              LineOp::Unlock(k)
          },
-
          Rule::enum_stmt => {
              let mut fi = node.into_inner();
              let name = fi.next()?.as_str().to_string();
              LineOp::Enum(name, fi.map(|p: Pair<Rule>| p.as_str().to_string()).collect())
          },
          Rule::struct_stmt => {
-             let mut fi = node.into_inner();
-             let name = fi.next()?.as_str().to_string();
-             let fields = fi.map(|p: Pair<Rule>| {
+             let mut fi   = node.into_inner();
+             let name     = fi.next()?.as_str().to_string();
+             let fields   = fi.map(|p: Pair<Rule>| {
                  let mut f = p.into_inner();
                  (
                      f.next().map(|x| x.as_str().to_string()).unwrap_or_default(),
@@ -277,35 +341,120 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
              }).collect();
              LineOp::Struct(name, fields)
          },
-         Rule::import_stmt => LineOp::Import(node.into_inner().next()?.as_str().to_string()),
+         Rule::import_stmt => {
+             let mut fi    = node.into_inner();
+             let resource  = fi.next()?.as_str().trim_matches('"').to_string();
+             // "in" to literał — pest go nie zwraca przez into_inner()
+             // fi.next() od razu trafia na ident przestrzeni nazw (jeśli był)
+             let namespace = fi.next().map(|p| p.as_str().to_string());
+             LineOp::Import(resource, namespace)
+         },
          Rule::try_stmt => {
              let mut fi = node.into_inner();
              LineOp::Try(fi.next()?.as_str().to_string(), fi.next()?.as_str().to_string())
          },
-         Rule::raw_blk_s => LineOp::RawBlockStart,
-         Rule::raw_blk_e => LineOp::RawBlockEnd,
-         Rule::end_stmt  => {
+         Rule::raw_blk_s  => LineOp::RawBlockStart,
+         Rule::raw_blk_e  => LineOp::RawBlockEnd,
+         Rule::end_stmt   => {
              let code = node.into_inner().next()
              .and_then(|p: Pair<Rule>| p.as_str().parse::<i32>().ok())
              .unwrap_or(0);
              LineOp::End(code)
          },
+         Rule::out_stmt => {
+             let val = node.into_inner().next()
+             .map(|p| p.as_str().to_string())
+             .unwrap_or_default();
+             LineOp::Out(val)
+         },
+
+         // ── NOWE reguły ──────────────────────────────────────────
+
+         // % key = val — stała
+         // percent_stmt = { "%" ~ percent_key ~ "=" ~ rest }
+         // "%" i "=" to literały — niewidoczne przez into_inner()
+         // into_inner() zwraca: [percent_key, rest]
+         Rule::percent_stmt => {
+             let mut fi = node.into_inner();
+             let key = fi.next()?.as_str().to_string();
+             let val = fi.next()?.as_str().to_string();
+             LineOp::Percent(key, val)
+         },
+
+         // spawn rest
+         // spawn_stmt = { "spawn" ~ rest }
+         // "spawn" to literał — into_inner() zwraca: [rest]
+         Rule::spawn_stmt => {
+             let rest = node.into_inner().next()?.as_str().to_string();
+             LineOp::Spawn(rest)
+         },
+
+         // await rest
+         // await_stmt = { "await" ~ rest }
+         // "await" to literał — into_inner() zwraca: [rest]
+         Rule::await_stmt => {
+             let rest = node.into_inner().next()?.as_str().to_string();
+             LineOp::Await(rest)
+         },
+
+         // assert assert_body str_lit?
+         // assert_stmt = { "assert" ~ assert_body ~ str_lit? }
+         // "assert" to literał — into_inner() zwraca: [assert_body, str_lit?]
+         Rule::assert_stmt => {
+             let mut fi = node.into_inner();
+             let cond   = fi.next()?.as_str().trim().to_string();
+             let msg    = fi.next().map(|p| p.as_str().trim_matches('"').to_string());
+             LineOp::Assert(cond, msg)
+         },
+
+         // match cond cpfx
+         // match_stmt = { "match" ~ cond ~ cpfx }
+         // "match" to literał — into_inner() zwraca: [cond, cpfx]
+         Rule::match_stmt => {
+             let mut fi = node.into_inner();
+             let cond   = fi.next()?.as_str().to_string();
+             // cpfx — pomijamy (jest ale nas nie interesuje tu)
+             LineOp::Match(cond)
+         },
+
+         // match_val cpfx rest
+         // match_arm = { match_val ~ cpfx ~ rest }
+         // into_inner() zwraca: [match_val, cpfx, rest]
+         Rule::match_arm => {
+             let mut fi = node.into_inner();
+             let val    = fi.next()?.as_str().trim().to_string();
+             fi.next(); // cpfx
+             let cmd    = fi.next()?.as_str().to_string();
+             LineOp::MatchArm(val, cmd)
+         },
+
+         // pipe_stmt = { call_path ~ rest? ~ (pipe_item_sep ~ call_path ~ rest?)+ }
+         // into_inner() zwraca kolejne call_path i rest na przemian
+         Rule::pipe_stmt => {
+             let steps: Vec<String> = node.into_inner()
+             .map(|p| p.as_str().to_string())
+             .collect();
+             LineOp::Pipe(steps)
+         },
+
          _ => return None,
     })
 }
 
 fn suggest(line: &str) -> String {
     let t = line.trim();
-    let cmds = ["echo ", "mkdir ", "rm ", "cp ", "mv ", "cat ", "jq ",
-    "curl ", "find ", "ls ", "touch ", "chmod ", "chown ",
-    "git ", "date ", "printf ", "grep ", "sed ", "awk ",
-    "tar ", "df ", "ps ", "free "];
+    let cmds = [
+        "echo ", "mkdir ", "rm ", "cp ", "mv ", "cat ", "jq ",
+        "curl ", "find ", "ls ", "touch ", "chmod ", "chown ",
+        "git ", "date ", "printf ", "grep ", "sed ", "awk ",
+        "tar ", "df ", "ps ", "free ",
+    ];
     for cmd in &cmds {
         if t.starts_with(cmd) {
             return format!("Brakuje prefiksu komendy — użyj: > {}", t);
         }
     }
-    "Nieznana składnia — dokumentacja: https://hackeros.dev/docs/hacker-lang".to_string()
+    "Nieznana składnia — dokumentacja: https://hackeros-linux-system.github.io/HackerOS-Website/hacker-lang/docs.html".to_string()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -382,7 +531,41 @@ pub fn parse_file(
         let span     = SourceSpan::new(off.into(), parse_src.len().into());
 
         // ══════════════════════════════════════════════════════
-        // ETAP 1: Sprawdź przypisanie w Rust — PRZED pest
+        // ETAP 1a: Sprawdź % (stała) — PRZED pest i PRZED is_assignment
+        // %APP_NAME = "HackerOS"
+        // ══════════════════════════════════════════════════════
+        if let Some((key, val)) = is_percent(parse_src) {
+            let op = LineOp::Percent(key, val);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1b: Sprawdź `key = spawn rest` — PRZED is_assignment
+        // ══════════════════════════════════════════════════════
+        if let Some((key, rest)) = is_spawn_assign(parse_src) {
+            let op = LineOp::AssignSpawn(key, rest);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1c: Sprawdź `key = await rest` — PRZED is_assignment
+        // ══════════════════════════════════════════════════════
+        if let Some((key, rest)) = is_await_assign(parse_src) {
+            let op = LineOp::AssignAwait(key, rest);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1d: Sprawdź przypisanie w Rust — PRZED pest
         // Obsługuje done_=x, total_=x, @VAR=x, ~name=x itp.
         // ══════════════════════════════════════════════════════
         if let Some((key, val, is_raw, is_global)) = is_assignment(parse_src) {
@@ -394,7 +577,7 @@ pub fn parse_file(
             if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
                 push_node(&mut result, &scopes, node);
             }
-            continue;  // ← kluczowe: nie trafia do pest
+            continue; // ← kluczowe: nie trafia do pest
         }
 
         // ══════════════════════════════════════════════════════
@@ -409,16 +592,16 @@ pub fn parse_file(
         };
 
         match op {
-            LineOp::ClassDef(name) => { scopes.push(Scope::Class(name)); },
-            LineOp::FuncDef(name) => {
+            LineOp::ClassDef(name)       => { scopes.push(Scope::Class(name)); },
+            LineOp::FuncDef(name, sig)   => {
                 let full = qualified(&scopes, &name);
                 scopes.push(Scope::Func(full.clone()));
-                result.functions.insert(full, (false, Vec::new()));
+                result.functions.insert(full, (false, sig, Vec::new()));
             },
-            LineOp::UnsafeDef(name) => {
+            LineOp::UnsafeDef(name, sig) => {
                 let full = qualified(&scopes, &name);
                 scopes.push(Scope::Func(full.clone()));
-                result.functions.insert(full, (true, Vec::new()));
+                result.functions.insert(full, (true, sig, Vec::new()));
             },
             LineOp::FuncDone => { scopes.pop(); },
             LineOp::RawBlockStart => {
@@ -433,7 +616,7 @@ pub fn parse_file(
                             advice: "Nieoczekiwany ']' bez pasującego '['".to_string(),
                 });
             },
-            LineOp::SysDep(dep) => result.deps.push(dep),
+            LineOp::SysDep(dep)  => result.deps.push(dep),
             LineOp::Lib(lib_ref) => handle_lib(
                 lib_ref, path, &src, span,
                 resolve_libs, verbose, seen_libs, &mut result, &mut errors,
@@ -461,7 +644,7 @@ fn push_err(
     span: SourceSpan, line_num: usize, line_src: &str,
 ) {
     errors.push(ParseError::SyntaxError {
-        src: NamedSource::new(path, src.to_string()),
+        src:     NamedSource::new(path, src.to_string()),
                 span, line_num, advice: suggest(line_src),
     });
 }
@@ -505,7 +688,7 @@ fn handle_lib(
                 }
             } else {
                 errors.push(ParseError::SyntaxError {
-                    src: NamedSource::new(path, src.to_string()),
+                    src:     NamedSource::new(path, src.to_string()),
                             span, line_num: 0,
                             advice: format!("Nieprawidłowa ścieżka lib: {}", lib_ref.name),
                 });
@@ -517,43 +700,57 @@ fn handle_lib(
 fn push_node(result: &mut AnalysisResult, scopes: &[Scope], node: ProgramNode) {
     for scope in scopes.iter().rev() {
         if let Scope::Func(name) = scope {
-            if let Some(f) = result.functions.get_mut(name) { f.1.push(node); return; }
+            if let Some(f) = result.functions.get_mut(name) { f.2.push(node); return; }
         }
     }
     result.main_body.push(node);
 }
 
-fn build_node(line_num: usize, is_sudo: bool, off: usize, src: &str, op: LineOp) -> Option<ProgramNode> {
+fn build_node(
+    line_num: usize, is_sudo: bool, off: usize, src: &str, op: LineOp,
+) -> Option<ProgramNode> {
     let cmd = match op {
-        LineOp::SepCmd(c)         => CommandType::Isolated(c),
-        LineOp::RawCmd(c)         => CommandType::RawNoSub(c),
-        LineOp::ExplCmd(c)        => CommandType::RawSub(c),
-        LineOp::GlobalVar(k, v)   => CommandType::AssignEnv { key: k, val: v },
-        LineOp::LocalVar(k, v, r) => CommandType::AssignLocal { key: k, val: v, is_raw: r },
-        LineOp::Loop(n, c)        => CommandType::Loop { count: n, cmd: c },
-        LineOp::If(co, c)         => CommandType::If { cond: co, cmd: c },
-        LineOp::Elif(co, c)       => CommandType::Elif { cond: co, cmd: c },
-        LineOp::Else(c)           => CommandType::Else { cmd: c },
-        LineOp::While(co, c)      => CommandType::While { cond: co, cmd: c },
-        LineOp::For(v, i, c)      => CommandType::For { var: v, in_: i, cmd: c },
-        LineOp::Bg(c)             => CommandType::Background(c),
-        LineOp::Call(n)           => CommandType::Call(n),
-        LineOp::Plugin(n, a)      => CommandType::Plugin { name: n, args: a, is_super: is_sudo },
-        LineOp::Log(m)            => CommandType::Log(m),
-        LineOp::Lock(k, v)        => CommandType::Lock { key: k, val: v },
-        LineOp::Unlock(k)         => CommandType::Unlock { key: k },
-        LineOp::Extern(p, sl)     => CommandType::Extern { path: p, static_link: sl },
-        LineOp::Import(r)         => CommandType::Import { resource: r },
-        LineOp::Enum(n, vars)     => CommandType::Enum { name: n, variants: vars },
-        LineOp::Struct(n, flds)   => CommandType::Struct { name: n, fields: flds },
-        LineOp::Try(t, c)         => CommandType::Try { try_cmd: t, catch_cmd: c },
-        LineOp::End(code)         => CommandType::End { code },
+        // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────
+        LineOp::SepCmd(c)          => CommandType::Isolated(c),
+        LineOp::RawCmd(c)          => CommandType::RawNoSub(c),
+        LineOp::ExplCmd(c)         => CommandType::RawSub(c),
+        LineOp::GlobalVar(k, v)    => CommandType::AssignEnv   { key: k, val: v },
+        LineOp::LocalVar(k, v, r)  => CommandType::AssignLocal { key: k, val: v, is_raw: r },
+        LineOp::Loop(n, c)         => CommandType::Loop   { count: n, cmd: c },
+        LineOp::If(co, c)          => CommandType::If     { cond: co, cmd: c },
+        LineOp::Elif(co, c)        => CommandType::Elif   { cond: co, cmd: c },
+        LineOp::Else(c)            => CommandType::Else   { cmd: c },
+        LineOp::While(co, c)       => CommandType::While  { cond: co, cmd: c },
+        LineOp::For(v, i, c)       => CommandType::For    { var: v, in_: i, cmd: c },
+        LineOp::Bg(c)              => CommandType::Background(c),
+        LineOp::Call(p, a)         => CommandType::Call   { path: p, args: a },
+        LineOp::Plugin(n, a)       => CommandType::Plugin { name: n, args: a, is_super: is_sudo },
+        LineOp::Log(m)             => CommandType::Log(m),
+        LineOp::Lock(k, v)         => CommandType::Lock   { key: k, val: v },
+        LineOp::Unlock(k)          => CommandType::Unlock { key: k },
+        LineOp::Extern(p, sl)      => CommandType::Extern { path: p, static_link: sl },
+        LineOp::Import(r, ns)      => CommandType::Import { resource: r, namespace: ns },
+        LineOp::Enum(n, vars)      => CommandType::Enum   { name: n, variants: vars },
+        LineOp::Struct(n, flds)    => CommandType::Struct { name: n, fields: flds },
+        LineOp::Try(t, c)          => CommandType::Try    { try_cmd: t, catch_cmd: c },
+        LineOp::End(code)          => CommandType::End    { code },
+        LineOp::Out(v)             => CommandType::Out(v),
+        // ── NOWE ─────────────────────────────────────────────────
+        LineOp::Percent(k, v)      => CommandType::Const  { key: k, val: v },
+        LineOp::Spawn(r)           => CommandType::Spawn(r),
+        LineOp::Await(r)           => CommandType::Await(r),
+        LineOp::AssignSpawn(k, r)  => CommandType::AssignSpawn { key: k, task: r },
+        LineOp::AssignAwait(k, r)  => CommandType::AssignAwait { key: k, expr: r },
+        LineOp::Assert(c, m)       => CommandType::Assert { cond: c, msg: m },
+        LineOp::Match(c)           => CommandType::Match  { cond: c },
+        LineOp::MatchArm(v, c)     => CommandType::MatchArm { val: v, cmd: c },
+        LineOp::Pipe(steps)        => CommandType::Pipe(steps),
         _ => return None,
     };
     Some(ProgramNode {
         line_num, is_sudo,
-         content: cmd,
+         content:       cmd,
          original_text: src.to_string(),
-         span: (off, src.len()),
+         span:          (off, src.len()),
     })
 }
