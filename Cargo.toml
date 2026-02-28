@@ -3,6 +3,5 @@ members = [
     "source-code/hl-runtime",
     "source-code/hl-plsa",
     "source-code/hl-compiler",
-    "source-code/cli/virus",
 ]
 resolver = "2"
