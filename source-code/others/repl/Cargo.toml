@@ -1,8 +1,7 @@
-use pyo3::prelude::*;
+[package]
+name = "hl-repl"
+version = "1.7.5"
+edition = "2021"
 
-fn main() -> PyResult<()> {
-    let code = include_str!("../main.py");
-    Python::with_gil(|py| {
-        py.run_bound(code, None, None)
-    })
-}
+[dependencies]
+pyo3 = { version = "0.22.2", features = ["auto-initialize"] }
