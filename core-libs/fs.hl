@@ -1,0 +1,96 @@
+! Standardowa biblioteka systemu plików
+
+: fs_read [str -> str] def
+    result = $(cat $1 2>/dev/null || echo "")
+    out $result
+done
+
+: fs_write [str str -> void] def
+    > printf "%s" $2 > $1
+done
+
+: fs_append [str str -> void] def
+    > printf "%s\n" $2 >> $1
+done
+
+: fs_delete [str -> void] def
+    > rm -f $1
+done
+
+: fs_copy [str str -> void] def
+    > cp -r $1 $2
+done
+
+: fs_move [str str -> void] def
+    > mv $1 $2
+done
+
+: fs_mkdir [str -> void] def
+    > mkdir -p $1
+done
+
+: fs_rmdir [str -> void] def
+    > rm -rf $1
+done
+
+: fs_exists [str -> bool] def
+    result = $(test -e $1 && echo true || echo false)
+    out $result
+done
+
+: fs_is_file [str -> bool] def
+    result = $(test -f $1 && echo true || echo false)
+    out $result
+done
+
+: fs_is_dir [str -> bool] def
+    result = $(test -d $1 && echo true || echo false)
+    out $result
+done
+
+: fs_size [str -> int] def
+    result = $(stat -c%s $1 2>/dev/null || echo 0)
+    out $result
+done
+
+: fs_list [str -> str] def
+    ! zwraca pliki linia po linii
+    result = $(ls -1 $1 2>/dev/null)
+    out $result
+done
+
+: fs_find [str str -> str] def
+    ! $1=dir $2=pattern
+    result = $(find $1 -name $2 2>/dev/null)
+    out $result
+done
+
+: fs_chmod [str str -> void] def
+    ! $1=mode (np. "755") $2=path
+    > chmod $1 $2
+done
+
+: fs_basename [str -> str] def
+    result = $(basename $1)
+    out $result
+done
+
+: fs_dirname [str -> str] def
+    result = $(dirname $1)
+    out $result
+done
+
+: fs_extension [str -> str] def
+    result = $(echo $1 | sed 's/.*\.//')
+    out $result
+done
+
+: fs_temp_file [void -> str] def
+    result = $(mktemp)
+    out $result
+done
+
+: fs_temp_dir [void -> str] def
+    result = $(mktemp -d)
+    out $result
+done
