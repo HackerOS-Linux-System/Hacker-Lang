@@ -11,8 +11,12 @@ mod parser;
 use crate::parser::{parse_file, plugins_root};
 
 #[derive(ClapParser, Debug)]
-#[command(name="hl-plsa", author="HackerOS", version=env!("CARGO_PKG_VERSION"),
-about="hacker-lang static analyser v8")]
+#[command(
+name    = "hl-plsa",
+author  = "HackerOS",
+version = env!("CARGO_PKG_VERSION"),
+          about   = "hacker-lang static analyser"
+)]
 struct Args {
     /// Plik .hl do analizy
     file: String,
@@ -60,31 +64,62 @@ impl LibRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CommandType {
+    // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────────
     RawNoSub(String),
     RawSub(String),
     Isolated(String),
     AssignEnv   { key: String, val: String },
     AssignLocal { key: String, val: String, is_raw: bool },
-    Loop   { count: u64, cmd: String },
-    If     { cond: String, cmd: String },
-    Elif   { cond: String, cmd: String },
-    Else   { cmd: String },
-    While  { cond: String, cmd: String },
-    For    { var: String, in_: String, cmd: String },
+    Loop        { count: u64, cmd: String },
+    If          { cond: String, cmd: String },
+    Elif        { cond: String, cmd: String },
+    Else        { cmd: String },
+    While       { cond: String, cmd: String },
+    For         { var: String, in_: String, cmd: String },
     Background(String),
-    Call(String),
+    Call        { path: String, args: String },
     /// \\ plugin_name [args] — uruchamia ~/.hackeros/hacker-lang/plugins/<n>
-    Plugin { name: String, args: String, is_super: bool },
+    Plugin      { name: String, args: String, is_super: bool },
     Log(String),
-    Lock   { key: String, val: String },
-    Unlock { key: String },
+    Lock        { key: String, val: String },
+    Unlock      { key: String },
     /// -- [static] path — linkowanie zewnętrzne
-    Extern { path: String, static_link: bool },
-    Import { resource: String },
-    Enum   { name: String, variants: Vec<String> },
-    Struct { name: String, fields: Vec<(String, String)> },
-    Try    { try_cmd: String, catch_cmd: String },
-    End    { code: i32 },
+    Extern      { path: String, static_link: bool },
+    Import      { resource: String, namespace: Option<String> },
+    Enum        { name: String, variants: Vec<String> },
+    Struct      { name: String, fields: Vec<(String, String)> },
+    Try         { try_cmd: String, catch_cmd: String },
+    End         { code: i32 },
+    Out(String),
+
+    // ── NOWE ─────────────────────────────────────────────────────
+
+    /// % KEY = val — stała (niezmienne przez konwencję)
+    Const       { key: String, val: String },
+
+    /// spawn rest — uruchom zadanie asynchronicznie, zwróć handle
+    Spawn(String),
+
+    /// await rest — czekaj na wynik (bez przypisania)
+    Await(String),
+
+    /// key = spawn rest — uruchom i przypisz handle do zmiennej
+    AssignSpawn { key: String, task: String },
+
+    /// key = await rest — czekaj i przypisz wynik do zmiennej
+    AssignAwait { key: String, expr: String },
+
+    /// assert cond [msg] — walidacja w miejscu
+    Assert      { cond: String, msg: Option<String> },
+
+    /// match cond |> — nagłówek bloku dopasowania
+    Match       { cond: String },
+
+    /// val > cmd — ramię match
+    MatchArm    { val: String, cmd: String },
+
+    /// .a |> .b |> .c — łańcuch wywołań
+    Pipe(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +135,7 @@ pub struct ProgramNode {
 pub struct AnalysisResult {
     pub deps:                  Vec<String>,
     pub libs:                  Vec<LibRef>,
-    pub functions:             HashMap<String, (bool, Vec<ProgramNode>)>,
+    pub functions:             HashMap<String, (bool, Option<String>, Vec<ProgramNode>)>,
     pub main_body:             Vec<ProgramNode>,
     pub is_potentially_unsafe: bool,
     pub safety_warnings:       Vec<String>,
@@ -112,7 +147,10 @@ pub struct AnalysisResult {
 #[derive(Error, Debug, Diagnostic)]
 pub enum ParseError {
     #[error("Błąd składni w linii {line_num}")]
-    #[diagnostic(code(hl::syntax_error), url("https://hackeros.dev/docs/hacker-lang/syntax"))]
+    #[diagnostic(
+    code(hl::syntax_error),
+                 url("https://hackeros-linux-system.github.io/HackerOS-Website/hacker-lang/docs.html")
+    )]
     SyntaxError {
         #[source_code] src: NamedSource,
         #[label("tutaj")] span: SourceSpan,
@@ -158,7 +196,7 @@ fn main() {
 fn check_plugins(res: &AnalysisResult) {
     let root = plugins_root();
     let nodes: Vec<&ProgramNode> = res.main_body.iter()
-    .chain(res.functions.values().flat_map(|(_, n)| n.iter()))
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
     .filter(|n| matches!(&n.content, CommandType::Plugin { .. }))
     .collect();
     if nodes.is_empty() { return; }
@@ -192,7 +230,8 @@ fn print_errors(errors: &[ParseError], file: &str) {
                   format!("w {}", file).dimmed(),
     );
     let handler = miette::GraphicalReportHandler::new()
-    .with_context_lines(2).with_cause_chain();
+    .with_context_lines(2)
+    .with_cause_chain();
     for e in errors.iter().take(20) {
         let mut out = String::new();
         let _ = handler.render_report(&mut out, e as &dyn Diagnostic);
@@ -205,7 +244,10 @@ fn print_errors(errors: &[ParseError], file: &str) {
     // unikalne wskazówki
     let mut seen_adv = HashSet::new();
     let unique: Vec<&str> = errors.iter()
-    .filter_map(|e| match e { ParseError::SyntaxError { advice, .. } => Some(advice.as_str()), _ => None })
+    .filter_map(|e| match e {
+        ParseError::SyntaxError { advice, .. } => Some(advice.as_str()),
+                _ => None,
+    })
     .filter(|a| seen_adv.insert(*a))
     .collect();
     if !unique.is_empty() {
@@ -220,12 +262,13 @@ fn print_errors(errors: &[ParseError], file: &str) {
 // ─────────────────────────────────────────────────────────────
 fn print_summary(res: &AnalysisResult) {
     eprintln!("{}", "═══════════════════════════════════════════".cyan());
-    eprintln!("{}", "  hacker-lang PLSA v8".cyan().bold());
+    eprintln!("{}", "  hacker-lang PLSA".cyan().bold());
     eprintln!("{}", "═══════════════════════════════════════════".cyan());
     eprintln!("  Funkcje    : {}", res.functions.len().to_string().yellow());
     eprintln!("  Main nodes : {}", res.main_body.len().to_string().yellow());
     eprintln!("  Sys deps   : {}", res.deps.len().to_string().yellow());
 
+    // biblioteki pogrupowane po typie
     let mut by_type: HashMap<&str, Vec<String>> = HashMap::new();
     for lib in &res.libs {
         let label = match &lib.version {
@@ -238,10 +281,94 @@ fn print_summary(res: &AnalysisResult) {
     types.sort();
     for t in types { eprintln!("  lib/{:<8}: {}", t.magenta(), by_type[t].join(", ")); }
 
+    // stałe %
+    let const_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Const { .. }))
+    .collect();
+    if !const_nodes.is_empty() {
+        eprintln!("\n{} Stałe (%):", "[%]".yellow().bold());
+        for node in &const_nodes {
+            if let CommandType::Const { key, val } = &node.content {
+                eprintln!("    %{} = {}", key.yellow(), val);
+            }
+        }
+    }
+
+    // match
+    let match_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Match { .. }))
+    .collect();
+    if !match_nodes.is_empty() {
+        eprintln!("\n{} Match statements: {}", "[m]".cyan().bold(), match_nodes.len().to_string().yellow());
+    }
+
+    // assert
+    let assert_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Assert { .. }))
+    .collect();
+    if !assert_nodes.is_empty() {
+        eprintln!("\n{} Assert statements: {}", "[a]".green().bold(), assert_nodes.len().to_string().yellow());
+        for node in &assert_nodes {
+            if let CommandType::Assert { cond, msg } = &node.content {
+                let m = msg.as_deref().unwrap_or("(brak komunikatu)");
+                eprintln!("    linia {:>4} — {} → \"{}\"", node.line_num, cond.cyan(), m);
+            }
+        }
+    }
+
+    // spawn/await
+    let async_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content,
+                         CommandType::Spawn(_)          |
+                         CommandType::Await(_)          |
+                         CommandType::AssignSpawn { .. }|
+                         CommandType::AssignAwait { .. }
+    ))
+    .collect();
+    if !async_nodes.is_empty() {
+        eprintln!("\n{} Async (spawn/await): {}", "[~]".blue().bold(), async_nodes.len().to_string().yellow());
+        for node in &async_nodes {
+            match &node.content {
+                CommandType::AssignSpawn { key, task } =>
+                eprintln!("    linia {:>4} — {} = spawn {}", node.line_num, key.yellow(), task.cyan()),
+                CommandType::AssignAwait { key, expr } =>
+                eprintln!("    linia {:>4} — {} = await {}", node.line_num, key.yellow(), expr.cyan()),
+                CommandType::Spawn(r) =>
+                eprintln!("    linia {:>4} — spawn {}", node.line_num, r.cyan()),
+                CommandType::Await(r) =>
+                eprintln!("    linia {:>4} — await {}", node.line_num, r.cyan()),
+                _ => {},
+            }
+        }
+    }
+
+    // pipe
+    let pipe_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Pipe(_)))
+    .collect();
+    if !pipe_nodes.is_empty() {
+        eprintln!("\n{} Pipe chains: {}", "[|]".magenta().bold(), pipe_nodes.len().to_string().yellow());
+        for node in &pipe_nodes {
+            if let CommandType::Pipe(steps) = &node.content {
+                eprintln!("    linia {:>4} — {} kroków: {}",
+                          node.line_num,
+                          steps.len().to_string().yellow(),
+                          steps.join(" |> ").cyan()
+                );
+            }
+        }
+    }
+
     // pluginy
     let plugin_nodes: Vec<_> = res.main_body.iter()
-    .chain(res.functions.values().flat_map(|(_, n)| n.iter()))
-    .filter(|n| matches!(&n.content, CommandType::Plugin { .. })).collect();
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Plugin { .. }))
+    .collect();
     if !plugin_nodes.is_empty() {
         let root = plugins_root();
         eprintln!("\n{} Pluginy (\\\\):", "[p]".cyan().bold());
@@ -257,8 +384,9 @@ fn print_summary(res: &AnalysisResult) {
 
     // extern
     let extern_nodes: Vec<_> = res.main_body.iter()
-    .chain(res.functions.values().flat_map(|(_, n)| n.iter()))
-    .filter(|n| matches!(&n.content, CommandType::Extern { .. })).collect();
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Extern { .. }))
+    .collect();
     if !extern_nodes.is_empty() {
         eprintln!("\n{} Extern (--):", "[e]".cyan().bold());
         for node in &extern_nodes {
@@ -269,17 +397,36 @@ fn print_summary(res: &AnalysisResult) {
         }
     }
 
-    // unsafe
+    // funkcje unsafe
     let mut unsafe_fns: Vec<&String> = res.functions.iter()
-    .filter(|(_, (u, _))| *u).map(|(n, _)| n).collect();
+    .filter(|(_, (u, _, _))| *u)
+    .map(|(n, _)| n)
+    .collect();
     unsafe_fns.sort();
     if !unsafe_fns.is_empty() {
         eprintln!("\n{} Funkcje unsafe (::):", "[~]".magenta().bold());
         for n in unsafe_fns { eprintln!("    {}", n.magenta()); }
     }
+
+    // funkcje z sygnaturami typów
+    let typed_fns: Vec<(&String, &Option<String>)> = res.functions.iter()
+    .filter(|(_, (_, sig, _))| sig.is_some())
+    .map(|(n, (_, sig, _))| (n, sig))
+    .collect();
+    if !typed_fns.is_empty() {
+        eprintln!("\n{} Funkcje z typami:", "[t]".green().bold());
+        let mut sorted: Vec<_> = typed_fns;
+        sorted.sort_by_key(|(n, _)| n.as_str());
+        for (name, sig) in sorted {
+            eprintln!("    {} {}", name.cyan(), sig.as_deref().unwrap_or("").yellow());
+        }
+    }
+
+    // sudo
     if res.is_potentially_unsafe {
         eprintln!("\n{} Komendy sudo (^):", "[!]".red().bold());
         for w in &res.safety_warnings { eprintln!("    {}", w.yellow()); }
     }
+
     eprintln!("{}", "═══════════════════════════════════════════".cyan());
 }
