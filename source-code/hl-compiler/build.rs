@@ -1,3 +1,12 @@
+// build.rs — hl-compiler
+// gc.c leży w katalogu nadrzędnym: ../gc.c
+// Struktura projektu:
+//   hl-compiler/
+//     src/main.rs
+//     build.rs        ← ten plik
+//     Cargo.toml
+//   gc.c              ← tutaj
+
 use std::path::PathBuf;
 use std::env;
 use std::fs;
