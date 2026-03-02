@@ -1,8 +1,8 @@
 [package]
 name        = "hl-compiler"
-version     = "1.7.1"
+version     = "1.7.5"
 edition     = "2021"
-authors     = ["HackerOS Team <hackeros068@gmail.com>"]
+authors     = ["HackerOS <hackeros068@gmail.com>"]
 description = "hacker-lang AOT compiler — .hl → native binary via LLVM IR + gcc"
 
 [dependencies]
@@ -17,13 +17,37 @@ dirs       = "5.0"
 cc   = "1.0"
 dirs = "5.0"
 
+# ─────────────────────────────────────────────────────────────
+# Profil release — maksymalna wydajność
+# Odpowiednik rustc -C opt-level=3 -C lto=fat -C codegen-units=1
+# ─────────────────────────────────────────────────────────────
 [profile.release]
-opt-level       = 3
-lto             = "thin"
-codegen-units   = 1
-panic           = "abort"
-strip           = true
-overflow-checks = false
+opt-level       = 3          # -O3: pełna optymalizacja
+lto             = "fat"      # Fat LTO: optymalizuje PRZEZ granicę crate'ów
+                             # (thin jest szybsze do kompilacji ale gorsze)
+codegen-units   = 1          # Jeden unit → lepsze inlining cross-module
+panic           = "abort"    # Zamiast unwind: oszczędność ~10% rozmiaru binarnego
+strip           = "symbols"  # Usuń symbole debugowania z kompilatora
+overflow-checks = false      # Brak sprawdzania overflow → szybsze arytmetyki
+incremental     = false      # Wyłącz incremental dla lepszego LTO
 
+# Dodatkowe flagi rustc dla maksymalnej wydajności
+[profile.release.build-override]
+opt-level = 3
+
+# ─────────────────────────────────────────────────────────────
+# Profil dev — szybka kompilacja, podstawowe opt
+# ─────────────────────────────────────────────────────────────
 [profile.dev]
-opt-level = 1
+opt-level   = 1
+debug       = true
+incremental = true
+
+# ─────────────────────────────────────────────────────────────
+# Profil bench — identyczny z release + debuginfo dla profilerów
+# Użycie: cargo build --profile bench
+# ─────────────────────────────────────────────────────────────
+[profile.bench]
+inherits        = "release"
+debug           = 1          # Minimalny debuginfo dla perf/flamegraph
+strip           = "none"
