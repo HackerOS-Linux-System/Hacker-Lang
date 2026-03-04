@@ -3,8 +3,8 @@ use clap::Parser;
 /// hl-compiler — .hl → native binary via LLVM + gcc
 #[derive(Parser, Debug)]
 #[command(
-author  = "HackerOS",
-version = "2.2.0",
+author  = "HackerOS Team",
+version = "1.7.5",
 about   = "hacker-lang compiler — .hl → native binary via LLVM + gcc"
 )]
 pub struct Args {
