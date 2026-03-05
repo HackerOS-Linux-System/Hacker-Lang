@@ -1,11 +1,17 @@
 WHITESPACE = _{ " " | "\t" }
 ident    = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
 number   = @{ ASCII_DIGIT+ }
+float_lit = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 str_lit  = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+bool_lit = @{ "true" | "false" }
+null_lit = @{ "null" }
 version  = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
 lib_name = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "/")+ }
-lib_type = @{ "source" | "core" | "bytes" | "github" | "virus" | "vira" }
+
+// ── Typy bibliotek — tylko vira, virus, bytes, core ─────────────────────────
+lib_type = @{ "vira" | "virus" | "bytes" | "core" }
 lib_ref  =  { "<" ~ lib_type ~ "/" ~ lib_name ~ (":" ~ version)? ~ ">" }
+
 rest     = @{ (!EOI ~ ANY)+ }
 cond     = @{ (!(" > " | " |> " | " <| ") ~ !EOI ~ ANY)+ }
 try_body = @{ (!(" catch ") ~ !EOI ~ ANY)+ }
@@ -13,62 +19,256 @@ call_path = @{ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")*)+ 
 cpfx      = { "|>" | "<|" | ">" }
 type_sig  = { "[" ~ (!"]" ~ ANY)* ~ "]" }
 
-// ── NOWE: pipe_rest — reszta po |> w pipe_stmt ──────────────────
+// ── pipe_rest — reszta po |> w pipe_stmt ────────────────────────────────────
 pipe_item = @{ (!(" |> " | EOI) ~ ANY)+ }
 
-// ── NOWE: match_val — wartość ramienia match ─────────────────────
+// ── match_val — wartość ramienia match ──────────────────────────────────────
 match_val = @{ (!(" > " | " |> " | " <| " | EOI) ~ ANY)+ }
 
-// Reguła line jest wywoływana TYLKO gdy Rust stwierdzi że linia NIE jest przypisaniem
+// ────────────────────────────────────────────────────────────────────────────
+// System typów prymitywnych
+// ────────────────────────────────────────────────────────────────────────────
+prim_type = @{ "int" | "float" | "str" | "bool" | "list" | "map" | "null" }
+
+// Sygnatura z typami: [int int -> int]
+typed_sig = { "[" ~ (prim_type | ident) ~ (" " ~ (prim_type | ident))* ~ "->" ~ " " ~ (prim_type | ident) ~ "]" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Wyrażenia (Pratt-style — obsługiwane składniowo, ewaluacja w Rust)
+// ────────────────────────────────────────────────────────────────────────────
+
+// Literały listy i mapy
+list_lit  = { "[" ~ (expr ~ ("," ~ " "? ~ expr)*)? ~ "]" }
+map_entry = { ident ~ ":" ~ " "? ~ expr }
+map_lit   = { "{" ~ (map_entry ~ ("," ~ " "? ~ map_entry)*)? ~ "}" }
+
+// Dostęp do kolekcji: $list.0  $map.name
+access_expr = @{ "$" ~ ident ~ "." ~ (ASCII_DIGIT+ | ident) }
+
+// ── Interpolacja wyrażeń w stringach: "Wynik: $(2 + 3)" ─────────────────────
+interp_expr = @{ "$(" ~ (!")" ~ ANY)* ~ ")" }
+interp_var  = @{ "$" ~ ident }
+str_interp  = @{ "\"" ~ (!("\"") ~ (interp_expr | interp_var | ANY))* ~ "\"" }
+
+// Atom wyrażenia
+atom = {
+    float_lit  |
+    number     |
+    str_interp |
+    str_lit    |
+    bool_lit   |
+    null_lit   |
+    list_lit   |
+    map_lit    |
+    lambda_lit |
+    access_expr |
+    ("$" ~ ident) |
+    ("(" ~ expr ~ ")")
+}
+
+// Operatory binarne
+bin_op = { "+" | "-" | "*" | "/" | "%" | "==" | "!=" | ">=" | "<=" | ">" | "<" | "&&" | "||" }
+
+// Wyrażenie (uproszczone — atom op atom, lub sam atom)
+expr = { atom ~ (WHITESPACE+ ~ bin_op ~ WHITESPACE+ ~ atom)* }
+
+// Przypisanie wyrażenia: x = 2 + 3 * 4 (obsługiwane w Rust przez is_expr_assign)
+// Składnia zarejestrowana tu tylko dla dokumentacji — faktyczne wykrycie w Rust
+
+// ────────────────────────────────────────────────────────────────────────────
+// Kolekcje natywne — mutacja
+// ────────────────────────────────────────────────────────────────────────────
+// $list.push 42
+// $map.set "key" "val"
+collection_mut = { "$" ~ ident ~ "." ~ ("push" | "pop" | "set" | "del" | "get") ~ (WHITESPACE+ ~ rest)? }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Moduły / przestrzenie nazw (rozbudowane ;;)
+// ;;http def ... done
+// Już obsługiwane przez class_def — moduł to klasa z metodami
+// Dodajemy: użycie modułu: module.method args
+// (obsługiwane przez call_stmt z rozszerzonym call_path)
+// ────────────────────────────────────────────────────────────────────────────
+module_call_path = @{ ident ~ ("." ~ ident)+ }
+module_call = { module_call_path ~ (WHITESPACE+ ~ rest)? }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Generics / szablony — lekkie
+// :map_list [list fn -> list] def
+// Obsługiwane przez func_def z type_sig — fn to ident w sygnaturze
+// ────────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────────
+// Generics z ograniczeniami (constraints)
+// :serialize [T impl Serializable -> str] def
+// ────────────────────────────────────────────────────────────────────────────
+generic_constraint = { ident ~ WHITESPACE+ ~ "impl" ~ WHITESPACE+ ~ ident }
+generic_sig = { "[" ~ (generic_constraint | prim_type | ident) ~
+               (" " ~ (generic_constraint | prim_type | ident))* ~
+               " ->" ~ " " ~ (prim_type | ident) ~ "]" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Error handling jako wartość — typ Result
+// result = try .fetch_data $url
+// Obsługiwane przez is_assignment + try_stmt
+// Operator ?! jak w Rust:
+// data = .fetch $url ?! "nie można pobrać"
+// ────────────────────────────────────────────────────────────────────────────
+result_unwrap = { rest ~ " ?! " ~ str_lit }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Interfejsy / protokoły
+// ==interface Serializable [to_json, from_json]
+// ;;Config impl Serializable def
+// ────────────────────────────────────────────────────────────────────────────
+interface_method = { ident }
+interface_def = { "==interface" ~ WHITESPACE+ ~ ident ~ WHITESPACE+ ~ "[" ~ WHITESPACE* ~
+                  interface_method ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ interface_method)* ~
+                  WHITESPACE* ~ "]" }
+
+// impl — klasa implementuje interfejs
+// ;;Config impl Serializable def
+impl_def = { ";;" ~ ident ~ WHITESPACE+ ~ "impl" ~ WHITESPACE+ ~ ident ~ WHITESPACE+ ~ "def" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Arena allocator — :: nazwa [pamięć] def
+// :: cache [512kb] def
+// :: buf   [1mb]   def
+// ────────────────────────────────────────────────────────────────────────────
+arena_size  = @{ ASCII_DIGIT+ ~ ("kb" | "mb" | "gb" | "b")? }
+arena_def   = { "::" ~ WHITESPACE+ ~ ident ~ WHITESPACE+ ~ "[" ~ arena_size ~ "]" ~ WHITESPACE+ ~ "def" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Domknięcia / lambdy
+// callback = { $x -> $x * 2 }
+// .map_list $nums { $x -> $x + 1 }
+// ────────────────────────────────────────────────────────────────────────────
+lambda_param  = @{ "$" ~ ident }
+lambda_params = { lambda_param ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ lambda_param)* }
+lambda_body   = @{ (!("}" | "->") ~ ANY)+ }
+lambda_lit    = { "{" ~ WHITESPACE* ~ lambda_params ~ WHITESPACE* ~ "->" ~ WHITESPACE* ~ lambda_body ~ WHITESPACE* ~ "}" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Rekurencja ogonowa — recur
+// recur ($1 - 1)
+// recur $x $acc
+// ────────────────────────────────────────────────────────────────────────────
+recur_stmt = { "recur" ~ WHITESPACE+ ~ rest }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Destrukturyzacja
+// [head | tail] = $lista
+// {name, age} = $user
+// ────────────────────────────────────────────────────────────────────────────
+destruct_list = { "[" ~ WHITESPACE* ~ ident ~ WHITESPACE* ~ "|" ~ WHITESPACE* ~ ident ~ WHITESPACE* ~ "]" }
+destruct_map  = { "{" ~ WHITESPACE* ~ ident ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ ident)* ~ WHITESPACE* ~ "}" }
+destruct_stmt = { (destruct_list | destruct_map) ~ WHITESPACE* ~ "=" ~ WHITESPACE* ~ rest }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Zasięg leksykalny — ;;scope def ... done
+// ────────────────────────────────────────────────────────────────────────────
+scope_def = { ";;scope" ~ WHITESPACE+ ~ "def" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Typy algebraiczne (ADT)
+// ==type Shape [ Circle [radius: float], Rect [w: float, h: float], Point ]
+// ────────────────────────────────────────────────────────────────────────────
+adt_field     = { ident ~ ":" ~ WHITESPACE* ~ (prim_type | ident) }
+adt_fields    = { "[" ~ WHITESPACE* ~ adt_field ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ adt_field)* ~ WHITESPACE* ~ "]" }
+adt_variant   = { ident ~ (WHITESPACE* ~ adt_fields)? }
+adt_def       = { "==type" ~ WHITESPACE+ ~ ident ~ WHITESPACE+ ~ "[" ~ WHITESPACE* ~
+                  adt_variant ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ adt_variant)* ~
+                  WHITESPACE* ~ "]" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// do-notacja / wieloliniowe wyrażenia
+// result = do ... done
+// ────────────────────────────────────────────────────────────────────────────
+do_stmt = { "do" }
+
+// Wieloliniowy pipe (przypisanie):
+// result =
+//   | .fetch $url
+//   | .parse
+// Każda linia zaczyna się od |
+pipe_line_stmt = { "|" ~ WHITESPACE+ ~ rest }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Testy jednostkowe
+// ==test "opis" [ assert ... ]
+// ────────────────────────────────────────────────────────────────────────────
+test_def = { "==test" ~ WHITESPACE+ ~ str_lit ~ WHITESPACE* ~ "[" }
+
+// ────────────────────────────────────────────────────────────────────────────
+// defer — sprzątanie zasobów (Go-style)
+// defer .file.close $f
+// ────────────────────────────────────────────────────────────────────────────
+defer_stmt = { "defer" ~ WHITESPACE+ ~ rest }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Reguła line
+// ────────────────────────────────────────────────────────────────────────────
 line = { SOI ~ sudo? ~ stmt ~ EOI }
 sudo = { "^" }
 
 stmt = {
-    class_def    |
-    unsafe_def   |
-    func_def     |
-    func_done    |
-    // ── NOWE (najpierw żeby nie pochłonął call_stmt) ─────────────
-    spawn_stmt   |
-    await_stmt   |
-    assert_stmt  |
-    match_stmt   |
-    match_arm    |
-    pipe_stmt    |
-    percent_stmt |
-    // ── ISTNIEJĄCE (kolejność bez zmian) ─────────────────────────
-    call_stmt    |
-    sys_dep      |
-    lib_stmt     |
-    sep_cmd      |
-    raw_cmd      |
-    expl_cmd     |
-    try_stmt     |
-    while_stmt   |
-    for_stmt     |
-    log_stmt     |
-    lock_stmt    |
-    unlock_stmt  |
-    loop_stmt    |
-    elif_stmt    |
-    else_stmt    |
-    if_stmt      |
-    bg_stmt      |
-    plugin_stmt  |
-    extern_stmt  |
-    enum_stmt    |
-    struct_stmt  |
-    import_stmt  |
-    raw_blk_s    |
-    raw_blk_e    |
-    end_stmt     |
+    interface_def  |
+    impl_def       |
+    arena_def      |
+    adt_def        |
+    test_def       |
+    scope_def      |
+    class_def      |
+    func_def       |
+    func_done      |
+    // ── nowe (przed call_stmt) ────────────────────────────────────────────
+    spawn_stmt     |
+    await_stmt     |
+    assert_stmt    |
+    match_stmt     |
+    match_arm      |
+    pipe_stmt      |
+    pipe_line_stmt |
+    percent_stmt   |
+    collection_mut |
+    result_unwrap  |
+    module_call    |
+    recur_stmt     |
+    destruct_stmt  |
+    defer_stmt     |
+    do_stmt        |
+    // ── istniejące ────────────────────────────────────────────────────────
+    call_stmt      |
+    sys_dep        |
+    lib_stmt       |
+    sep_cmd        |
+    raw_cmd        |
+    expl_cmd       |
+    try_stmt       |
+    while_stmt     |
+    for_stmt       |
+    log_stmt       |
+    lock_stmt      |
+    unlock_stmt    |
+    loop_stmt      |
+    elif_stmt      |
+    else_stmt      |
+    if_stmt        |
+    bg_stmt        |
+    plugin_stmt    |
+    extern_stmt    |
+    enum_stmt      |
+    struct_stmt    |
+    import_stmt    |
+    raw_blk_s      |
+    raw_blk_e      |
+    end_stmt       |
     out_stmt
 }
 
-// ── ISTNIEJĄCE reguły — BEZ ZMIAN ────────────────────────────────
+// ── ISTNIEJĄCE reguły — BEZ ZMIAN ────────────────────────────────────────────
 class_def  = { ";;" ~ ident ~ "def" }
-unsafe_def = { "::" ~ ident ~ type_sig? ~ "def" }
-func_def   = { ":"  ~ ident ~ type_sig? ~ "def" }
+func_def   = { ":"  ~ ident ~ (generic_sig | type_sig)? ~ "def" }
 func_done  = { "done" }
 call_stmt  = { call_path ~ (rest)? }
 sys_dep    = { "//" ~ rest }
@@ -101,43 +301,24 @@ raw_blk_e   = { "]" }
 end_stmt    = { "end" ~ number? }
 out_stmt    = { "out" ~ rest? }
 
-// ── NOWE reguły ───────────────────────────────────────────────────
+// ── NOWE reguły ───────────────────────────────────────────────────────────────
 
-// % — stała (zamiast const)
-// %APP_NAME = "HackerOS"
-// %MAX_CONN = 100
+// % — stała
 percent_key  = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
 percent_stmt = { "%" ~ percent_key ~ "=" ~ rest }
 
-// spawn — uruchom zadanie asynchronicznie, zwróć handle
-// spawn .heavy_task $data
-// job = spawn .heavy_task $data   ← obsługiwane przez is_assignment w Rust
+// spawn / await
 spawn_stmt = { "spawn" ~ rest }
-
-// await — czekaj na wynik
-// await $job
-// result = await $job             ← obsługiwane przez is_assignment w Rust
-// result = await .fetch_users     ← obsługiwane przez is_assignment w Rust
 await_stmt = { "await" ~ rest }
 
-// assert — walidacja w miejscu
-// assert $port > 1024 "Port musi być > 1024"
-// assert $file != ""  "Plik nie może być pusty"
-// assert -f $path     "Plik nie istnieje"
+// assert
 assert_body = @{ (!("\"" ~ (!EOI ~ ANY)* ~ "\"" ~ EOI | EOI) ~ ANY)+ }
 assert_stmt = { "assert" ~ assert_body ~ str_lit? }
 
-// match — dopasowanie wzorców
-// match $status |>
-//   "ok"  > handle_ok
-//   "err" > handle_err
-//   _     > handle_unknown
+// match
 match_stmt = { "match" ~ cond ~ cpfx }
 match_arm  = { match_val ~ cpfx ~ rest }
 
-// pipe — łańcuchowanie wywołań
-// .fetch_users |> .json.parse |> .list.sort "name" |> .list.take 10
-// Uwaga: linie zaczynające się od |> są już obsługiwane przez expl_cmd (cpfx ~ rest)
-// pipe_stmt obsługuje wywołanie z WIELOMA |> w jednej linii
+// pipe
 pipe_item_sep = _{ " |> " }
 pipe_stmt     = { call_path ~ rest? ~ (pipe_item_sep ~ call_path ~ rest?)+ }
