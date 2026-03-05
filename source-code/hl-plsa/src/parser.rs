@@ -19,7 +19,6 @@ struct HlParser;
 pub enum LineOp {
     // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────────
     ClassDef(String),
-    UnsafeDef(String, Option<String>),
     FuncDef(String, Option<String>),
     FuncDone,
     Call(String, String),
@@ -29,8 +28,8 @@ pub enum LineOp {
     RawCmd(String),
     ExplCmd(String),
     GlobalVar(String, String),
-    LocalVar(String, String, bool), // key, val, is_raw
-    Plugin(String, String),         // name, args
+    LocalVar(String, String, bool),   // key, val, is_raw
+    Plugin(String, String),           // name, args
     Loop(u64, String),
     If(String, String),
     Elif(String, String),
@@ -41,7 +40,7 @@ pub enum LineOp {
     Log(String),
     Lock(String, String),
     Unlock(String),
-    Extern(String, bool),           // path, is_static
+    Extern(String, bool),             // path, is_static
     Enum(String, Vec<String>),
     Import(String, Option<String>),
     Try(String, String),
@@ -50,17 +49,51 @@ pub enum LineOp {
     RawBlockEnd,
     End(i32),
     Out(String),
-    // ── NOWE ─────────────────────────────────────────────────────
-    Percent(String, String),                    // % key = val — stała
-    Spawn(String),                              // spawn rest
-    Await(String),                              // await rest
-    Assert(String, Option<String>),             // assert cond [msg]
-    Match(String),                              // match cond |>
-    MatchArm(String, String),                   // val > cmd
-    Pipe(Vec<String>),                          // a |> b |> c
-    // ── NOWE: przypisanie wyniku spawn/await ─────────────────────
-    AssignSpawn(String, String),                // key = spawn rest
-    AssignAwait(String, String),                // key = await rest
+    // ── NOWE (spawn/await/assert/match/pipe/const) ────────────────
+    Percent(String, String),
+    Spawn(String),
+    Await(String),
+    Assert(String, Option<String>),
+    Match(String),
+    MatchArm(String, String),
+    Pipe(Vec<String>),
+    AssignSpawn(String, String),
+    AssignAwait(String, String),
+    // ── NOWE: wyrażenia ──────────────────────────────────────────
+    AssignExpr(String, String, bool, bool),  // key, expr, is_raw, is_global
+    // ── NOWE: kolekcje ───────────────────────────────────────────
+    CollectionMut(String, String, String),   // var, method, args
+    // ── NOWE: interfejsy / impl ───────────────────────────────────
+    InterfaceDef(String, Vec<String>),       // name, methods
+    ImplDef(String, String),                 // class, interface
+    // ── NOWE: arena allocator ─────────────────────────────────────
+    ArenaDef(String, String),                // name, size
+    // ── NOWE: result unwrap ───────────────────────────────────────
+    ResultUnwrap(String, String),            // expr, msg
+    // ── NOWE: wywołanie metody modułu ────────────────────────────
+    ModuleCall(String, String),              // path, args
+    // ── NOWE: domknięcia / lambdy ─────────────────────────────────
+    Lambda(Vec<String>, String),             // params, body
+    AssignLambda(String, Vec<String>, String, bool, bool), // key, params, body, is_raw, is_global
+    // ── NOWE: rekurencja ogonowa ──────────────────────────────────
+    Recur(String),                           // args
+    // ── NOWE: destrukturyzacja ────────────────────────────────────
+    DestructList(String, String, String),    // head, tail, source
+    DestructMap(Vec<String>, String),        // fields, source
+    // ── NOWE: zasięg leksykalny ──────────────────────────────────
+    ScopeDef,
+    // ── NOWE: typy algebraiczne (ADT) ────────────────────────────
+    AdtDef(String, Vec<(String, Vec<(String, String)>)>), // name, [(variant, [(field, type)])]
+    // ── NOWE: do-notacja ─────────────────────────────────────────
+    DoBlock,
+    AssignDo(String),                        // key — wartość wypełniana przez blok do...done
+    PipeLine(String),                        // krok potoku (| .fetch $url)
+    // ── NOWE: testy jednostkowe ──────────────────────────────────
+    TestDef(String),                         // opis testu
+    // ── NOWE: defer ──────────────────────────────────────────────
+    Defer(String),                           // wyrażenie do wykonania przy wyjściu ze scope
+    // ── NOWE: generics z constraints ─────────────────────────────
+    FuncDefGeneric(String, String),          // name, generic_sig np. "[T impl Serializable -> str]"
 }
 
 #[derive(Debug, Clone)]
@@ -77,43 +110,21 @@ pub fn plugins_root() -> PathBuf {
 fn lib_path(lib: &LibRef) -> Option<PathBuf> {
     let r = libs_root();
     match lib.lib_type {
-        LibType::Source => Some(r.join("sources").join(&lib.name).with_extension("hl")),
-        LibType::Core   => Some(r.join("core").join(&lib.name).with_extension("hl")),
-        LibType::Bytes  => Some(r.join("bytes").join(&lib.name).with_extension("so")),
-        LibType::Virus  => Some(r.join(".vira").join(&lib.name).with_extension("a")),
-        LibType::Github | LibType::Vira => None,
+        LibType::Core  => Some(r.join("core").join(&lib.name).with_extension("hl")),
+        LibType::Bytes => Some(r.join("bytes").join(&lib.name).with_extension("so")),
+        LibType::Virus => Some(r.join(".virus").join(&lib.name).with_extension("a")),
+        LibType::Vira  => Some(r.join(".virus").join(&lib.name)),
     }
 }
 
 // ─────────────────────────────────────────────────────────────
 // is_assignment — wykrywa przypisanie PRZED pest
-//
-// Zwraca Some((key, value, is_raw, is_global)) lub None.
-//
-// Przyjmuje linię po trim() i po usunięciu sudo (^).
-//
-// Akceptuje:
-//   @DATA_FILE="..."     is_global=true
-//   ~n = $(...)          is_raw=true
-//   done_    = $(...)    zwykłe lokalne
-//   title_   = $1        zwykłe lokalne
-//   job = spawn .task    is_spawn=true (wykrywane po value)
-//   got = await .fetch   is_await=true (wykrywane po value)
-//
-// Odrzuca (zwraca None):
-//   done                 (brak '=')
-//   ? cond > cmd         (zaczyna się od '?')
-//   > echo hi            (zaczyna się od '>')
-//   log "x"              (po 'log' nie ma '=')
-//   ?? cond > cmd        (zaczyna się od '?')
-//   x == y               (podwójne '==')
 // ─────────────────────────────────────────────────────────────
 fn is_assignment(line: &str) -> Option<(String, String, bool, bool)> {
     let mut s = line;
     let mut is_global = false;
     let mut is_raw    = false;
 
-    // prefix @ lub ~
     if let Some(rest) = s.strip_prefix('@') {
         is_global = true;
         s = rest;
@@ -122,13 +133,11 @@ fn is_assignment(line: &str) -> Option<(String, String, bool, bool)> {
         s = rest;
     }
 
-    // musi zaczynać się od litery lub _
     let first = s.chars().next()?;
     if !first.is_ascii_alphabetic() && first != '_' {
         return None;
     }
 
-    // zbierz znaki identyfikatora
     let ident_len = s.chars()
     .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
     .map(|c| c.len_utf8())
@@ -138,9 +147,8 @@ fn is_assignment(line: &str) -> Option<(String, String, bool, bool)> {
     let key  = s[..ident_len].to_string();
     let rest = s[ident_len..].trim_start_matches(|c| c == ' ' || c == '\t');
 
-    // musi być '=' ale NIE '=='
     let rest = rest.strip_prefix('=')?;
-    if rest.starts_with('=') { return None; } // to jest '=='
+    if rest.starts_with('=') { return None; }
 
     let value = rest.trim_start_matches(|c| c == ' ' || c == '\t').to_string();
 
@@ -149,12 +157,9 @@ fn is_assignment(line: &str) -> Option<(String, String, bool, bool)> {
 
 // ─────────────────────────────────────────────────────────────
 // is_percent — wykrywa stałą % PRZED pest
-// %APP_NAME = "HackerOS"
-// %MAX_CONN = 100
 // ─────────────────────────────────────────────────────────────
 fn is_percent(line: &str) -> Option<(String, String)> {
     let s = line.strip_prefix('%')?;
-    // zbierz ident
     let first = s.chars().next()?;
     if !first.is_ascii_alphabetic() && first != '_' { return None; }
     let ident_len = s.chars()
@@ -171,8 +176,7 @@ fn is_percent(line: &str) -> Option<(String, String)> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// is_spawn_assign — wykrywa `key = spawn rest` PRZED pest
-// job  = spawn .heavy_task $data
+// is_spawn_assign — `key = spawn rest`
 // ─────────────────────────────────────────────────────────────
 fn is_spawn_assign(line: &str) -> Option<(String, String)> {
     let (key, val, _, _) = is_assignment(line)?;
@@ -182,15 +186,287 @@ fn is_spawn_assign(line: &str) -> Option<(String, String)> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// is_await_assign — wykrywa `key = await rest` PRZED pest
-// got = await $job
-// got = await .fetch_users
+// is_await_assign — `key = await rest`
 // ─────────────────────────────────────────────────────────────
 fn is_await_assign(line: &str) -> Option<(String, String)> {
     let (key, val, _, _) = is_assignment(line)?;
     let rest = val.strip_prefix("await")?;
     if rest.is_empty() || rest.starts_with(|c: char| c.is_alphanumeric()) { return None; }
     Some((key, rest.trim_start().to_string()))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_do_assign — `key = do`
+// ─────────────────────────────────────────────────────────────
+fn is_do_assign(line: &str) -> Option<String> {
+    let (key, val, _, _) = is_assignment(line)?;
+    if val.trim() == "do" { Some(key) } else { None }
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_lambda_assign — `key = { $x -> expr }`
+// ─────────────────────────────────────────────────────────────
+fn is_lambda_assign(line: &str) -> Option<(String, Vec<String>, String, bool, bool)> {
+    let (key, val, is_raw, is_global) = is_assignment(line)?;
+    let (params, body) = parse_lambda_literal(val.trim())?;
+    Some((key, params, body, is_raw, is_global))
+}
+
+// ─────────────────────────────────────────────────────────────
+// parse_lambda_literal — `{ $x -> body }` lub `{ $x, $y -> body }`
+// ─────────────────────────────────────────────────────────────
+fn parse_lambda_literal(s: &str) -> Option<(Vec<String>, String)> {
+    let s = s.strip_prefix('{')?.trim_start();
+    let arrow = s.find(" -> ")?;
+    let params_str = s[..arrow].trim();
+    let rest = &s[arrow + 4..];
+    let body = rest.trim_end_matches('}').trim().to_string();
+    if body.is_empty() { return None; }
+    let params: Vec<String> = params_str.split(',')
+    .map(|p| p.trim().to_string())
+    .filter(|p| p.starts_with('$'))
+    .collect();
+    if params.is_empty() { return None; }
+    Some((params, body))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_expr_assign — `key = expr` gdzie expr zawiera operator
+// lub jest listą [...] / mapą {...} / dostępem $x.y
+//
+// Odróżnia "zwykłe" przypisanie (key = $val lub key = "str")
+// od wyrażenia (key = 2 + 3  |  x = [$a, $b]  |  m = {k: 1}).
+//
+// Zwraca Some((key, expr, is_raw, is_global)) jeśli value
+// wygląda jak wyrażenie złożone.
+// ─────────────────────────────────────────────────────────────
+fn is_expr_assign(line: &str) -> Option<(String, String, bool, bool)> {
+    let (key, val, is_raw, is_global) = is_assignment(line)?;
+
+    // Nie parsuj lambd tutaj — obsługiwane przez is_lambda_assign
+    if val.trim().starts_with('{') && val.contains(" -> ") {
+        return None;
+    }
+
+    // Wyrażenie jeśli:
+    // 1. zaczyna się od '[' (lista)
+    // 2. zaczyna się od '{' (mapa)
+    // 3. zawiera operator arytmetyczny/logiczny otoczony spacjami
+    // 4. zawiera interpolację wyrażeń $(...)
+    let is_list = val.starts_with('[');
+    let is_map  = val.starts_with('{');
+    let has_op  = val.contains(" + ")  || val.contains(" - ")  ||
+    val.contains(" * ")  || val.contains(" / ")  ||
+    val.contains(" % ")  || val.contains(" == ") ||
+    val.contains(" != ") || val.contains(" >= ") ||
+    val.contains(" <= ") || val.contains(" > ")  ||
+    val.contains(" < ")  || val.contains(" && ") ||
+    val.contains(" || ") || val.contains(" ?! ");
+    let has_interp = val.contains("$(");
+
+    if is_list || is_map || has_op || has_interp {
+        Some((key, val, is_raw, is_global))
+    } else {
+        None
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_collection_mut — `$var.method args`
+// $list.push 42   $map.set "key" "val"   $list.pop
+// ─────────────────────────────────────────────────────────────
+fn is_collection_mut(line: &str) -> Option<(String, String, String)> {
+    let s = line.strip_prefix('$')?;
+    let dot_pos = s.find('.')?;
+    let var = s[..dot_pos].to_string();
+    let rest = &s[dot_pos + 1..];
+    let methods = ["push", "pop", "set", "del", "get"];
+    for method in &methods {
+        if let Some(after) = rest.strip_prefix(method) {
+            if after.is_empty() || after.starts_with(' ') || after.starts_with('\t') {
+                let args = after.trim().to_string();
+                return Some((var, method.to_string(), args));
+            }
+        }
+    }
+    None
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_result_unwrap — `expr ?! "msg"` (jako standalone stmt)
+// Używane gdy wynik jest już przypisany przez is_expr_assign
+// ale też gdy standalone: .fetch $url ?! "błąd"
+// ─────────────────────────────────────────────────────────────
+fn is_result_unwrap(line: &str) -> Option<(String, String)> {
+    let pos = line.find(" ?! ")?;
+    let expr = line[..pos].trim().to_string();
+    let after = line[pos + 4..].trim();
+    let msg = after.trim_matches('"').to_string();
+    Some((expr, msg))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_arena_def — `:: name [size] def`
+// :: cache [512kb] def
+// ─────────────────────────────────────────────────────────────
+fn is_arena_def(line: &str) -> Option<(String, String)> {
+    let s = line.strip_prefix("::")?;
+    let s = s.trim_start();
+    // zbierz ident
+    let ident_len = s.chars()
+    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+    .map(|c| c.len_utf8())
+    .sum::<usize>();
+    if ident_len == 0 { return None; }
+    let name = s[..ident_len].to_string();
+    let rest = s[ident_len..].trim_start();
+    // musi być [size] def
+    let rest = rest.strip_prefix('[')?;
+    let end  = rest.find(']')?;
+    let size = rest[..end].trim().to_string();
+    let after = rest[end + 1..].trim();
+    if after != "def" { return None; }
+    Some((name, size))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_recur — `recur args`
+// ─────────────────────────────────────────────────────────────
+fn is_recur(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("recur")?;
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(rest.trim().to_string())
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_destruct_list — `[head | tail] = $source`
+// ─────────────────────────────────────────────────────────────
+fn is_destruct_list(line: &str) -> Option<(String, String, String)> {
+    let s = line.trim();
+    if !s.starts_with('[') { return None; }
+    let end = s.find(']')?;
+    let inside = &s[1..end];
+    let pipe_pos = inside.find('|')?;
+    let head = inside[..pipe_pos].trim().to_string();
+    let tail = inside[pipe_pos + 1..].trim().to_string();
+    if head.is_empty() || tail.is_empty() { return None; }
+    let after = s[end + 1..].trim();
+    let after = after.strip_prefix('=')?;
+    if after.starts_with('=') { return None; }
+    let source = after.trim().to_string();
+    Some((head, tail, source))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_destruct_map — `{name, age} = $source`
+// ─────────────────────────────────────────────────────────────
+fn is_destruct_map(line: &str) -> Option<(Vec<String>, String)> {
+    let s = line.trim();
+    if !s.starts_with('{') { return None; }
+    let end = s.find('}')?;
+    let inside = &s[1..end];
+    // Sprawdź czy to destrukturyzacja (bez ':') a nie mapa
+    if inside.contains(':') { return None; }
+    // Sprawdź czy to destrukturyzacja a nie lambda
+    if inside.contains("->") { return None; }
+    let fields: Vec<String> = inside.split(',')
+    .map(|f| f.trim().to_string())
+    .filter(|f| !f.is_empty())
+    .collect();
+    if fields.is_empty() { return None; }
+    let after = s[end + 1..].trim();
+    let after = after.strip_prefix('=')?;
+    if after.starts_with('=') { return None; }
+    let source = after.trim().to_string();
+    Some((fields, source))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_defer — `defer expr`
+// ─────────────────────────────────────────────────────────────
+fn is_defer(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("defer")?;
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(rest.trim().to_string())
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_scope_def — `;;scope def`
+// ─────────────────────────────────────────────────────────────
+fn is_scope_def(line: &str) -> bool {
+    line.trim() == ";;scope def"
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_test_def — `==test "opis" [`
+// ─────────────────────────────────────────────────────────────
+fn is_test_def(line: &str) -> Option<String> {
+    let s = line.trim().strip_prefix("==test")?;
+    let s = s.trim_start();
+    if !s.starts_with('"') { return None; }
+    let end = s[1..].find('"')?;
+    let desc = s[1..end + 1].to_string();
+    Some(desc)
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_adt_def — `==type Name [ Variant1 [...], Variant2 ]`
+// ─────────────────────────────────────────────────────────────
+fn is_adt_def(line: &str) -> Option<(String, Vec<(String, Vec<(String, String)>)>)> {
+    let s = line.trim().strip_prefix("==type")?;
+    let s = s.trim_start();
+    // pobierz nazwę
+    let ident_len = s.chars()
+    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+    .map(|c| c.len_utf8())
+    .sum::<usize>();
+    if ident_len == 0 { return None; }
+    let name = s[..ident_len].to_string();
+    let rest = s[ident_len..].trim_start();
+    // musi zaczynać się od '['
+    let rest = rest.strip_prefix('[')?;
+    let end  = rest.rfind(']')?;
+    let body = &rest[..end];
+    // podziel na warianty po ','
+    let mut variants = Vec::new();
+    for part in body.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        if let Some(bracket) = part.find('[') {
+            let vname = part[..bracket].trim().to_string();
+            let fields_str = &part[bracket + 1..];
+            let fend = fields_str.rfind(']').unwrap_or(fields_str.len());
+            let fields: Vec<(String, String)> = fields_str[..fend].split(',')
+            .filter_map(|f| {
+                let f = f.trim();
+                let colon = f.find(':')?;
+                let fname = f[..colon].trim().to_string();
+                let ftype = f[colon + 1..].trim().to_string();
+                Some((fname, ftype))
+            })
+            .collect();
+            variants.push((vname, fields));
+        } else {
+            variants.push((part.to_string(), Vec::new()));
+        }
+    }
+    if variants.is_empty() { return None; }
+    Some((name, variants))
+}
+
+// ─────────────────────────────────────────────────────────────
+// is_pipe_line — `| .step args` (wieloliniowy pipe)
+// ─────────────────────────────────────────────────────────────
+fn is_pipe_line(line: &str) -> Option<String> {
+    let s = line.trim();
+    if !s.starts_with("| ") { return None; }
+    // Nie mylić z |> (pipe operator)
+    if s.starts_with("|>") { return None; }
+    Some(s[2..].trim().to_string())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -220,10 +496,11 @@ fn parse_lib_ref(pair: Pair<Rule>) -> LibRef {
     let nm  = inner.next().unwrap().as_str().to_string();
     let ver = inner.next().map(|p: Pair<Rule>| p.as_str().to_string());
     let lib_type = match lt {
-        "source" => LibType::Source, "core"   => LibType::Core,
-        "bytes"  => LibType::Bytes,  "github" => LibType::Github,
-        "virus"  => LibType::Virus,  "vira"   => LibType::Vira,
-        _        => LibType::Source,
+        "core"  => LibType::Core,
+        "bytes" => LibType::Bytes,
+        "virus" => LibType::Virus,
+        "vira"  => LibType::Vira,
+        _       => LibType::Core,
     };
     LibRef { lib_type, name: nm, version: ver }
 }
@@ -239,18 +516,18 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
 
     Some(match node.as_rule() {
 
-        // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────
+        // ── ISTNIEJĄCE — BEZ ZMIAN ────────────────────────────────
         Rule::class_def  => LineOp::ClassDef(node.into_inner().next()?.as_str().to_string()),
-         Rule::unsafe_def => {
-             let mut fi = node.into_inner();
-             let name = fi.next()?.as_str().to_string();
-             let sig  = fi.next().map(|p| p.as_str().to_string());
-             LineOp::UnsafeDef(name, sig)
-         },
          Rule::func_def => {
              let mut fi = node.into_inner();
              let name = fi.next()?.as_str().to_string();
              let sig  = fi.next().map(|p| p.as_str().to_string());
+             // Sprawdź czy to generic sig z constraint
+             if let Some(ref s) = sig {
+                 if s.contains(" impl ") {
+                     return Some(LineOp::FuncDefGeneric(name, s.clone()));
+                 }
+             }
              LineOp::FuncDef(name, sig)
          },
          Rule::func_done  => LineOp::FuncDone,
@@ -344,8 +621,6 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
          Rule::import_stmt => {
              let mut fi    = node.into_inner();
              let resource  = fi.next()?.as_str().trim_matches('"').to_string();
-             // "in" to literał — pest go nie zwraca przez into_inner()
-             // fi.next() od razu trafia na ident przestrzeni nazw (jeśli był)
              let namespace = fi.next().map(|p| p.as_str().to_string());
              LineOp::Import(resource, namespace)
          },
@@ -368,12 +643,9 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
              LineOp::Out(val)
          },
 
-         // ── NOWE reguły ──────────────────────────────────────────
+         // ── NOWE reguły ───────────────────────────────────────────
 
          // % key = val — stała
-         // percent_stmt = { "%" ~ percent_key ~ "=" ~ rest }
-         // "%" i "=" to literały — niewidoczne przez into_inner()
-         // into_inner() zwraca: [percent_key, rest]
          Rule::percent_stmt => {
              let mut fi = node.into_inner();
              let key = fi.next()?.as_str().to_string();
@@ -382,24 +654,18 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
          },
 
          // spawn rest
-         // spawn_stmt = { "spawn" ~ rest }
-         // "spawn" to literał — into_inner() zwraca: [rest]
          Rule::spawn_stmt => {
              let rest = node.into_inner().next()?.as_str().to_string();
              LineOp::Spawn(rest)
          },
 
          // await rest
-         // await_stmt = { "await" ~ rest }
-         // "await" to literał — into_inner() zwraca: [rest]
          Rule::await_stmt => {
              let rest = node.into_inner().next()?.as_str().to_string();
              LineOp::Await(rest)
          },
 
          // assert assert_body str_lit?
-         // assert_stmt = { "assert" ~ assert_body ~ str_lit? }
-         // "assert" to literał — into_inner() zwraca: [assert_body, str_lit?]
          Rule::assert_stmt => {
              let mut fi = node.into_inner();
              let cond   = fi.next()?.as_str().trim().to_string();
@@ -408,18 +674,13 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
          },
 
          // match cond cpfx
-         // match_stmt = { "match" ~ cond ~ cpfx }
-         // "match" to literał — into_inner() zwraca: [cond, cpfx]
          Rule::match_stmt => {
              let mut fi = node.into_inner();
              let cond   = fi.next()?.as_str().to_string();
-             // cpfx — pomijamy (jest ale nas nie interesuje tu)
              LineOp::Match(cond)
          },
 
          // match_val cpfx rest
-         // match_arm = { match_val ~ cpfx ~ rest }
-         // into_inner() zwraca: [match_val, cpfx, rest]
          Rule::match_arm => {
              let mut fi = node.into_inner();
              let val    = fi.next()?.as_str().trim().to_string();
@@ -429,12 +690,135 @@ fn line_to_op(line_pair: Pair<Rule>) -> Option<LineOp> {
          },
 
          // pipe_stmt = { call_path ~ rest? ~ (pipe_item_sep ~ call_path ~ rest?)+ }
-         // into_inner() zwraca kolejne call_path i rest na przemian
          Rule::pipe_stmt => {
              let steps: Vec<String> = node.into_inner()
              .map(|p| p.as_str().to_string())
              .collect();
              LineOp::Pipe(steps)
+         },
+
+         // | step — wieloliniowy pipe
+         Rule::pipe_line_stmt => {
+             let rest = node.into_inner().next()?.as_str().to_string();
+             LineOp::PipeLine(rest)
+         },
+
+         // ==interface Name [method1, method2]
+         Rule::interface_def => {
+             let mut fi   = node.into_inner();
+             let name     = fi.next()?.as_str().to_string();
+             let methods  = fi.map(|p| p.as_str().to_string()).collect();
+             LineOp::InterfaceDef(name, methods)
+         },
+
+         // ;;Class impl Interface def
+         Rule::impl_def => {
+             let mut fi    = node.into_inner();
+             let class     = fi.next()?.as_str().to_string();
+             let interface = fi.next()?.as_str().to_string();
+             LineOp::ImplDef(class, interface)
+         },
+
+         // :: name [size] def — obsługiwane przez is_arena_def w Rust
+         // ale jeśli pest złapie arena_def:
+         Rule::arena_def => {
+             let mut fi = node.into_inner();
+             let name   = fi.next()?.as_str().to_string();
+             let size   = fi.next()?.as_str().to_string();
+             LineOp::ArenaDef(name, size)
+         },
+
+         // $var.method args — kolekcja
+         Rule::collection_mut => {
+             let raw = node.as_str();
+             // parse: $var.method args
+             let s = raw.strip_prefix('$').unwrap_or(raw);
+             let dot = s.find('.').unwrap_or(s.len());
+             let var  = s[..dot].to_string();
+             let rest = &s[dot + 1..];
+             let sp   = rest.find(' ').unwrap_or(rest.len());
+             let method = rest[..sp].to_string();
+             let args   = rest[sp..].trim().to_string();
+             LineOp::CollectionMut(var, method, args)
+         },
+
+         // expr ?! "msg"
+         Rule::result_unwrap => {
+             let raw = node.as_str();
+             if let Some((expr, msg)) = is_result_unwrap(raw) {
+                 LineOp::ResultUnwrap(expr, msg)
+             } else {
+                 return None;
+             }
+         },
+
+         // module.method args
+         Rule::module_call => {
+             let mut fi = node.into_inner();
+             let path   = fi.next()?.as_str().to_string();
+             let args   = fi.next().map(|p| p.as_str().trim().to_string()).unwrap_or_default();
+             LineOp::ModuleCall(path, args)
+         },
+
+         // recur args
+         Rule::recur_stmt => {
+             let rest = node.into_inner().next()?.as_str().to_string();
+             LineOp::Recur(rest)
+         },
+
+         // defer expr
+         Rule::defer_stmt => {
+             let rest = node.into_inner().next()?.as_str().to_string();
+             LineOp::Defer(rest)
+         },
+
+         // do
+         Rule::do_stmt => {
+             LineOp::DoBlock
+         },
+
+         // ;;scope def
+         Rule::scope_def => {
+             LineOp::ScopeDef
+         },
+
+         // ==type Name [...]
+         Rule::adt_def => {
+             let raw = node.as_str();
+             if let Some((name, variants)) = is_adt_def(raw) {
+                 LineOp::AdtDef(name, variants)
+             } else {
+                 return None;
+             }
+         },
+
+         // ==test "opis" [
+         Rule::test_def => {
+             let mut fi  = node.into_inner();
+             let desc    = fi.next()?.as_str().trim_matches('"').to_string();
+             LineOp::TestDef(desc)
+         },
+
+         // lambda_lit { $x -> body } — jako standalone (np. jako arg inline)
+         Rule::lambda_lit => {
+             let raw = node.as_str();
+             if let Some((params, body)) = parse_lambda_literal(raw) {
+                 LineOp::Lambda(params, body)
+             } else {
+                 return None;
+             }
+         },
+
+         // destruct_stmt
+         Rule::destruct_stmt => {
+             let raw = node.as_str();
+             if let Some((head, tail, src)) = is_destruct_list(raw) {
+                 LineOp::DestructList(head, tail, src)
+             } else if let Some((fields, src)) = is_destruct_map(raw) {
+                 LineOp::DestructMap(fields, src)
+             } else {
+                 return None;
+             }
          },
 
          _ => return None,
@@ -490,6 +874,17 @@ pub fn parse_file(
     let mut raw_start_off  = 0usize;
     let mut scopes         = Vec::<Scope>::new();
 
+    // Stan do-notacji
+    let mut in_do_block    = false;
+    let mut do_key         = String::new();
+    let mut do_buf         = Vec::<ProgramNode>::new();
+    let mut do_start_line  = 0usize;
+
+    // Stan testu jednostkowego
+    let mut in_test_block  = false;
+    let mut test_desc      = String::new();
+    let mut test_buf       = Vec::<ProgramNode>::new();
+
     for (idx, raw_line) in src.lines().enumerate() {
         let off  = offsets[idx];
         let trim = raw_line.trim();
@@ -498,6 +893,68 @@ pub fn parse_file(
         if trim == "!!" { in_blk_comment = !in_blk_comment; continue; }
         if in_blk_comment { continue; }
         if trim.starts_with('!') { continue; }
+
+        // ── Zakończenie bloku do...done ─────────────────────────────────────
+        if in_do_block {
+            if trim == "done" {
+                // Zamknij blok do
+                let node = ProgramNode {
+                    line_num: do_start_line, is_sudo: false,
+                    content:  CommandType::DoBlock { key: do_key.clone(), body: do_buf.clone() },
+                    original_text: format!("{} = do", do_key),
+                    span: (offsets[do_start_line.saturating_sub(1)], 0),
+                };
+                push_node(&mut result, &scopes, node);
+                in_do_block = false;
+                do_key.clear();
+                do_buf.clear();
+            } else {
+                // Parsuj linię wewnątrz do-bloku jako normalny węzeł
+                let (parse_src, is_sudo) = if trim.starts_with('^') {
+                    (trim[1..].trim(), true)
+                } else {
+                    (trim, false)
+                };
+                let span = SourceSpan::new(off.into(), parse_src.len().into());
+                let line_num = idx + 1;
+                if let Some(op) = try_parse_line(parse_src) {
+                    if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                        do_buf.push(node);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // ── Zakończenie bloku testu ==test ──────────────────────────────────
+        if in_test_block {
+            if trim == "]" {
+                let node = ProgramNode {
+                    line_num: idx + 1, is_sudo: false,
+                    content:  CommandType::TestBlock { desc: test_desc.clone(), body: test_buf.clone() },
+                    original_text: format!("==test \"{}\" [...]", test_desc),
+                    span: (off, 0),
+                };
+                push_node(&mut result, &scopes, node);
+                in_test_block = false;
+                test_desc.clear();
+                test_buf.clear();
+            } else {
+                // Parsuj assert i inne linie testu
+                let (parse_src, is_sudo) = if trim.starts_with('^') {
+                    (trim[1..].trim(), true)
+                } else {
+                    (trim, false)
+                };
+                let line_num = idx + 1;
+                if let Some(op) = try_parse_line(parse_src) {
+                    if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                        test_buf.push(node);
+                    }
+                }
+            }
+            continue;
+        }
 
         if in_raw_block {
             if trim == "]" {
@@ -531,8 +988,142 @@ pub fn parse_file(
         let span     = SourceSpan::new(off.into(), parse_src.len().into());
 
         // ══════════════════════════════════════════════════════
-        // ETAP 1a: Sprawdź % (stała) — PRZED pest i PRZED is_assignment
-        // %APP_NAME = "HackerOS"
+        // ETAP 0a: arena allocator `:: name [size] def`
+        // PRZED sprawdzaniem :: jako unsafe_def
+        // ══════════════════════════════════════════════════════
+        if let Some((name, size)) = is_arena_def(parse_src) {
+            let op = LineOp::ArenaDef(name, size);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0b: kolekcja `$var.method args`
+        // ══════════════════════════════════════════════════════
+        if let Some((var, method, args)) = is_collection_mut(parse_src) {
+            let op = LineOp::CollectionMut(var, method, args);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0c: result unwrap standalone `expr ?! "msg"`
+        // (bez przypisania)
+        // ══════════════════════════════════════════════════════
+        if parse_src.contains(" ?! ") && !parse_src.contains('=') {
+            if let Some((expr, msg)) = is_result_unwrap(parse_src) {
+                let op = LineOp::ResultUnwrap(expr, msg);
+                if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                    push_node(&mut result, &scopes, node);
+                }
+                continue;
+            }
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0d: ADT `==type Name [...]`
+        // ══════════════════════════════════════════════════════
+        if parse_src.starts_with("==type ") {
+            if let Some((name, variants)) = is_adt_def(parse_src) {
+                let op = LineOp::AdtDef(name, variants);
+                if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                    push_node(&mut result, &scopes, node);
+                }
+                continue;
+            }
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0e: test jednostkowy `==test "opis" [`
+        // ══════════════════════════════════════════════════════
+        if parse_src.starts_with("==test ") {
+            if let Some(desc) = is_test_def(parse_src) {
+                in_test_block = true;
+                test_desc = desc;
+                test_buf.clear();
+                continue;
+            }
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0f: ;;scope def — zasięg leksykalny
+        // ══════════════════════════════════════════════════════
+        if is_scope_def(parse_src) {
+            let op = LineOp::ScopeDef;
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+                // ;;scope traktujemy jak nową klasę anonimową z unikalnym imieniem
+                let scope_name = format!("__scope_{}", line_num);
+                scopes.push(Scope::Class(scope_name));
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0g: defer `defer expr`
+        // ══════════════════════════════════════════════════════
+        if let Some(expr) = is_defer(parse_src) {
+            let op = LineOp::Defer(expr);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0h: recur `recur args`
+        // ══════════════════════════════════════════════════════
+        if let Some(args) = is_recur(parse_src) {
+            let op = LineOp::Recur(args);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0i: wieloliniowy pipe `| .step args`
+        // ══════════════════════════════════════════════════════
+        if let Some(step) = is_pipe_line(parse_src) {
+            let op = LineOp::PipeLine(step);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0j: destrukturyzacja listy `[head | tail] = $src`
+        // ══════════════════════════════════════════════════════
+        if parse_src.starts_with('[') && parse_src.contains('|') && parse_src.contains('=') {
+            if let Some((head, tail, src_v)) = is_destruct_list(parse_src) {
+                let op = LineOp::DestructList(head, tail, src_v);
+                if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                    push_node(&mut result, &scopes, node);
+                }
+                continue;
+            }
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 0k: destrukturyzacja mapy `{field1, field2} = $src`
+        // ══════════════════════════════════════════════════════
+        if parse_src.starts_with('{') && !parse_src.contains(':') && parse_src.contains('=') {
+            if let Some((fields, src_v)) = is_destruct_map(parse_src) {
+                let op = LineOp::DestructMap(fields, src_v);
+                if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                    push_node(&mut result, &scopes, node);
+                }
+                continue;
+            }
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1a: stała %KEY = val
         // ══════════════════════════════════════════════════════
         if let Some((key, val)) = is_percent(parse_src) {
             let op = LineOp::Percent(key, val);
@@ -543,7 +1134,7 @@ pub fn parse_file(
         }
 
         // ══════════════════════════════════════════════════════
-        // ETAP 1b: Sprawdź `key = spawn rest` — PRZED is_assignment
+        // ETAP 1b: `key = spawn rest`
         // ══════════════════════════════════════════════════════
         if let Some((key, rest)) = is_spawn_assign(parse_src) {
             let op = LineOp::AssignSpawn(key, rest);
@@ -554,7 +1145,7 @@ pub fn parse_file(
         }
 
         // ══════════════════════════════════════════════════════
-        // ETAP 1c: Sprawdź `key = await rest` — PRZED is_assignment
+        // ETAP 1c: `key = await rest`
         // ══════════════════════════════════════════════════════
         if let Some((key, rest)) = is_await_assign(parse_src) {
             let op = LineOp::AssignAwait(key, rest);
@@ -565,8 +1156,40 @@ pub fn parse_file(
         }
 
         // ══════════════════════════════════════════════════════
-        // ETAP 1d: Sprawdź przypisanie w Rust — PRZED pest
-        // Obsługuje done_=x, total_=x, @VAR=x, ~name=x itp.
+        // ETAP 1d: `key = do` — blok do-notacji
+        // ══════════════════════════════════════════════════════
+        if let Some(key) = is_do_assign(parse_src) {
+            in_do_block   = true;
+            do_key        = key;
+            do_buf        = Vec::new();
+            do_start_line = line_num;
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1e: `key = { $x -> body }` — lambda
+        // ══════════════════════════════════════════════════════
+        if let Some((key, params, body, is_raw, is_global)) = is_lambda_assign(parse_src) {
+            let op = LineOp::AssignLambda(key, params, body, is_raw, is_global);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1f: wyrażenie `key = expr_z_operatorem / lista / mapa`
+        // ══════════════════════════════════════════════════════
+        if let Some((key, expr, is_raw, is_global)) = is_expr_assign(parse_src) {
+            let op = LineOp::AssignExpr(key, expr, is_raw, is_global);
+            if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
+                push_node(&mut result, &scopes, node);
+            }
+            continue;
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ETAP 1g: zwykłe przypisanie
         // ══════════════════════════════════════════════════════
         if let Some((key, val, is_raw, is_global)) = is_assignment(parse_src) {
             let op = if is_global {
@@ -577,7 +1200,7 @@ pub fn parse_file(
             if let Some(node) = build_node(line_num, is_sudo, off, parse_src, op) {
                 push_node(&mut result, &scopes, node);
             }
-            continue; // ← kluczowe: nie trafia do pest
+            continue;
         }
 
         // ══════════════════════════════════════════════════════
@@ -593,15 +1216,26 @@ pub fn parse_file(
 
         match op {
             LineOp::ClassDef(name)       => { scopes.push(Scope::Class(name)); },
+            LineOp::ScopeDef             => {
+                let scope_name = format!("__scope_{}", line_num);
+                scopes.push(Scope::Class(scope_name));
+            },
             LineOp::FuncDef(name, sig)   => {
                 let full = qualified(&scopes, &name);
                 scopes.push(Scope::Func(full.clone()));
                 result.functions.insert(full, (false, sig, Vec::new()));
             },
-            LineOp::UnsafeDef(name, sig) => {
+            LineOp::FuncDefGeneric(name, sig) => {
                 let full = qualified(&scopes, &name);
                 scopes.push(Scope::Func(full.clone()));
-                result.functions.insert(full, (true, sig, Vec::new()));
+                result.functions.insert(full, (false, Some(sig), Vec::new()));
+            },
+            // ArenaDef z pest (fallback — normalnie złapane wyżej przez is_arena_def)
+            LineOp::ArenaDef(name, size) => {
+                let full = qualified(&scopes, &name);
+                scopes.push(Scope::Func(full.clone()));
+                // is_unsafe=false — arena to zwykła (wydajna) funkcja, nie unsafe
+                result.functions.insert(full, (false, Some(format!("[arena:{}]", size)), Vec::new()));
             },
             LineOp::FuncDone => { scopes.pop(); },
             LineOp::RawBlockStart => {
@@ -632,6 +1266,43 @@ pub fn parse_file(
     if errors.is_empty() { Ok(result) } else { Err(errors) }
 }
 
+// ─────────────────────────────────────────────────────────────
+// try_parse_line — próbuje sparsować linię przez wszystkie
+// pre-pest etapy, używane wewnątrz bloków do/test
+// ─────────────────────────────────────────────────────────────
+fn try_parse_line(parse_src: &str) -> Option<LineOp> {
+    if let Some(args) = is_recur(parse_src) { return Some(LineOp::Recur(args)); }
+    if let Some(expr) = is_defer(parse_src)  { return Some(LineOp::Defer(expr)); }
+    if let Some(step) = is_pipe_line(parse_src) { return Some(LineOp::PipeLine(step)); }
+    if let Some((var, method, args)) = is_collection_mut(parse_src) {
+        return Some(LineOp::CollectionMut(var, method, args));
+    }
+    if parse_src.contains(" ?! ") && !parse_src.contains('=') {
+        if let Some((expr, msg)) = is_result_unwrap(parse_src) {
+            return Some(LineOp::ResultUnwrap(expr, msg));
+        }
+    }
+    if let Some((key, val)) = is_percent(parse_src) { return Some(LineOp::Percent(key, val)); }
+    if let Some((key, rest)) = is_spawn_assign(parse_src) { return Some(LineOp::AssignSpawn(key, rest)); }
+    if let Some((key, rest)) = is_await_assign(parse_src) { return Some(LineOp::AssignAwait(key, rest)); }
+    if let Some((key, params, body, is_raw, is_global)) = is_lambda_assign(parse_src) {
+        return Some(LineOp::AssignLambda(key, params, body, is_raw, is_global));
+    }
+    if let Some((key, expr, is_raw, is_global)) = is_expr_assign(parse_src) {
+        return Some(LineOp::AssignExpr(key, expr, is_raw, is_global));
+    }
+    if let Some((key, val, is_raw, is_global)) = is_assignment(parse_src) {
+        let op = if is_global { LineOp::GlobalVar(key, val) } else { LineOp::LocalVar(key, val, is_raw) };
+        return Some(op);
+    }
+    if let Ok(mut pairs) = HlParser::parse(Rule::line, parse_src) {
+        if let Some(pair) = pairs.next() {
+            return line_to_op(pair);
+        }
+    }
+    None
+}
+
 fn qualified(scopes: &[Scope], name: &str) -> String {
     for s in scopes.iter().rev() {
         if let Scope::Class(cls) = s { return format!("{}.{}", cls, name); }
@@ -658,15 +1329,16 @@ fn handle_lib(
     result.libs.push(lib_ref.clone());
     let key = lib_ref.cache_key();
     match lib_ref.lib_type {
-        LibType::Github | LibType::Vira => {
+        LibType::Vira | LibType::Virus => {
+            // repozytoria git z ~/.hackeros/hacker-lang/libs/.virus/
             if verbose { eprintln!("[lib] {}: {}", lib_ref.lib_type.as_str(), lib_ref.name); }
         },
-        LibType::Bytes | LibType::Virus => {
+        LibType::Bytes => {
             if verbose {
                 if let Some(p) = lib_path(&lib_ref) { eprintln!("[lib] bin: {}", p.display()); }
             }
         },
-        LibType::Source | LibType::Core => {
+        LibType::Core => {
             if !resolve_libs { return; }
             if !seen_libs.insert(key.clone()) {
                 if verbose { eprintln!("[lib] już widziany: {}", key); }
@@ -710,7 +1382,7 @@ fn build_node(
     line_num: usize, is_sudo: bool, off: usize, src: &str, op: LineOp,
 ) -> Option<ProgramNode> {
     let cmd = match op {
-        // ── ISTNIEJĄCE — BEZ ZMIAN ───────────────────────────────
+        // ── ISTNIEJĄCE — BEZ ZMIAN ────────────────────────────────
         LineOp::SepCmd(c)          => CommandType::Isolated(c),
         LineOp::RawCmd(c)          => CommandType::RawNoSub(c),
         LineOp::ExplCmd(c)         => CommandType::RawSub(c),
@@ -745,6 +1417,42 @@ fn build_node(
         LineOp::Match(c)           => CommandType::Match  { cond: c },
         LineOp::MatchArm(v, c)     => CommandType::MatchArm { val: v, cmd: c },
         LineOp::Pipe(steps)        => CommandType::Pipe(steps),
+        // ── NOWE: wyrażenia / kolekcje / interfejsy / arena ───────
+        LineOp::AssignExpr(k, e, r, g) => if g {
+            CommandType::AssignEnv   { key: k, val: e }
+        } else {
+            CommandType::AssignExpr  { key: k, expr: e, is_raw: r, is_global: false }
+        },
+        LineOp::CollectionMut(v, m, a) => CommandType::CollectionMut { var: v, method: m, args: a },
+        LineOp::InterfaceDef(n, ms)    => CommandType::Interface { name: n, methods: ms },
+        LineOp::ImplDef(c, i)          => CommandType::ImplDef { class: c, interface: i },
+        LineOp::ArenaDef(n, s)         => CommandType::ArenaDef { name: n, size: s },
+        LineOp::ResultUnwrap(e, m)     => CommandType::ResultUnwrap { expr: e, msg: m },
+        LineOp::ModuleCall(p, a)       => CommandType::ModuleCall { path: p, args: a },
+        // ── NOWE: lambdy / domknięcia ─────────────────────────────
+        LineOp::Lambda(params, body)   => CommandType::Lambda { params, body },
+        LineOp::AssignLambda(k, params, body, r, g) => CommandType::AssignLambda {
+            key: k, params, body, is_raw: r, is_global: g,
+        },
+        // ── NOWE: rekurencja ogonowa ──────────────────────────────
+        LineOp::Recur(args)            => CommandType::Recur { args },
+        // ── NOWE: destrukturyzacja ────────────────────────────────
+        LineOp::DestructList(h, t, s)  => CommandType::DestructList { head: h, tail: t, source: s },
+        LineOp::DestructMap(flds, s)   => CommandType::DestructMap  { fields: flds, source: s },
+        // ── NOWE: zasięg leksykalny ──────────────────────────────
+        LineOp::ScopeDef               => CommandType::ScopeDef,
+        // ── NOWE: ADT ────────────────────────────────────────────
+        LineOp::AdtDef(n, vs)          => CommandType::AdtDef { name: n, variants: vs },
+        // ── NOWE: do-notacja ─────────────────────────────────────
+        LineOp::DoBlock                => return None, // obsługiwane przez blok stanu
+        LineOp::AssignDo(k)            => CommandType::DoBlock { key: k, body: Vec::new() },
+        LineOp::PipeLine(step)         => CommandType::PipeLine { step },
+        // ── NOWE: testy ──────────────────────────────────────────
+        LineOp::TestDef(desc)          => CommandType::TestBlock { desc, body: Vec::new() },
+        // ── NOWE: defer ──────────────────────────────────────────
+        LineOp::Defer(expr)            => CommandType::Defer { expr },
+        // ── NOWE: generics z constraints ─────────────────────────
+        LineOp::FuncDefGeneric(n, s)   => CommandType::FuncDefGeneric { name: n, sig: s },
         _ => return None,
     };
     Some(ProgramNode {
