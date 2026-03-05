@@ -25,9 +25,9 @@ use std::time::Instant;
 // ─────────────────────────────────────────────────────────────
 #[derive(Parser, Debug)]
 #[command(
-author  = "HackerOS",
-version = "1.7.5",
-about   = "hacker-lang runtime v2 — generacyjny GC, bytecode VM, DynASM JIT, persistent shell session"
+author  = "HackerOS Team <hackeros068@gmail.com>",
+version = "1.8.0",
+about   = "hacker-lang runtime v1.8.0 — native numeric types, generacyjny GC, bytecode VM, DynASM JIT"
 )]
 struct Args {
     #[arg(required_unless_present_any = ["clean_cache", "cache_stats"])]
@@ -70,7 +70,6 @@ fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
         std::process::exit(1);
     }
 
-    // AnalysisResult teraz z trójką functions: (bool, Option<String>, Vec<ProgramNode>)
     let ast: AnalysisResult = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         let preview = String::from_utf8_lossy(&out.stdout);
         let preview = &preview[..preview.len().min(512)];
@@ -93,7 +92,6 @@ fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
             }
         }
 
-        // Pokaż funkcje z sygnaturami typów (nowe v9)
         let typed: Vec<_> = ast.functions.iter()
         .filter(|(_, (_, sig, _))| sig.is_some())
         .collect();
@@ -109,7 +107,7 @@ fn generate_bytecode(file_path: &str, verbose: bool) -> BytecodeProgram {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Disassembler — obsługuje wszystkie OpCode v6
+// Disassembler
 // ─────────────────────────────────────────────────────────────
 fn disassemble(prog: &BytecodeProgram) {
     let mut addr_to_func: std::collections::HashMap<usize, &str> =
@@ -119,8 +117,9 @@ fn disassemble(prog: &BytecodeProgram) {
     }
 
     eprintln!(
-        "{} Bytecode: {} ops, {} funkcji, {} strings w pool",
+        "{} Bytecode v{}: {} ops, {} funkcji, {} strings w pool",
         "[dis]".cyan(),
+              prog.schema_version,
               prog.ops.len(),
               prog.functions.len(),
               prog.pool.strings.len()
@@ -134,7 +133,6 @@ fn disassemble(prog: &BytecodeProgram) {
 
         let prefix = format!("{:>5}:", i);
         match op {
-            // ── ISTNIEJĄCE ────────────────────────────────────
             OpCode::Exec { cmd_id, sudo } => {
                 eprintln!(
                     "{}  EXEC{} \"{}\"",
@@ -202,8 +200,6 @@ fn disassemble(prog: &BytecodeProgram) {
                 eprintln!("{}  HOTL loop_ip={}", prefix.dimmed(), loop_ip);
             }
             OpCode::Nop => { eprintln!("{}  NOP", prefix.dimmed()); }
-
-            // ── NOWE v6 ───────────────────────────────────────
             OpCode::SetConst { key_id, val_id } => {
                 eprintln!(
                     "{}  SCONST %{} = \"{}\"",
@@ -213,11 +209,7 @@ fn disassemble(prog: &BytecodeProgram) {
                 );
             }
             OpCode::SetOut { val_id } => {
-                eprintln!(
-                    "{}  OUT \"{}\"",
-                    prefix.dimmed(),
-                          prog.str(*val_id).cyan()
-                );
+                eprintln!("{}  OUT \"{}\"", prefix.dimmed(), prog.str(*val_id).cyan());
             }
             OpCode::SpawnBg { cmd_id, sudo } => {
                 eprintln!(
@@ -237,11 +229,7 @@ fn disassemble(prog: &BytecodeProgram) {
                 );
             }
             OpCode::AwaitPid { expr_id } => {
-                eprintln!(
-                    "{}  AWAIT {}",
-                    prefix.dimmed(),
-                          prog.str(*expr_id).blue()
-                );
+                eprintln!("{}  AWAIT {}", prefix.dimmed(), prog.str(*expr_id).blue());
             }
             OpCode::AwaitAssign { key_id, expr_id } => {
                 eprintln!(
@@ -261,7 +249,7 @@ fn disassemble(prog: &BytecodeProgram) {
                 );
             }
             OpCode::MatchExec { case_cmd_id, sudo } => {
-                let cmd = prog.str(*case_cmd_id);
+                let cmd     = prog.str(*case_cmd_id);
                 let preview = &cmd[..cmd.len().min(50)];
                 eprintln!(
                     "{}  MATCH{} {}…",
@@ -278,6 +266,175 @@ fn disassemble(prog: &BytecodeProgram) {
                               prog.str(*cmd_id).magenta()
                 );
             }
+            // ── v7: NUMERYCZNE ────────────────────────────────
+            OpCode::LoadInt { dst, val } => {
+                eprintln!("{}  LDI   r{} = {}", prefix.dimmed(), dst, val.to_string().green());
+            }
+            OpCode::LoadFloat { dst, val } => {
+                eprintln!("{}  LDF   r{} = {}", prefix.dimmed(), dst, val.to_string().green());
+            }
+            OpCode::LoadBool { dst, val } => {
+                eprintln!("{}  LDB   r{} = {}", prefix.dimmed(), dst, val.to_string().green());
+            }
+            OpCode::LoadStr { dst, str_id } => {
+                eprintln!(
+                    "{}  LDS   r{} = \"{}\"",
+                    prefix.dimmed(), dst,
+                          prog.str(*str_id).green()
+                );
+            }
+            OpCode::LoadVarI { dst, var_id } => {
+                eprintln!(
+                    "{}  LDVI  r{} = ${}",
+                    prefix.dimmed(), dst,
+                          prog.str(*var_id).blue()
+                );
+            }
+            OpCode::LoadVarF { dst, var_id } => {
+                eprintln!(
+                    "{}  LDVF  r{} = ${}",
+                    prefix.dimmed(), dst,
+                          prog.str(*var_id).blue()
+                );
+            }
+            OpCode::StoreVarI { var_id, src } => {
+                eprintln!(
+                    "{}  STVI  ${} = r{}",
+                    prefix.dimmed(),
+                          prog.str(*var_id).blue(), src
+                );
+            }
+            OpCode::StoreVarF { var_id, src } => {
+                eprintln!(
+                    "{}  STVF  ${} = r{}",
+                    prefix.dimmed(),
+                          prog.str(*var_id).blue(), src
+                );
+            }
+            OpCode::AddI { dst, a, b } => {
+                eprintln!("{}  ADDI  r{} = r{} + r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::SubI { dst, a, b } => {
+                eprintln!("{}  SUBI  r{} = r{} - r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::MulI { dst, a, b } => {
+                eprintln!("{}  MULI  r{} = r{} * r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::DivI { dst, a, b } => {
+                eprintln!("{}  DIVI  r{} = r{} / r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::ModI { dst, a, b } => {
+                eprintln!("{}  MODI  r{} = r{} % r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::NegI { dst, src } => {
+                eprintln!("{}  NEGI  r{} = -r{}", prefix.dimmed(), dst, src);
+            }
+            OpCode::AddF { dst, a, b } => {
+                eprintln!("{}  ADDF  r{} = r{} + r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::SubF { dst, a, b } => {
+                eprintln!("{}  SUBF  r{} = r{} - r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::MulF { dst, a, b } => {
+                eprintln!("{}  MULF  r{} = r{} * r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::DivF { dst, a, b } => {
+                eprintln!("{}  DIVF  r{} = r{} / r{}", prefix.dimmed(), dst, a, b);
+            }
+            OpCode::NegF { dst, src } => {
+                eprintln!("{}  NEGF  r{} = -r{}", prefix.dimmed(), dst, src);
+            }
+            OpCode::CmpI { a, b, op } => {
+                eprintln!(
+                    "{}  CMPI  r{} {} r{}  [→ flag]",
+                    prefix.dimmed(), a, op.as_str().yellow(), b
+                );
+            }
+            OpCode::CmpF { a, b, op } => {
+                eprintln!(
+                    "{}  CMPF  r{} {} r{}  [→ flag]",
+                    prefix.dimmed(), a, op.as_str().yellow(), b
+                );
+            }
+            OpCode::JumpIfTrue { target } => {
+                eprintln!(
+                    "{}  JIFT  flag → {}",
+                    prefix.dimmed(),
+                          target.to_string().red()
+                );
+            }
+            OpCode::NumForExec { var_id, start, end, step, cmd_id, sudo } => {
+                eprintln!(
+                    "{}  NUMFOR{} ${} {}..{} step {} > \"{}\"",
+                    prefix.dimmed(),
+                          if *sudo { " SUDO" } else { "" }.red(),
+                              prog.str(*var_id).cyan(),
+                          start.to_string().green(),
+                          end.to_string().green(),
+                          step.to_string().yellow(),
+                          prog.str(*cmd_id)
+                );
+            }
+            OpCode::WhileExprExec { lhs_reg, op, rhs_reg, cmd_id, sudo } => {
+                eprintln!(
+                    "{}  WHILEE{} r{} {} r{} > \"{}\"",
+                    prefix.dimmed(),
+                          if *sudo { " SUDO" } else { "" }.red(),
+                              lhs_reg,
+                          op.as_str().yellow(),
+                          rhs_reg,
+                          prog.str(*cmd_id)
+                );
+            }
+            OpCode::IntToFloat { dst, src } => {
+                eprintln!("{}  I2F   r{} = (float)r{}", prefix.dimmed(), dst, src);
+            }
+            OpCode::FloatToInt { dst, src } => {
+                eprintln!("{}  F2I   r{} = (int)r{}", prefix.dimmed(), dst, src);
+            }
+            OpCode::IntToStr { var_id, src } => {
+                eprintln!(
+                    "{}  I2S   ${} = str(r{})",
+                          prefix.dimmed(),
+                          prog.str(*var_id).blue(), src
+                );
+            }
+            OpCode::FloatToStr { var_id, src } => {
+                eprintln!(
+                    "{}  F2S   ${} = str(r{})",
+                          prefix.dimmed(),
+                          prog.str(*var_id).blue(), src
+                );
+            }
+            OpCode::ReturnI { src } => {
+                eprintln!("{}  RETI  r{} → _HL_OUT", prefix.dimmed(), src);
+            }
+            OpCode::ReturnF { src } => {
+                eprintln!("{}  RETF  r{} → _HL_OUT", prefix.dimmed(), src);
+            }
+            // ── ARENA ─────────────────────────────────────────
+            OpCode::ArenaEnter { name_id, size_id } => {
+                eprintln!(
+                    "{}  ARENA ENTER :: {} [{}]",
+                    prefix.dimmed(),
+                          prog.str(*name_id).magenta().bold(),
+                          prog.str(*size_id).yellow()
+                );
+            }
+            OpCode::ArenaExit => {
+                eprintln!("{}  ARENA EXIT", prefix.dimmed());
+            }
+            OpCode::ArenaAlloc { var_id, n_bytes } => {
+                eprintln!(
+                    "{}  ARENA ALLOC ${} {}B",
+                    prefix.dimmed(),
+                          prog.str(*var_id).blue(),
+                          n_bytes.to_string().yellow()
+                );
+            }
+            OpCode::ArenaReset => {
+                eprintln!("{}  ARENA RESET", prefix.dimmed());
+            }
         }
     }
 
@@ -285,6 +442,57 @@ fn disassemble(prog: &BytecodeProgram) {
     eprintln!("\n{} String Pool:", "[pool]".cyan());
     for (i, s) in prog.pool.strings.iter().enumerate() {
         eprintln!("  {:>4}: {:?}", i, s);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Zlicz typy opcode
+// ─────────────────────────────────────────────────────────────
+fn count_opcodes(prog: &BytecodeProgram) {
+    let mut exec_count    = 0usize;
+    let mut numeric_count = 0usize;
+    let mut numfor_count  = 0usize;
+    let mut jit_count     = 0usize;
+    let mut arena_count   = 0usize;
+
+    for op in &prog.ops {
+        match op {
+            OpCode::Exec { .. } | OpCode::MatchExec { .. } | OpCode::PipeExec { .. } => {
+                exec_count += 1;
+            }
+            OpCode::LoadInt { .. } | OpCode::LoadFloat { .. } | OpCode::LoadBool { .. }
+            | OpCode::AddI { .. } | OpCode::SubI { .. } | OpCode::MulI { .. }
+            | OpCode::DivI { .. } | OpCode::ModI { .. } | OpCode::NegI { .. }
+            | OpCode::AddF { .. } | OpCode::SubF { .. } | OpCode::MulF { .. }
+            | OpCode::DivF { .. } | OpCode::NegF { .. }
+            | OpCode::CmpI { .. } | OpCode::CmpF { .. }
+            | OpCode::StoreVarI { .. } | OpCode::StoreVarF { .. }
+            | OpCode::IntToFloat { .. } | OpCode::FloatToInt { .. } => {
+                numeric_count += 1;
+            }
+            OpCode::NumForExec { .. } | OpCode::WhileExprExec { .. } => {
+                numfor_count += 1;
+            }
+            OpCode::CallFunc { .. } => {
+                jit_count += 1;
+            }
+            OpCode::ArenaEnter { .. }
+            | OpCode::ArenaExit
+            | OpCode::ArenaAlloc { .. }
+            | OpCode::ArenaReset => {
+                arena_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if exec_count + numeric_count + numfor_count + arena_count > 0 {
+        eprintln!("{} Profil opcode:", "[dis]".cyan());
+        eprintln!("    shell exec    : {}", exec_count.to_string().yellow());
+        eprintln!("    native numeric: {}", numeric_count.to_string().green());
+        eprintln!("    native loops  : {}", numfor_count.to_string().cyan());
+        eprintln!("    hl calls      : {}", jit_count.to_string().magenta());
+        eprintln!("    arena ops     : {}", arena_count.to_string().blue());
     }
 }
 
@@ -348,6 +556,7 @@ fn main() {
                   program.functions.len(),
                   program.pool.strings.len()
         );
+        count_opcodes(&program);
         if args.verbose { disassemble(&program); }
         return;
     }
@@ -362,6 +571,23 @@ fn main() {
 
     if args.verbose {
         eprintln!("{} Czas wykonania: {:?}", "[INFO]".blue(), elapsed);
+
+        if !vm.typed_vars.is_empty() {
+            eprintln!("{} Typed vars po wykonaniu ({}):", "[n]".green(), vm.typed_vars.len());
+            let mut sorted: Vec<_> = vm.typed_vars.iter().collect();
+            sorted.sort_by_key(|(k, _)| k.as_str());
+            for (name, val) in sorted {
+                eprintln!("    ${} = {:?}", name.cyan(), val);
+            }
+        }
+
+        // Wyniki testów jednostkowych
+        if vm.test_passed + vm.test_failed > 0 {
+            eprintln!("{}", "━━━ Test Results ━━━━━━━━━━━━━━━━━━━━━━━".green());
+            eprintln!("  passed : {}", vm.test_passed.to_string().green());
+            eprintln!("  failed : {}", vm.test_failed.to_string().red());
+            eprintln!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".green());
+        }
     }
 
     if args.jit_stats {
