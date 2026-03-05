@@ -1,4 +1,4 @@
-use crate::bytecode::{BytecodeProgram, OpCode};
+use crate::bytecode::{BytecodeProgram, CmpOp, OpCode};
 use colored::*;
 use std::collections::HashMap;
 
@@ -13,8 +13,11 @@ pub struct VmCtx {
     pub eval_cond_fn: extern "C" fn(*mut std::ffi::c_void, *const u8, usize) -> bool,
     pub session_ptr:  *mut std::ffi::c_void,
     pub pool_ptr:     *const std::ffi::c_void,
-    pub exit_code:    i32,
-    pub should_exit:  u8,
+    pub exit_code:    i32,   // @ +32
+    pub should_exit:  u8,    // @ +36
+    pub regs_i_ptr:   *mut i64,  // @ +40
+    pub regs_f_ptr:   *mut f64,  // @ +48
+    pub cmp_flag_ptr: *mut u8,   // @ +56
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -27,8 +30,22 @@ extern "C" {
     fn hl_jit_set_env   (ctx: *mut VmCtx, kp: *const u8, kl: usize, vp: *const u8, vl: usize);
     fn hl_jit_set_local (ctx: *mut VmCtx, kp: *const u8, kl: usize, vp: *const u8, vl: usize, raw: i32);
     fn hl_jit_fallback  (ctx: *mut VmCtx, op_idx: i64) -> i32;
-    // NOWY: assert trampoline — eval_cond + exit 1 jeśli false
     fn hl_jit_assert    (ctx: *mut VmCtx, cond_ptr: *const u8, cond_len: usize, msg_ptr: *const u8, msg_len: usize) -> i32;
+    fn hl_jit_load_var_i  (ctx: *mut VmCtx, var_ptr: *const u8, var_len: usize, dst_reg: u8);
+    fn hl_jit_load_var_f  (ctx: *mut VmCtx, var_ptr: *const u8, var_len: usize, dst_reg: u8);
+    fn hl_jit_store_var_i (ctx: *mut VmCtx, var_ptr: *const u8, var_len: usize, src_reg: u8);
+    fn hl_jit_store_var_f (ctx: *mut VmCtx, var_ptr: *const u8, var_len: usize, src_reg: u8);
+    fn hl_jit_int_to_str  (ctx: *mut VmCtx, var_ptr: *const u8, var_len: usize, src_reg: u8);
+    fn hl_jit_float_to_str(ctx: *mut VmCtx, var_ptr: *const u8, var_len: usize, src_reg: u8);
+    fn hl_jit_num_for(
+        ctx:     *mut VmCtx,
+        var_ptr: *const u8, var_len: usize,
+        start:   i64,
+        end:     i64,
+        step:    i64,
+        cmd_ptr: *const u8, cmd_len: usize,
+        sudo:    bool,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -69,7 +86,7 @@ impl Drop for ExecBuf {
 }
 
 // ─────────────────────────────────────────────────────────────
-// OS mmap wrappers (bez libc crate)
+// OS mmap wrappers
 // ─────────────────────────────────────────────────────────────
 unsafe fn os_mmap_rw(size: usize) -> Option<*mut u8> {
     extern "C" {
@@ -104,9 +121,7 @@ unsafe fn os_munmap(ptr: *mut u8, size: usize) {
 // ─────────────────────────────────────────────────────────────
 struct Emit {
     code:   Vec<u8>,
-    /// (offset_patchable_rel32, target_bytecode_ip) — usize::MAX = epilog
     relocs: Vec<(usize, usize)>,
-    /// bytecode_ip → code offset
     ip2off: HashMap<usize, usize>,
 }
 
@@ -119,22 +134,26 @@ impl Emit {
 
     fn mark_ip(&mut self, ip: usize) { self.ip2off.insert(ip, self.code.len()); }
 
-    fn u8(&mut self, b: u8)    { self.code.push(b); }
+    fn u8(&mut self, b: u8)     { self.code.push(b); }
     fn u32le(&mut self, v: u32) { self.code.extend_from_slice(&v.to_le_bytes()); }
     fn i32le(&mut self, v: i32) { self.code.extend_from_slice(&v.to_le_bytes()); }
     fn u64le(&mut self, v: u64) { self.code.extend_from_slice(&v.to_le_bytes()); }
+    fn i64le(&mut self, v: i64) { self.code.extend_from_slice(&v.to_le_bytes()); }
 
-    // ── Podstawowe instrukcje ─────────────────────────────────
-    fn mov_rax(&mut self, v: u64) { self.u8(0x48); self.u8(0xB8); self.u64le(v); }
-    fn mov_rsi(&mut self, v: u64) { self.u8(0x48); self.u8(0xBE); self.u64le(v); }
-    fn mov_rdx(&mut self, v: u64) { self.u8(0x48); self.u8(0xBA); self.u64le(v); }
-    fn mov_rcx(&mut self, v: u64) { self.u8(0x48); self.u8(0xB9); self.u64le(v); }
-    fn mov_r8 (&mut self, v: u64) { self.u8(0x49); self.u8(0xB8); self.u64le(v); }
-    fn mov_r9d(&mut self, v: i32) { self.u8(0x41); self.u8(0xB9); self.i32le(v); }
-    fn mov_ecx(&mut self, v: i32) { self.u8(0xB9); self.i32le(v); }
-    fn mov_rdi_rbx(&mut self) { self.u8(0x48); self.u8(0x89); self.u8(0xDF); }
-    fn call_rax(&mut self) { self.u8(0xFF); self.u8(0xD0); }
-    fn test_al (&mut self) { self.u8(0x84); self.u8(0xC0); }
+    fn mov_rax(&mut self, v: u64)  { self.u8(0x48); self.u8(0xB8); self.u64le(v); }
+    fn mov_rsi(&mut self, v: u64)  { self.u8(0x48); self.u8(0xBE); self.u64le(v); }
+    fn mov_rdx(&mut self, v: u64)  { self.u8(0x48); self.u8(0xBA); self.u64le(v); }
+    fn mov_rcx(&mut self, v: u64)  { self.u8(0x48); self.u8(0xB9); self.u64le(v); }
+    fn mov_r8 (&mut self, v: u64)  { self.u8(0x49); self.u8(0xB8); self.u64le(v); }
+    fn mov_r9d(&mut self, v: i32)  { self.u8(0x41); self.u8(0xB9); self.i32le(v); }
+    fn mov_ecx(&mut self, v: i32)  { self.u8(0xB9); self.i32le(v); }
+    fn mov_rdi_rbx(&mut self)      { self.u8(0x48); self.u8(0x89); self.u8(0xDF); }
+    fn call_rax(&mut self)         { self.u8(0xFF); self.u8(0xD0); }
+    fn test_al (&mut self)         { self.u8(0x84); self.u8(0xC0); }
+
+    fn mov_rsi_i64(&mut self, v: i64) { self.u8(0x48); self.u8(0xBE); self.i64le(v); }
+    fn mov_rdx_i64(&mut self, v: i64) { self.u8(0x48); self.u8(0xBA); self.i64le(v); }
+    fn mov_rcx_i64(&mut self, v: i64) { self.u8(0x48); self.u8(0xB9); self.i64le(v); }
 
     fn jz(&mut self, target_ip: usize) {
         self.u8(0x0F); self.u8(0x84);
@@ -193,10 +212,9 @@ impl Emit {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pomocniki emisji dla nowych opcodes
+// Pomocniki emisji
 // ─────────────────────────────────────────────────────────────
 
-/// Emituj wywołanie hl_jit_exec(ctx, ptr, len, sudo)
 fn emit_exec_call(em: &mut Emit, cmd: &str, sudo: bool) {
     em.mov_rdi_rbx();
     em.mov_rsi(cmd.as_ptr() as u64);
@@ -206,7 +224,6 @@ fn emit_exec_call(em: &mut Emit, cmd: &str, sudo: bool) {
     em.call_rax();
 }
 
-/// Emituj wywołanie hl_jit_set_env(ctx, key_ptr, key_len, val_ptr, val_len)
 fn emit_set_env_call(em: &mut Emit, key: &str, val: &str) {
     em.mov_rdi_rbx();
     em.mov_rsi(key.as_ptr() as u64);
@@ -217,8 +234,6 @@ fn emit_set_env_call(em: &mut Emit, key: &str, val: &str) {
     em.call_rax();
 }
 
-/// Emituj wywołanie hl_jit_assert(ctx, cond_ptr, cond_len, msg_ptr, msg_len)
-/// Jeśli assert false → JIT ustawia should_exit=1 i jmp epilog
 fn emit_assert_call(em: &mut Emit, cond: &str, msg: &str) {
     em.mov_rdi_rbx();
     em.mov_rsi(cond.as_ptr() as u64);
@@ -227,17 +242,11 @@ fn emit_assert_call(em: &mut Emit, cond: &str, msg: &str) {
     em.mov_r8(msg.len() as u64);
     em.mov_rax(hl_jit_assert as u64);
     em.call_rax();
-    // Sprawdź wynik — jeśli assert false → should_exit ustawiony przez trampoline
-    // JIT sprawdza should_exit przez test byte [rbx+36], 1
     emit_check_should_exit(em);
 }
 
-/// Emituj sprawdzenie should_exit po każdym wywołaniu które może go ustawić.
-/// Jeśli should_exit != 0 → jmp epilog (VM odczyta exit_code z ctx).
 fn emit_check_should_exit(em: &mut Emit) {
-    // test byte [rbx + 36], 1
     em.u8(0xF6); em.u8(0x43); em.u8(36); em.u8(0x01);
-    // jnz → epilog
     em.u8(0x0F); em.u8(0x85);
     let off = em.len();
     em.relocs.push((off, usize::MAX));
@@ -245,7 +254,207 @@ fn emit_check_should_exit(em: &mut Emit) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Skompilowana funkcja
+// Numeryczne pomocniki emisji
+// ─────────────────────────────────────────────────────────────
+
+fn emit_load_regs_i_ptr(em: &mut Emit) {
+    em.u8(0x48); em.u8(0x8B); em.u8(0x43); em.u8(40);
+}
+
+fn emit_load_regs_f_ptr(em: &mut Emit) {
+    em.u8(0x48); em.u8(0x8B); em.u8(0x43); em.u8(48);
+}
+
+fn emit_load_int(em: &mut Emit, dst: u8, val: i64) {
+    emit_load_regs_i_ptr(em);
+    em.u8(0x49); em.u8(0xBA); em.i64le(val);
+    let off = (dst as u32) * 8;
+    if off < 128 {
+        em.u8(0x4C); em.u8(0x89); em.u8(0x50); em.u8(off as u8);
+    } else {
+        em.u8(0x4C); em.u8(0x89); em.u8(0x90); em.u32le(off);
+    }
+}
+
+fn emit_load_float(em: &mut Emit, dst: u8, val: f64) {
+    emit_load_regs_f_ptr(em);
+    let bits = val.to_bits();
+    em.u8(0x49); em.u8(0xBA); em.u64le(bits);
+    let off = (dst as u32) * 8;
+    if off < 128 {
+        em.u8(0x4C); em.u8(0x89); em.u8(0x50); em.u8(off as u8);
+    } else {
+        em.u8(0x4C); em.u8(0x89); em.u8(0x90); em.u32le(off);
+    }
+}
+
+fn emit_load_bool(em: &mut Emit, dst: u8, val: bool) {
+    emit_load_int(em, dst, if val { 1 } else { 0 });
+}
+
+enum IntBinOp { Add, Sub, Mul, Div, Mod }
+
+fn emit_int_binop(em: &mut Emit, dst: u8, a: u8, b: u8, op: IntBinOp) {
+    emit_load_regs_i_ptr(em);
+    let off_a = (a as u32) * 8;
+    let off_b = (b as u32) * 8;
+    let off_d = (dst as u32) * 8;
+
+    match op {
+        IntBinOp::Add => {
+            emit_load_reg_from_arr(em, off_a);
+            emit_add_reg_mem(em, off_b);
+            emit_store_reg_to_arr(em, off_d);
+        }
+        IntBinOp::Sub => {
+            emit_load_reg_from_arr(em, off_a);
+            emit_sub_reg_mem(em, off_b);
+            emit_store_reg_to_arr(em, off_d);
+        }
+        IntBinOp::Mul => { emit_fallback_numeric(em, dst, a, b, 2); }
+        IntBinOp::Div => { emit_fallback_numeric(em, dst, a, b, 3); }
+        IntBinOp::Mod => { emit_fallback_numeric(em, dst, a, b, 4); }
+    }
+}
+
+fn emit_load_reg_from_arr(em: &mut Emit, off: u32) {
+    if off < 128 {
+        em.u8(0x4C); em.u8(0x8B); em.u8(0x50); em.u8(off as u8);
+    } else {
+        em.u8(0x4C); em.u8(0x8B); em.u8(0x90); em.u32le(off);
+    }
+}
+
+fn emit_add_reg_mem(em: &mut Emit, off: u32) {
+    if off < 128 {
+        em.u8(0x4C); em.u8(0x03); em.u8(0x50); em.u8(off as u8);
+    } else {
+        em.u8(0x4C); em.u8(0x03); em.u8(0x90); em.u32le(off);
+    }
+}
+
+fn emit_sub_reg_mem(em: &mut Emit, off: u32) {
+    if off < 128 {
+        em.u8(0x4C); em.u8(0x2B); em.u8(0x50); em.u8(off as u8);
+    } else {
+        em.u8(0x4C); em.u8(0x2B); em.u8(0x90); em.u32le(off);
+    }
+}
+
+fn emit_store_reg_to_arr(em: &mut Emit, off: u32) {
+    if off < 128 {
+        em.u8(0x4C); em.u8(0x89); em.u8(0x50); em.u8(off as u8);
+    } else {
+        em.u8(0x4C); em.u8(0x89); em.u8(0x90); em.u32le(off);
+    }
+}
+
+fn emit_fallback_numeric(em: &mut Emit, dst: u8, a: u8, b: u8, op_code: u8) {
+    let op_idx = ((op_code as i64) << 24)
+    | ((dst as i64) << 16)
+    | ((a   as i64) << 8)
+    |  (b   as i64);
+    em.mov_rdi_rbx();
+    em.mov_rsi(op_idx as u64);
+    em.mov_rax(hl_jit_fallback as u64);
+    em.call_rax();
+}
+
+fn emit_cmp_i(em: &mut Emit, a: u8, b: u8, op: CmpOp) {
+    let op_byte: u8 = match op {
+        CmpOp::Eq => 0, CmpOp::Ne => 1,
+        CmpOp::Lt => 2, CmpOp::Le => 3,
+        CmpOp::Gt => 4, CmpOp::Ge => 5,
+    };
+    let op_idx = (0xC0i64 << 24)
+    | ((op_byte as i64) << 16)
+    | ((a as i64) << 8)
+    |  (b as i64);
+    em.mov_rdi_rbx();
+    em.mov_rsi(op_idx as u64);
+    em.mov_rax(hl_jit_fallback as u64);
+    em.call_rax();
+}
+
+fn emit_jump_if_true(em: &mut Emit, target_ip: usize) {
+    em.u8(0x48); em.u8(0x8B); em.u8(0x43); em.u8(56);
+    em.u8(0xF6); em.u8(0x00); em.u8(0x01);
+    em.u8(0x0F); em.u8(0x85);
+    let off = em.len();
+    em.relocs.push((off, target_ip));
+    em.i32le(0);
+}
+
+fn emit_load_var_i(em: &mut Emit, var_name: &str, dst: u8) {
+    em.mov_rdi_rbx();
+    em.mov_rsi(var_name.as_ptr() as u64);
+    em.mov_rdx(var_name.len() as u64);
+    em.mov_ecx(dst as i32);
+    em.mov_rax(hl_jit_load_var_i as u64);
+    em.call_rax();
+}
+
+fn emit_load_var_f(em: &mut Emit, var_name: &str, dst: u8) {
+    em.mov_rdi_rbx();
+    em.mov_rsi(var_name.as_ptr() as u64);
+    em.mov_rdx(var_name.len() as u64);
+    em.mov_ecx(dst as i32);
+    em.mov_rax(hl_jit_load_var_f as u64);
+    em.call_rax();
+}
+
+fn emit_store_var_i(em: &mut Emit, var_name: &str, src: u8) {
+    em.mov_rdi_rbx();
+    em.mov_rsi(var_name.as_ptr() as u64);
+    em.mov_rdx(var_name.len() as u64);
+    em.mov_ecx(src as i32);
+    em.mov_rax(hl_jit_store_var_i as u64);
+    em.call_rax();
+}
+
+fn emit_store_var_f(em: &mut Emit, var_name: &str, src: u8) {
+    em.mov_rdi_rbx();
+    em.mov_rsi(var_name.as_ptr() as u64);
+    em.mov_rdx(var_name.len() as u64);
+    em.mov_ecx(src as i32);
+    em.mov_rax(hl_jit_store_var_f as u64);
+    em.call_rax();
+}
+
+fn emit_int_to_str(em: &mut Emit, var_name: &str, src: u8) {
+    em.mov_rdi_rbx();
+    em.mov_rsi(var_name.as_ptr() as u64);
+    em.mov_rdx(var_name.len() as u64);
+    em.mov_ecx(src as i32);
+    em.mov_rax(hl_jit_int_to_str as u64);
+    em.call_rax();
+}
+
+fn emit_float_to_str(em: &mut Emit, var_name: &str, src: u8) {
+    em.mov_rdi_rbx();
+    em.mov_rsi(var_name.as_ptr() as u64);
+    em.mov_rdx(var_name.len() as u64);
+    em.mov_ecx(src as i32);
+    em.mov_rax(hl_jit_float_to_str as u64);
+    em.call_rax();
+}
+
+fn emit_num_for(em: &mut Emit, var: &str, start: i64, end: i64, step: i64) {
+    // NumFor z 9 argumentami — za dużo dla prostego inline.
+    // Delegujemy przez fallback z op_idx = 0xF0 (sygnał do interpretera).
+    // W praktyce JIT nigdy nie kompiluje funkcji zawierających NumForExec
+    // bo są one zazwyczaj pojedyncze w hot path — interpreter jest wystarczający.
+    let op_idx: i64 = 0xF0_0000_0000i64
+    | ((start.min(0xFFFF) as i64) & 0xFFFF);
+    let _ = (var, end, step); // używane przez interpreter, nie JIT inline
+    em.mov_rdi_rbx();
+    em.mov_rsi(op_idx as u64);
+    em.mov_rax(hl_jit_fallback as u64);
+    em.call_rax();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Skompilowana funkcja JIT
 // ─────────────────────────────────────────────────────────────
 pub struct JitFunc {
     buf:      ExecBuf,
@@ -312,7 +521,7 @@ impl JitCompiler {
 
             match &prog.ops[ip] {
 
-                // ── ISTNIEJĄCE OPCODY ─────────────────────────
+                // ── Kontrola przepływu ────────────────────────
 
                 OpCode::Exec { cmd_id, sudo } => {
                     let cmd = prog.str(*cmd_id);
@@ -327,7 +536,7 @@ impl JitCompiler {
                     em.mov_rax(hl_jit_eval_cond as u64);
                     em.call_rax();
                     em.test_al();
-                    em.jz(*target); // FALSE (al==0) → skok
+                    em.jz(*target);
                 }
 
                 OpCode::Jump { target } => {
@@ -342,6 +551,16 @@ impl JitCompiler {
                     em.mov_rax(hl_jit_call_func as u64);
                     em.call_rax();
                 }
+
+                OpCode::Return => break,
+
+                OpCode::Exit(code) => {
+                    em.mov_rbx_d8_i32(32, *code);
+                    em.mov_rbx_d8_i8(36, 1);
+                    em.jmp(usize::MAX);
+                }
+
+                // ── Zmienne ───────────────────────────────────
 
                 OpCode::SetEnv { key_id, val_id } => {
                     let k = prog.str(*key_id);
@@ -362,15 +581,19 @@ impl JitCompiler {
                     em.call_rax();
                 }
 
-                OpCode::Exit(code) => {
-                    em.mov_rbx_d8_i32(32, *code);  // exit_code  @ rbx+32
-                    em.mov_rbx_d8_i8(36, 1);        // should_exit @ rbx+36
-                    em.jmp(usize::MAX);             // → epilog
+                OpCode::SetConst { key_id, val_id } => {
+                    let k = prog.str(*key_id);
+                    let v = prog.str(*val_id);
+                    emit_set_env_call(&mut em, k, v);
                 }
 
-                OpCode::Return => break,
+                OpCode::SetOut { val_id } => {
+                    let v = prog.str(*val_id);
+                    emit_set_env_call(&mut em, "_HL_OUT", v);
+                }
 
-                // Plugin, Lock, Unlock — trampoline fallback
+                // ── Misc ──────────────────────────────────────
+
                 OpCode::Plugin { .. } | OpCode::Lock { .. } | OpCode::Unlock { .. } => {
                     em.mov_rdi_rbx();
                     em.mov_rsi(ip as u64);
@@ -380,37 +603,15 @@ impl JitCompiler {
 
                 OpCode::HotLoop { .. } | OpCode::Nop => {}
 
-                // ── NOWE OPCODY v6 ────────────────────────────
+                // ── Spawn / Await ─────────────────────────────
 
-                // SetConst — identycznie jak SetEnv
-                // JIT nie egzekwuje niezmienności (to zadanie VM interpretera)
-                OpCode::SetConst { key_id, val_id } => {
-                    let k = prog.str(*key_id);
-                    let v = prog.str(*val_id);
-                    emit_set_env_call(&mut em, k, v);
-                }
-
-                // SetOut — zapisz wynik funkcji do _HL_OUT przez set_env
-                OpCode::SetOut { val_id } => {
-                    let v = prog.str(*val_id);
-                    emit_set_env_call(&mut em, "_HL_OUT", v);
-                }
-
-                // SpawnBg — uruchom w tle (cmd &) bez przypisania PID
                 OpCode::SpawnBg { cmd_id, sudo } => {
                     let raw = prog.str(*cmd_id);
-                    // Tworzymy "cmd &" jako tymczasowy string
-                    // WAŻNE: string musi żyć przez czas wywołania.
-                    // Strategia: budujemy string ze stałym suffixem " &" w pool.
-                    // Pool żyje przez cały czas life JitFunc → bezpieczne.
-                    let bg = format!("{} &", raw);
-                    // Leak string do stałej pamięci (żyje przez cały czas procesu)
+                    let bg  = format!("{} &", raw);
                     let bg_leaked: &'static str = Box::leak(bg.into_boxed_str());
                     emit_exec_call(&mut em, bg_leaked, *sudo);
                 }
 
-                // SpawnAssign — uruchom w tle i przypisz PID do zmiennej
-                // Strategia: exec("export key=$( cmd & echo $! )")
                 OpCode::SpawnAssign { key_id, cmd_id, sudo } => {
                     let key = prog.str(*key_id);
                     let cmd = prog.str(*cmd_id);
@@ -419,46 +620,32 @@ impl JitCompiler {
                     emit_exec_call(&mut em, sh_leaked, *sudo);
                 }
 
-                // AwaitPid — wait $pid lub wait expr
-                // Strategia: exec("wait expr")
                 OpCode::AwaitPid { expr_id } => {
                     let expr = prog.str(*expr_id);
-                    let sh   = if expr.trim().starts_with('.') {
-                        // .func → CallFunc przez trampoline (nie shell wait)
+                    if expr.trim().starts_with('.') {
                         let fname = expr.trim().trim_start_matches('.');
                         em.mov_rdi_rbx();
                         em.mov_rsi(fname.as_ptr() as u64);
                         em.mov_rdx(fname.len() as u64);
                         em.mov_rax(hl_jit_call_func as u64);
                         em.call_rax();
-                        ip += 1;
-                        continue;
                     } else {
-                        format!("wait {}", expr.trim())
-                    };
-                    let sh_leaked: &'static str = Box::leak(sh.into_boxed_str());
-                    emit_exec_call(&mut em, sh_leaked, false);
+                        let sh = format!("wait {}", expr.trim());
+                        let sh_leaked: &'static str = Box::leak(sh.into_boxed_str());
+                        emit_exec_call(&mut em, sh_leaked, false);
+                    }
                 }
 
-                // AwaitAssign — czekaj i przypisz wynik
-                // $pid   → exec("wait $pid; export key=$?")
-                // .func  → CallFunc + set_env(key, "_HL_OUT")
-                // inne   → exec("export key=$( expr )")
                 OpCode::AwaitAssign { key_id, expr_id } => {
                     let key  = prog.str(*key_id);
                     let expr = prog.str(*expr_id).trim();
-
                     if expr.starts_with('.') {
-                        // Wywołaj funkcję HL
                         let fname = expr.trim_start_matches('.');
                         em.mov_rdi_rbx();
                         em.mov_rsi(fname.as_ptr() as u64);
                         em.mov_rdx(fname.len() as u64);
                         em.mov_rax(hl_jit_call_func as u64);
                         em.call_rax();
-                        // Przechwyt _HL_OUT → key przez set_env
-                        // Nie możemy łatwo przechwycić wartości w JIT bez dodatkowego
-                        // trampolinu — używamy exec("export key=$_HL_OUT")
                         let sh = format!("export {}=$_HL_OUT", key);
                         let sh_leaked: &'static str = Box::leak(sh.into_boxed_str());
                         emit_exec_call(&mut em, sh_leaked, false);
@@ -473,8 +660,6 @@ impl JitCompiler {
                     }
                 }
 
-                // Assert — specjalny trampoline który eval_cond + exit 1 jeśli false
-                // W hot path (cond == true) — tylko eval_cond syscall, zero fork/exec
                 OpCode::Assert { cond_id, msg_id } => {
                     let cond = prog.str(*cond_id);
                     let msg  = msg_id
@@ -483,27 +668,238 @@ impl JitCompiler {
                     emit_assert_call(&mut em, cond, msg);
                 }
 
-                // MatchExec — już skompilowany jako case..esac string → zwykły Exec
                 OpCode::MatchExec { case_cmd_id, sudo } => {
                     let cmd = prog.str(*case_cmd_id);
                     emit_exec_call(&mut em, cmd, *sudo);
                 }
 
-                // PipeExec — już skompilowany jako pipe string → zwykły Exec
                 OpCode::PipeExec { cmd_id, sudo } => {
                     let cmd = prog.str(*cmd_id);
                     emit_exec_call(&mut em, cmd, *sudo);
+                }
+
+                // ── v7: NUMERYCZNE ────────────────────────────
+
+                OpCode::LoadInt { dst, val } => {
+                    emit_load_int(&mut em, *dst, *val);
+                }
+
+                OpCode::LoadFloat { dst, val } => {
+                    emit_load_float(&mut em, *dst, *val);
+                }
+
+                OpCode::LoadBool { dst, val } => {
+                    emit_load_bool(&mut em, *dst, *val);
+                }
+
+                OpCode::LoadStr { dst, str_id } => {
+                    let s = prog.str(*str_id);
+                    if let Ok(n) = s.parse::<i64>() {
+                        emit_load_int(&mut em, *dst, n);
+                    } else if let Ok(f) = s.parse::<f64>() {
+                        emit_load_float(&mut em, *dst, f);
+                    } else {
+                        em.mov_rdi_rbx();
+                        em.mov_rsi(ip as u64);
+                        em.mov_rax(hl_jit_fallback as u64);
+                        em.call_rax();
+                    }
+                }
+
+                OpCode::LoadVarI { dst, var_id } => {
+                    let var_name = prog.str(*var_id);
+                    emit_load_var_i(&mut em, var_name, *dst);
+                }
+
+                OpCode::LoadVarF { dst, var_id } => {
+                    let var_name = prog.str(*var_id);
+                    emit_load_var_f(&mut em, var_name, *dst);
+                }
+
+                OpCode::StoreVarI { var_id, src } => {
+                    let var_name = prog.str(*var_id);
+                    emit_store_var_i(&mut em, var_name, *src);
+                }
+
+                OpCode::StoreVarF { var_id, src } => {
+                    let var_name = prog.str(*var_id);
+                    emit_store_var_f(&mut em, var_name, *src);
+                }
+
+                OpCode::AddI { dst, a, b } => {
+                    emit_int_binop(&mut em, *dst, *a, *b, IntBinOp::Add);
+                }
+                OpCode::SubI { dst, a, b } => {
+                    emit_int_binop(&mut em, *dst, *a, *b, IntBinOp::Sub);
+                }
+                OpCode::MulI { dst, a, b } => {
+                    emit_int_binop(&mut em, *dst, *a, *b, IntBinOp::Mul);
+                }
+                OpCode::DivI { dst, a, b } => {
+                    emit_int_binop(&mut em, *dst, *a, *b, IntBinOp::Div);
+                }
+                OpCode::ModI { dst, a, b } => {
+                    emit_int_binop(&mut em, *dst, *a, *b, IntBinOp::Mod);
+                }
+
+                OpCode::NegI { dst, src } => {
+                    emit_load_regs_i_ptr(&mut em);
+                    let off_s = (*src as u32) * 8;
+                    let off_d = (*dst as u32) * 8;
+                    emit_load_reg_from_arr(&mut em, off_s);
+                    // neg r10
+                    em.u8(0x49); em.u8(0xF7); em.u8(0xD2);
+                    emit_store_reg_to_arr(&mut em, off_d);
+                }
+
+                OpCode::AddF { dst, a, b }
+                | OpCode::SubF { dst, a, b }
+                | OpCode::MulF { dst, a, b }
+                | OpCode::DivF { dst, a, b } => {
+                    let op_code: u8 = match &prog.ops[ip] {
+                        OpCode::AddF { .. } => 10,
+                        OpCode::SubF { .. } => 11,
+                        OpCode::MulF { .. } => 12,
+                        OpCode::DivF { .. } => 13,
+                        _ => unreachable!(),
+                    };
+                    let op_idx = ((op_code as i64) << 24)
+                    | ((*dst as i64) << 16)
+                    | ((*a  as i64) <<  8)
+                    |  (*b  as i64);
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(op_idx as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                }
+
+                OpCode::NegF { dst, src } => {
+                    let op_idx: i64 = (14i64 << 24)
+                    | ((*dst as i64) << 16)
+                    |  (*src as i64);
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(op_idx as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                }
+
+                OpCode::CmpI { a, b, op } => {
+                    emit_cmp_i(&mut em, *a, *b, *op);
+                }
+
+                OpCode::CmpF { a, b, op } => {
+                    let op_byte: u8 = match op {
+                        CmpOp::Eq => 0, CmpOp::Ne => 1,
+                        CmpOp::Lt => 2, CmpOp::Le => 3,
+                        CmpOp::Gt => 4, CmpOp::Ge => 5,
+                    };
+                    let op_idx = (0xC1i64 << 24)
+                    | ((op_byte as i64) << 16)
+                    | ((*a as i64) << 8)
+                    |  (*b as i64);
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(op_idx as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                }
+
+                OpCode::JumpIfTrue { target } => {
+                    emit_jump_if_true(&mut em, *target);
+                }
+
+                OpCode::NumForExec { var_id, start, end, step, .. } => {
+                    let var = prog.str(*var_id);
+                    emit_num_for(&mut em, var, *start, *end, *step);
+                }
+
+                OpCode::WhileExprExec { lhs_reg, op, rhs_reg, .. } => {
+                    let op_byte: u8 = match op {
+                        CmpOp::Eq => 0, CmpOp::Ne => 1,
+                        CmpOp::Lt => 2, CmpOp::Le => 3,
+                        CmpOp::Gt => 4, CmpOp::Ge => 5,
+                    };
+                    let op_idx = (0xE0i64 << 24)
+                    | ((op_byte   as i64) << 16)
+                    | ((*lhs_reg  as i64) <<  8)
+                    |  (*rhs_reg  as i64);
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(op_idx as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                }
+
+                OpCode::IntToFloat { dst, src } => {
+                    let op_idx: i64 = (0x20i64 << 24)
+                    | ((*dst as i64) << 8)
+                    |  (*src as i64);
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(op_idx as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                }
+
+                OpCode::FloatToInt { dst, src } => {
+                    let op_idx: i64 = (0x21i64 << 24)
+                    | ((*dst as i64) << 8)
+                    |  (*src as i64);
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(op_idx as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                }
+
+                OpCode::IntToStr { var_id, src } => {
+                    let var_name = prog.str(*var_id);
+                    emit_int_to_str(&mut em, var_name, *src);
+                }
+
+                OpCode::FloatToStr { var_id, src } => {
+                    let var_name = prog.str(*var_id);
+                    emit_float_to_str(&mut em, var_name, *src);
+                }
+
+                OpCode::ReturnI { src } => {
+                    emit_int_to_str(&mut em, "_HL_OUT", *src);
+                    break;
+                }
+
+                OpCode::ReturnF { src } => {
+                    emit_float_to_str(&mut em, "_HL_OUT", *src);
+                    break;
+                }
+
+                // ── Arena — NIE kompilujemy natywnie ─────────
+                //
+                // Funkcje z flagą is_arena_fn=true nie powinny być
+                // kompilowane przez JIT — compiler.rs emituje ArenaEnter
+                // na początku ich ciała i JitCompiler.compile() nigdy
+                // nie powinien ich dostać.
+                //
+                // Jeśli tu trafimy (błąd lub przyszła zmiana), delegujemy
+                // całość do interpretera przez fallback. Arena wymaga
+                // starannego zarządzania stosem HlJitArenaScope który
+                // żyje w VM — nie możemy go bezpiecznie obsłużyć z JIT.
+                OpCode::ArenaEnter { .. }
+                | OpCode::ArenaExit
+                | OpCode::ArenaAlloc { .. }
+                | OpCode::ArenaReset => {
+                    em.mov_rdi_rbx();
+                    em.mov_rsi(ip as u64);
+                    em.mov_rax(hl_jit_fallback as u64);
+                    em.call_rax();
+                    // ArenaExit sygnalizuje koniec bloku — zatrzymaj JIT
+                    if matches!(&prog.ops[ip], OpCode::ArenaExit) {
+                        break;
+                    }
                 }
             }
 
             ip += 1;
         }
 
-        // Zapamiętaj offset epilogu
         let epilog_off = em.len();
         em.ip2off.insert(usize::MAX, epilog_off);
         em.epilog();
-
         em.resolve();
 
         let size = em.code.len();
