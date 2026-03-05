@@ -13,7 +13,7 @@ use crate::parser::{parse_file, plugins_root};
 #[derive(ClapParser, Debug)]
 #[command(
 name    = "hl-plsa",
-author  = "HackerOS",
+author  = "HackerOS Team <hackeros068@gmail.com>",
 version = env!("CARGO_PKG_VERSION"),
           about   = "hacker-lang static analyser"
 )]
@@ -35,13 +35,24 @@ struct Args {
 // ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum LibType { Source, Core, Bytes, Github, Virus, Vira }
+pub enum LibType {
+    // ── Obsługiwane typy repozytoriów ────────────────────────
+    /// vira  → ~/.hackeros/hacker-lang/libs/.virus/  (repo git)
+    Vira,
+    /// virus → ~/.hackeros/hacker-lang/libs/.virus/  (alias vira)
+    Virus,
+    /// bytes → ~/.hackeros/hacker-lang/libs/bytes/  (pliki .so)
+    Bytes,
+    /// core  → ~/.hackeros/hacker-lang/libs/core/   (pliki .hl)
+    Core,
+}
 impl LibType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            LibType::Source => "source", LibType::Core   => "core",
-            LibType::Bytes  => "bytes",  LibType::Github => "github",
-            LibType::Virus  => "virus",  LibType::Vira   => "vira",
+            LibType::Vira  => "vira",
+            LibType::Virus => "virus",
+            LibType::Bytes => "bytes",
+            LibType::Core  => "core",
         }
     }
 }
@@ -92,7 +103,7 @@ pub enum CommandType {
     End         { code: i32 },
     Out(String),
 
-    // ── NOWE ─────────────────────────────────────────────────────
+    // ── NOWE (spawn/await/assert/match/pipe/const) ────────────────
 
     /// % KEY = val — stała (niezmienne przez konwencję)
     Const       { key: String, val: String },
@@ -120,6 +131,92 @@ pub enum CommandType {
 
     /// .a |> .b |> .c — łańcuch wywołań
     Pipe(Vec<String>),
+
+    // ── NOWE: system typów i wyrażenia ───────────────────────────
+
+    /// key = expr — przypisanie z wyrażeniem arytmetycznym/logicznym
+    /// np. x = 2 + 3 * 4  |  y = $x > 10  |  z = [$a, $b]  |  m = {k: "v"}
+    /// Obsługuje też interpolację wyrażeń: "Wynik: $(2 + 3)"
+    AssignExpr  { key: String, expr: String, is_raw: bool, is_global: bool },
+
+    /// $list.push 42  /  $map.set "key" "val"  — mutacja kolekcji
+    CollectionMut { var: String, method: String, args: String },
+
+    // ── NOWE: interfejsy / protokoły ─────────────────────────────
+
+    /// ==interface Serializable [to_json, from_json]
+    Interface   { name: String, methods: Vec<String> },
+
+    /// ;;Config impl Serializable def
+    ImplDef     { class: String, interface: String },
+
+    // ── NOWE: arena allocator ─────────────────────────────────────
+
+    /// :: nazwa [rozmiar] def — funkcja z arena allocatorem
+    /// np.  :: cache [512kb] def
+    ArenaDef    { name: String, size: String },
+
+    // ── NOWE: error handling jako wartość ─────────────────────────
+
+    /// expr ?! "komunikat błędu" — unwrap lub panik z komunikatem (jak Rust ?)
+    ResultUnwrap { expr: String, msg: String },
+
+    /// wywołanie metody modułu: http.get "url"
+    ModuleCall  { path: String, args: String },
+
+    // ── NOWE: domknięcia / lambdy ─────────────────────────────────
+
+    /// { $x -> $x * 2 } — domknięcie (standalone, np. jako argument inline)
+    Lambda      { params: Vec<String>, body: String },
+
+    /// callback = { $x -> $x * 2 } — przypisanie lambdy do zmiennej
+    AssignLambda { key: String, params: Vec<String>, body: String, is_raw: bool, is_global: bool },
+
+    // ── NOWE: rekurencja ogonowa ──────────────────────────────────
+
+    /// recur ($1 - 1) — wywołanie ogonowe bieżącej funkcji
+    Recur       { args: String },
+
+    // ── NOWE: destrukturyzacja ────────────────────────────────────
+
+    /// [head | tail] = $lista — destrukturyzacja listy
+    DestructList { head: String, tail: String, source: String },
+
+    /// {name, age} = $user — destrukturyzacja mapy/struktury
+    DestructMap  { fields: Vec<String>, source: String },
+
+    // ── NOWE: zasięg leksykalny ──────────────────────────────────
+
+    /// ;;scope def — anonimowy zakres leksykalny
+    ScopeDef,
+
+    // ── NOWE: typy algebraiczne (ADT) ────────────────────────────
+
+    /// ==type Shape [ Circle [radius: float], Rect [w: float, h: float], Point ]
+    AdtDef      { name: String, variants: Vec<(String, Vec<(String, String)>)> },
+
+    // ── NOWE: do-notacja ─────────────────────────────────────────
+
+    /// result = do ... done — blok sekwencyjny (jak do-notacja Haskell)
+    DoBlock     { key: String, body: Vec<ProgramNode> },
+
+    /// | .step args — krok wieloliniowego potoku
+    PipeLine    { step: String },
+
+    // ── NOWE: testy jednostkowe ──────────────────────────────────
+
+    /// ==test "opis" [ assert ... ] — blok testowy jako pierwsza klasa
+    TestBlock   { desc: String, body: Vec<ProgramNode> },
+
+    // ── NOWE: defer ──────────────────────────────────────────────
+
+    /// defer .file.close $f — sprzątanie zasobów przy wyjściu ze scope
+    Defer       { expr: String },
+
+    // ── NOWE: generics z constraints ─────────────────────────────
+
+    /// :serialize [T impl Serializable -> str] def — funkcja z ograniczeniem generycznym
+    FuncDefGeneric { name: String, sig: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,7 +338,6 @@ fn print_errors(errors: &[ParseError], file: &str) {
         eprintln!("  {} ... i {} więcej (pokazano pierwsze 20)\n",
                   "~".yellow(), (total - 20).to_string().yellow());
     }
-    // unikalne wskazówki
     let mut seen_adv = HashSet::new();
     let unique: Vec<&str> = errors.iter()
     .filter_map(|e| match e {
@@ -281,6 +377,48 @@ fn print_summary(res: &AnalysisResult) {
     types.sort();
     for t in types { eprintln!("  lib/{:<8}: {}", t.magenta(), by_type[t].join(", ")); }
 
+    // interfejsy
+    let iface_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Interface { .. }))
+    .collect();
+    if !iface_nodes.is_empty() {
+        eprintln!("\n{} Interfejsy (==interface):", "[i]".cyan().bold());
+        for node in &iface_nodes {
+            if let CommandType::Interface { name, methods } = &node.content {
+                eprintln!("    {} [{}]", name.cyan(), methods.join(", ").yellow());
+            }
+        }
+    }
+
+    // impl
+    let impl_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::ImplDef { .. }))
+    .collect();
+    if !impl_nodes.is_empty() {
+        eprintln!("\n{} Implementacje (impl):", "[I]".cyan().bold());
+        for node in &impl_nodes {
+            if let CommandType::ImplDef { class, interface } = &node.content {
+                eprintln!("    {} impl {}", class.cyan(), interface.yellow());
+            }
+        }
+    }
+
+    // arena
+    let arena_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::ArenaDef { .. }))
+    .collect();
+    if !arena_nodes.is_empty() {
+        eprintln!("\n{} Arena allocator (::):", "[A]".magenta().bold());
+        for node in &arena_nodes {
+            if let CommandType::ArenaDef { name, size } = &node.content {
+                eprintln!("    linia {:>4} — :: {} [{}]", node.line_num, name.cyan(), size.yellow());
+            }
+        }
+    }
+
     // stałe %
     let const_nodes: Vec<_> = res.main_body.iter()
     .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
@@ -291,6 +429,48 @@ fn print_summary(res: &AnalysisResult) {
         for node in &const_nodes {
             if let CommandType::Const { key, val } = &node.content {
                 eprintln!("    %{} = {}", key.yellow(), val);
+            }
+        }
+    }
+
+    // wyrażenia
+    let expr_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::AssignExpr { .. }))
+    .collect();
+    if !expr_nodes.is_empty() {
+        eprintln!("\n{} Wyrażenia (=expr):", "[=]".green().bold());
+        for node in &expr_nodes {
+            if let CommandType::AssignExpr { key, expr, .. } = &node.content {
+                eprintln!("    linia {:>4} — {} = {}", node.line_num, key.yellow(), expr.cyan());
+            }
+        }
+    }
+
+    // kolekcje — mutacje
+    let col_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::CollectionMut { .. }))
+    .collect();
+    if !col_nodes.is_empty() {
+        eprintln!("\n{} Mutacje kolekcji:", "[c]".blue().bold());
+        for node in &col_nodes {
+            if let CommandType::CollectionMut { var, method, args } = &node.content {
+                eprintln!("    linia {:>4} — ${}.{} {}", node.line_num, var.cyan(), method.yellow(), args);
+            }
+        }
+    }
+
+    // result unwrap ?!
+    let unwrap_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::ResultUnwrap { .. }))
+    .collect();
+    if !unwrap_nodes.is_empty() {
+        eprintln!("\n{} Result unwrap (?!):", "[?]".red().bold());
+        for node in &unwrap_nodes {
+            if let CommandType::ResultUnwrap { expr, msg } = &node.content {
+                eprintln!("    linia {:>4} — {} ?! \"{}\"", node.line_num, expr.cyan(), msg.yellow());
             }
         }
     }
@@ -310,7 +490,7 @@ fn print_summary(res: &AnalysisResult) {
     .filter(|n| matches!(&n.content, CommandType::Assert { .. }))
     .collect();
     if !assert_nodes.is_empty() {
-        eprintln!("\n{} Assert statements: {}", "[a]".green().bold(), assert_nodes.len().to_string().yellow());
+        eprintln!("\n{} Assert statements:", "[a]".green().bold());
         for node in &assert_nodes {
             if let CommandType::Assert { cond, msg } = &node.content {
                 let m = msg.as_deref().unwrap_or("(brak komunikatu)");
@@ -323,9 +503,9 @@ fn print_summary(res: &AnalysisResult) {
     let async_nodes: Vec<_> = res.main_body.iter()
     .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
     .filter(|n| matches!(&n.content,
-                         CommandType::Spawn(_)          |
-                         CommandType::Await(_)          |
-                         CommandType::AssignSpawn { .. }|
+                         CommandType::Spawn(_)           |
+                         CommandType::Await(_)           |
+                         CommandType::AssignSpawn { .. } |
                          CommandType::AssignAwait { .. }
     ))
     .collect();
@@ -352,7 +532,7 @@ fn print_summary(res: &AnalysisResult) {
     .filter(|n| matches!(&n.content, CommandType::Pipe(_)))
     .collect();
     if !pipe_nodes.is_empty() {
-        eprintln!("\n{} Pipe chains: {}", "[|]".magenta().bold(), pipe_nodes.len().to_string().yellow());
+        eprintln!("\n{} Pipe chains:", "[|]".magenta().bold());
         for node in &pipe_nodes {
             if let CommandType::Pipe(steps) = &node.content {
                 eprintln!("    linia {:>4} — {} kroków: {}",
@@ -397,15 +577,15 @@ fn print_summary(res: &AnalysisResult) {
         }
     }
 
-    // funkcje unsafe
-    let mut unsafe_fns: Vec<&String> = res.functions.iter()
+    // funkcje arena (::)
+    let mut arena_fns: Vec<&String> = res.functions.iter()
     .filter(|(_, (u, _, _))| *u)
     .map(|(n, _)| n)
     .collect();
-    unsafe_fns.sort();
-    if !unsafe_fns.is_empty() {
-        eprintln!("\n{} Funkcje unsafe (::):", "[~]".magenta().bold());
-        for n in unsafe_fns { eprintln!("    {}", n.magenta()); }
+    arena_fns.sort();
+    if !arena_fns.is_empty() {
+        eprintln!("\n{} Funkcje arena (::):", "[A]".magenta().bold());
+        for n in arena_fns { eprintln!("    {}", n.magenta()); }
     }
 
     // funkcje z sygnaturami typów
@@ -426,6 +606,169 @@ fn print_summary(res: &AnalysisResult) {
     if res.is_potentially_unsafe {
         eprintln!("\n{} Komendy sudo (^):", "[!]".red().bold());
         for w in &res.safety_warnings { eprintln!("    {}", w.yellow()); }
+    }
+
+    // ── NOWE sekcje verbose ────────────────────────────────────────────────────
+
+    // lambdy / domknięcia
+    let lambda_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Lambda { .. } | CommandType::AssignLambda { .. }))
+    .collect();
+    if !lambda_nodes.is_empty() {
+        eprintln!("\n{} Lambdy / domknięcia:", "[λ]".magenta().bold());
+        for node in &lambda_nodes {
+            match &node.content {
+                CommandType::AssignLambda { key, params, body, .. } =>
+                eprintln!("    linia {:>4} — {} = {{ {} -> {} }}",
+                          node.line_num, key.yellow(),
+                          params.join(", ").cyan(), body.dimmed()),
+                          CommandType::Lambda { params, body } =>
+                          eprintln!("    linia {:>4} — {{ {} -> {} }}",
+                                    node.line_num,
+                                    params.join(", ").cyan(), body.dimmed()),
+                                    _ => {},
+            }
+        }
+    }
+
+    // rekurencja ogonowa (recur)
+    let recur_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Recur { .. }))
+    .collect();
+    if !recur_nodes.is_empty() {
+        eprintln!("\n{} Rekurencja ogonowa (recur): {}", "[r]".cyan().bold(), recur_nodes.len().to_string().yellow());
+        for node in &recur_nodes {
+            if let CommandType::Recur { args } = &node.content {
+                eprintln!("    linia {:>4} — recur {}", node.line_num, args.cyan());
+            }
+        }
+    }
+
+    // destrukturyzacja
+    let destruct_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::DestructList { .. } | CommandType::DestructMap { .. }))
+    .collect();
+    if !destruct_nodes.is_empty() {
+        eprintln!("\n{} Destrukturyzacja:", "[d]".blue().bold());
+        for node in &destruct_nodes {
+            match &node.content {
+                CommandType::DestructList { head, tail, source } =>
+                eprintln!("    linia {:>4} — [{} | {}] = {}",
+                          node.line_num, head.yellow(), tail.yellow(), source.cyan()),
+                          CommandType::DestructMap { fields, source } =>
+                          eprintln!("    linia {:>4} — {{{}}} = {}",
+                                    node.line_num, fields.join(", ").yellow(), source.cyan()),
+                                    _ => {},
+            }
+        }
+    }
+
+    // zasięg leksykalny (;;scope)
+    let scope_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::ScopeDef))
+    .collect();
+    if !scope_nodes.is_empty() {
+        eprintln!("\n{} Zasięgi leksykalne (;;scope): {}", "[s]".green().bold(), scope_nodes.len().to_string().yellow());
+    }
+
+    // ADT (==type)
+    let adt_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::AdtDef { .. }))
+    .collect();
+    if !adt_nodes.is_empty() {
+        eprintln!("\n{} Typy algebraiczne (==type):", "[T]".magenta().bold());
+        for node in &adt_nodes {
+            if let CommandType::AdtDef { name, variants } = &node.content {
+                let vs: Vec<String> = variants.iter().map(|(vn, fields)| {
+                    if fields.is_empty() {
+                        vn.clone()
+                    } else {
+                        let fs: Vec<String> = fields.iter().map(|(f, t)| format!("{}: {}", f, t)).collect();
+                        format!("{}[{}]", vn, fs.join(", "))
+                    }
+                }).collect();
+                eprintln!("    {} → {}", name.cyan().bold(), vs.join(" | ").yellow());
+            }
+        }
+    }
+
+    // do-bloki
+    let do_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::DoBlock { .. }))
+    .collect();
+    if !do_nodes.is_empty() {
+        eprintln!("\n{} Do-bloki:", "[do]".cyan().bold());
+        for node in &do_nodes {
+            if let CommandType::DoBlock { key, body } = &node.content {
+                eprintln!("    linia {:>4} — {} = do ({} kroków)",
+                          node.line_num, key.yellow(), body.len().to_string().cyan());
+            }
+        }
+    }
+
+    // wieloliniowe pipe (|)
+    let pline_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::PipeLine { .. }))
+    .collect();
+    if !pline_nodes.is_empty() {
+        eprintln!("\n{} Kroki potoku (|):", "[»]".blue().bold());
+        for node in &pline_nodes {
+            if let CommandType::PipeLine { step } = &node.content {
+                eprintln!("    linia {:>4} — | {}", node.line_num, step.cyan());
+            }
+        }
+    }
+
+    // testy jednostkowe
+    let test_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::TestBlock { .. }))
+    .collect();
+    if !test_nodes.is_empty() {
+        eprintln!("\n{} Testy jednostkowe (==test):", "[✓]".green().bold());
+        for node in &test_nodes {
+            if let CommandType::TestBlock { desc, body } = &node.content {
+                let asserts = body.iter().filter(|n| matches!(&n.content, CommandType::Assert { .. })).count();
+                eprintln!("    linia {:>4} — \"{}\" ({} assert{})",
+                          node.line_num, desc.yellow(), asserts.to_string().cyan(),
+                          if asserts == 1 { "" } else { "y" });
+            }
+        }
+    }
+
+    // defer
+    let defer_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::Defer { .. }))
+    .collect();
+    if !defer_nodes.is_empty() {
+        eprintln!("\n{} Defer (cleanup):", "[↩]".yellow().bold());
+        for node in &defer_nodes {
+            if let CommandType::Defer { expr } = &node.content {
+                eprintln!("    linia {:>4} — defer {}", node.line_num, expr.cyan());
+            }
+        }
+    }
+
+    // generics z constraints
+    let generic_nodes: Vec<_> = res.main_body.iter()
+    .chain(res.functions.values().flat_map(|(_, _, n)| n.iter()))
+    .filter(|n| matches!(&n.content, CommandType::FuncDefGeneric { .. }))
+    .collect();
+    if !generic_nodes.is_empty() {
+        eprintln!("\n{} Generics z constraints:", "[G]".cyan().bold());
+        for node in &generic_nodes {
+            if let CommandType::FuncDefGeneric { name, sig } = &node.content {
+                eprintln!("    linia {:>4} — :{} {}", node.line_num, name.cyan(), sig.yellow());
+            }
+        }
     }
 
     eprintln!("{}", "═══════════════════════════════════════════".cyan());
