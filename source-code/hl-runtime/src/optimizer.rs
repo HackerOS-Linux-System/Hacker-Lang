@@ -34,6 +34,49 @@ pub fn optimize(prog: &mut BytecodeProgram, verbose: bool) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Pomocnik: czy opcode jest związany z areną?
+// Żadne z tych opcod'ów nie mogą być eliminowane ani inlinowane.
+// ─────────────────────────────────────────────────────────────
+#[inline(always)]
+fn is_arena_op(op: &OpCode) -> bool {
+    matches!(
+        op,
+        OpCode::ArenaEnter { .. }
+        | OpCode::ArenaExit
+        | OpCode::ArenaAlloc { .. }
+        | OpCode::ArenaReset
+    )
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pomocnik: czy opcode jest barierą dla dead_store?
+// Bariery przerywają analizę — nie możemy wyeliminować store
+// jeśli po nim jest bariera przed następnym store.
+// ─────────────────────────────────────────────────────────────
+#[inline(always)]
+fn is_barrier(op: &OpCode) -> bool {
+    matches!(
+        op,
+        OpCode::CallFunc { .. }
+        | OpCode::Plugin { .. }
+        | OpCode::Return
+        | OpCode::Exit(_)
+        | OpCode::SpawnBg { .. }
+        | OpCode::SpawnAssign { .. }
+        | OpCode::AwaitPid { .. }
+        | OpCode::AwaitAssign { .. }
+        | OpCode::Lock { .. }
+        | OpCode::Unlock { .. }
+        // Arena jest zawsze barierą — nie możemy nic eliminować
+        // wokół ArenaEnter/Exit bo zarządzają stanem stosu aren
+        | OpCode::ArenaEnter { .. }
+        | OpCode::ArenaExit
+        | OpCode::ArenaAlloc { .. }
+        | OpCode::ArenaReset
+    )
+}
+
+// ─────────────────────────────────────────────────────────────
 // [1] Constant folding
 // ─────────────────────────────────────────────────────────────
 fn constant_fold_conds(prog: &mut BytecodeProgram, verbose: bool) {
@@ -60,14 +103,24 @@ fn constant_fold_conds(prog: &mut BytecodeProgram, verbose: bool) {
             }
             Some(false) => {
                 // Zawsze FALSE → body staje się martwym kodem
+                // Nie eliminujemy jeśli w zakresie są opcody areny
                 let end = target.min(len);
-                for j in i..end {
-                    prog.ops[j] = OpCode::Nop;
-                }
-                folded += 1;
-                if verbose {
-                    eprintln!("{} fold FALSE: [{}] {} → Nop [{}-{}]",
-                              "[opt]".magenta(), i, cond, i, end);
+                let has_arena = prog.ops[i..end].iter().any(is_arena_op);
+                if has_arena {
+                    if verbose {
+                        eprintln!("{} fold SKIP (arena):  [{}] {}", "[opt]".magenta(), i, cond);
+                    }
+                } else {
+                    for j in i..end {
+                        prog.ops[j] = OpCode::Nop;
+                    }
+                    folded += 1;
+                    if verbose {
+                        eprintln!(
+                            "{} fold FALSE: [{}] {} → Nop [{}-{}]",
+                            "[opt]".magenta(), i, cond, i, end
+                        );
+                    }
                 }
             }
             None => {}
@@ -115,7 +168,7 @@ fn eval_static(cond: &str) -> Option<bool> {
                             " -le " => lhs.parse::<i64>().ok()? <= rhs.parse::<i64>().ok()?,
                             " -gt " => lhs.parse::<i64>().ok()? >  rhs.parse::<i64>().ok()?,
                             " -ge " => lhs.parse::<i64>().ok()? >= rhs.parse::<i64>().ok()?,
-                            _ => return None,
+                            _       => return None,
                 });
             }
         }
@@ -135,6 +188,14 @@ fn unquote(s: &str) -> &str {
 
 // ─────────────────────────────────────────────────────────────
 // [2] Dead store elimination
+//
+// Eliminuje SetLocal/StoreVarI/StoreVarF jeśli przed kolejnym
+// użyciem/store'em tej zmiennej nie ma żadnego odczytu.
+//
+// Rozszerzone vs oryginał:
+//  - obsługuje StoreVarI/StoreVarF (nowe rejestry numeryczne)
+//  - sprawdza LoadVarI/LoadVarF jako odczyty
+//  - respektuje is_barrier() (w tym Arena ops)
 // ─────────────────────────────────────────────────────────────
 fn dead_store_elim(prog: &mut BytecodeProgram, verbose: bool) {
     let len = prog.ops.len();
@@ -142,8 +203,11 @@ fn dead_store_elim(prog: &mut BytecodeProgram, verbose: bool) {
     let mut i = 0;
 
     while i < len {
-        let key_id = match prog.ops[i] {
-            OpCode::SetLocal { key_id, .. } => key_id,
+        // Sprawdź czy to store — zbierz key_id i typ store'a
+        let (key_id, is_numeric) = match &prog.ops[i] {
+            OpCode::SetLocal   { key_id, .. } => (*key_id, false),
+            OpCode::StoreVarI  { var_id, .. } => (*var_id, true),
+            OpCode::StoreVarF  { var_id, .. } => (*var_id, true),
             _ => { i += 1; continue; }
         };
 
@@ -153,10 +217,20 @@ fn dead_store_elim(prog: &mut BytecodeProgram, verbose: bool) {
 
         while j < len {
             match &prog.ops[j] {
-                OpCode::SetLocal { key_id: k2, .. } if *k2 == key_id => {
+                // Kolejny store tej samej zmiennej bez odczytu → dead store
+                OpCode::SetLocal  { key_id: k2, .. }
+                | OpCode::StoreVarI { var_id: k2, .. }
+                | OpCode::StoreVarF { var_id: k2, .. }
+                if *k2 == key_id => {
                     safe = true;
                     break;
                 }
+
+                // Odczyt zmiennej numerycznej → nie eliminuj
+                OpCode::LoadVarI { var_id, .. } | OpCode::LoadVarF { var_id, .. }
+                if *var_id == key_id => { break; }
+
+                // Odczyt zmiennej przez shell (Exec) → sprawdź string
                 OpCode::Exec { cmd_id, .. } => {
                     let s = prog.str(*cmd_id);
                     if s.contains(&format!("${}", key_name))
@@ -166,8 +240,15 @@ fn dead_store_elim(prog: &mut BytecodeProgram, verbose: bool) {
                         }
                         j += 1;
                 }
-                OpCode::CallFunc { .. } | OpCode::Plugin { .. } => break,
-                OpCode::Return | OpCode::Exit(_) => break,
+
+                // Bariery — nie możemy kontynuować analizy
+                op if is_barrier(op) => { break; }
+
+                // IntToStr/FloatToStr dla tej zmiennej → odczyt numeryczny
+                OpCode::IntToStr   { var_id, .. }
+                | OpCode::FloatToStr { var_id, .. }
+                if *var_id == key_id && is_numeric => { break; }
+
                 _ => { j += 1; }
             }
         }
@@ -208,18 +289,29 @@ fn tail_call_opt(prog: &mut BytecodeProgram, verbose: bool) {
             _ => { i += 1; continue; }
         };
 
-        // Następny nieNopowy opcode
+        // Znajdź następny nieNopowy opcode
         let mut j = i + 1;
         while j < len && matches!(prog.ops[j], OpCode::Nop) { j += 1; }
 
-        if j < len && matches!(prog.ops[j], OpCode::Return) {
+        if j >= len { i += 1; continue; }
+
+        // TCO tylko jeśli po CallFunc następuje Return
+        // ORAZ nie ma ArenaExit między nimi (arena wymaga cleanup)
+        let has_arena_exit = prog.ops[i..j]
+        .iter()
+        .any(|op| matches!(op, OpCode::ArenaExit));
+
+        if !has_arena_exit && matches!(prog.ops[j], OpCode::Return) {
             if let Some(&target) = fn_addrs.get(&func_id) {
                 let fname = prog.str(func_id).to_string();
                 prog.ops[i] = OpCode::Jump { target };
                 prog.ops[j] = OpCode::Nop;
                 count += 1;
                 if verbose {
-                    eprintln!("{} TCO: [{}] .{} → Jump {}", "[opt]".magenta(), i, fname, target);
+                    eprintln!(
+                        "{} TCO: [{}] .{} → Jump {}",
+                        "[opt]".magenta(), i, fname, target
+                    );
                 }
             }
         }
@@ -233,6 +325,10 @@ fn tail_call_opt(prog: &mut BytecodeProgram, verbose: bool) {
 
 // ─────────────────────────────────────────────────────────────
 // [4] Function inlining
+//
+// Rozszerzone vs oryginał:
+//  - pomija funkcje zawierające ArenaEnter/Exit (nie inlinujemy areny)
+//  - pomija funkcje zawierające Recur (semantyka skoku zależy od kontekstu)
 // ─────────────────────────────────────────────────────────────
 fn inline_small_funcs(prog: &mut BytecodeProgram, verbose: bool) {
     let candidates = find_inline_candidates(prog);
@@ -250,7 +346,10 @@ fn inline_small_funcs(prog: &mut BytecodeProgram, verbose: bool) {
                     count += 1;
                     if verbose {
                         let fname = prog.pool.get(*func_id);
-                        eprintln!("{} inline: .{} ({} ops)", "[opt]".magenta(), fname, body.len());
+                        eprintln!(
+                            "{} inline: .{} ({} ops)",
+                                  "[opt]".magenta(), fname, body.len()
+                        );
                     }
                 } else {
                     new_ops.push(op);
@@ -281,12 +380,27 @@ fn find_inline_candidates(prog: &BytecodeProgram) -> HashMap<u32, Vec<OpCode>> {
         while j < prog.ops.len() {
             match &prog.ops[j] {
                 OpCode::Return  => break,
-                OpCode::Exit(_) => continue 'outer,  // nie inlinuj — zmienia semantykę
+                OpCode::Exit(_) => continue 'outer,  // zmienia semantykę
+
+                // Rekurencja — nie inlinuj (skok zależy od base addr funkcji)
                 OpCode::CallFunc { func_id: callee } if *callee == func_id => {
-                    continue 'outer;                 // rekurencja
+                    continue 'outer;
                 }
+
+                // Arena — nie inlinuj (ArenaEnter/Exit zarządzają stosem aren)
+                op if is_arena_op(op) => continue 'outer,
+
+                // Exec z _HL_RECUR — nie inlinuj (rekurencja ogonowa)
+                OpCode::Exec { cmd_id, .. } => {
+                    let s = prog.str(*cmd_id);
+                    if s == "_HL_RECUR" || s.starts_with("_HL_RECUR_ARGS") {
+                        continue 'outer;
+                    }
+                    body.push(prog.ops[j].clone());
+                }
+
                 OpCode::Nop => { j += 1; continue; }
-                op => body.push(op.clone()),
+                op          => body.push(op.clone()),
             }
             j += 1;
             if body.len() > INLINE_THRESHOLD { continue 'outer; }
@@ -302,6 +416,10 @@ fn find_inline_candidates(prog: &BytecodeProgram) -> HashMap<u32, Vec<OpCode>> {
 
 // ─────────────────────────────────────────────────────────────
 // [5] NOP strip + adres patch
+//
+// Rozszerzone vs oryginał:
+//  - obsługuje JumpIfTrue (nowy opcode v7)
+//  - obsługuje NumForExec, WhileExprExec (nie mają target — skip)
 // ─────────────────────────────────────────────────────────────
 fn nop_strip(prog: &mut BytecodeProgram) {
     // Buduj remapę: stary indeks → nowy indeks (usize::MAX = Nop)
@@ -322,14 +440,25 @@ fn nop_strip(prog: &mut BytecodeProgram) {
     .filter(|op| !matches!(op, OpCode::Nop))
     .collect();
 
-    // Patch targets
+    // Patch targets — obsługuje wszystkie opcody z polem target
     prog.ops = filtered
     .into_iter()
     .map(|op| match op {
         OpCode::Jump { target } =>
         OpCode::Jump { target: patch_target(target, &remap) },
+
          OpCode::JumpIfFalse { cond_id, target } =>
          OpCode::JumpIfFalse { cond_id, target: patch_target(target, &remap) },
+
+         // JumpIfTrue (v7) — ma target
+         OpCode::JumpIfTrue { target } =>
+         OpCode::JumpIfTrue { target: patch_target(target, &remap) },
+
+         // HotLoop — ma loop_ip wskazujący na adres pętli
+         OpCode::HotLoop { loop_ip } =>
+         OpCode::HotLoop { loop_ip: patch_target(loop_ip, &remap) },
+
+         // Pozostałe opcody bez adresów — bez zmian
          other => other,
     })
     .collect();
@@ -341,11 +470,16 @@ fn nop_strip(prog: &mut BytecodeProgram) {
 }
 
 fn patch_target(old: usize, remap: &[usize]) -> usize {
+    // Znajdź pierwszą nieNopową instrukcję od `old` w górę
     let mut t = old;
     while t < remap.len() {
         if remap[t] != usize::MAX { return remap[t]; }
         t += 1;
     }
     // Za końcem tablicy = koniec programu
-    remap.iter().filter(|&&v| v != usize::MAX).max().map(|&v| v + 1).unwrap_or(0)
+    remap.iter()
+    .filter(|&&v| v != usize::MAX)
+    .max()
+    .map(|&v| v + 1)
+    .unwrap_or(0)
 }
