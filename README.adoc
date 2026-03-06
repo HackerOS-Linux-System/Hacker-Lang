@@ -13,6 +13,7 @@
 
 Hacker Lang korzysta z systemu pakietów i bibliotek hostowanych w repozytorium **bytes.io**.
 
+Gdzie znajde dokumentacje tutaj: https://hackeros-linux-system.github.io/HackerOS-Website/hacker-lang/docs.html
 == Dlaczego Hacker Lang?
 
 * Zastępuje złożone skrypty `.sh` prostymi, czytelnymi plikami `.hl`.
