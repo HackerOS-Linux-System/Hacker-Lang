@@ -114,22 +114,82 @@ fn parse_retexpr_payload(val: &str) -> Option<HlExpr> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pomocniki
+// FIX 1: rewrite_hl_calls_in_expr
+//
+// Zamienia (.func arg1 arg2) → $(_hl_func arg1 arg2)
+// w dowolnym wyrażeniu (cond assert, if cond itp.)
+//
+// Obsługuje wielokrotne wywołania w jednym wyrażeniu:
+//   "(.add 2 3) == 5"           → "$(_hl_add 2 3) == 5"
+//   "(.str_len \"x\") == 1"     → "$(_hl_str_len \"x\") == 1"
+//   "(.a 1) == (.b 2)"          → "$(_hl_a 1) == $(_hl_b 2)"
+// ─────────────────────────────────────────────────────────────
+pub fn rewrite_hl_calls_in_expr(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 16);
+    let bytes = s.as_bytes();
+    let len   = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Szukaj '('
+        if bytes[i] == b'(' && i + 1 < len && bytes[i + 1] == b'.' {
+            // Znajdź pasujące zamknięcie ')' z liczeniem zagłębień
+            let start = i;
+            let mut depth  = 1usize;
+            let mut j      = i + 1;
+            while j < len && depth > 0 {
+                if bytes[j] == b'(' { depth += 1; }
+                else if bytes[j] == b')' { depth -= 1; }
+                j += 1;
+            }
+            if depth == 0 {
+                // inner = zawartość bez nawiasów zewnętrznych
+                let inner = &s[start + 1 .. j - 1]; // bez '(' i ')'
+                // inner zaczyna się '.' — usuń kropkę, zamień '.' w nazwie na '_'
+                let inner2 = inner.trim_start_matches('.');
+                // Wyodrębnij nazwę funkcji (do pierwszej spacji)
+                let sp = inner2.find(' ').unwrap_or(inner2.len());
+                let fname = &inner2[..sp];
+                let fargs = inner2[sp..].trim_start();
+                // Rekurencja dla zagnieżdżonych wywołań w argumentach
+                let fargs_rewritten = rewrite_hl_calls_in_expr(fargs);
+                let fname_bash = fname.replace('.', "_");
+                if fargs_rewritten.is_empty() {
+                    result.push_str(&format!("$(_hl_{})", fname_bash));
+                } else {
+                    result.push_str(&format!("$(_hl_{} {})", fname_bash, fargs_rewritten));
+                }
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pomocnicy
 // ─────────────────────────────────────────────────────────────
 pub fn wrap_cond(cond: &str) -> String {
     let t = cond.trim();
-    if t.starts_with('[') || t.starts_with("((") || t.starts_with("[[") {
-        return t.to_string();
+    // Najpierw przepisz wywołania HL w condzie
+    let rewritten = rewrite_hl_calls_in_expr(t);
+    let t2 = rewritten.as_str();
+
+    if t2.starts_with('[') || t2.starts_with("((") || t2.starts_with("[[") {
+        return t2.to_string();
     }
-    let needs = t.contains(" == ")
-    || t.contains(" != ")
-    || t.contains(" -eq ")
-    || t.contains(" -ne ")
-    || t.contains(" -lt ")
-    || t.contains(" -le ")
-    || t.contains(" -gt ")
-    || t.contains(" -ge ");
-    if needs { format!("[[ {} ]]", t) } else { t.to_string() }
+    let needs = t2.contains(" == ")
+    || t2.contains(" != ")
+    || t2.contains(" -eq ")
+    || t2.contains(" -ne ")
+    || t2.contains(" -lt ")
+    || t2.contains(" -le ")
+    || t2.contains(" -gt ")
+    || t2.contains(" -ge ");
+    if needs { format!("[[ {} ]]", t2) } else { t2.to_string() }
 }
 
 pub fn is_hl_call(cmd: &str) -> bool {
@@ -158,11 +218,12 @@ pub fn shell_inline(cmd: &str) -> String {
     }
     if t == "end" { return "exit 0".to_string(); }
     if let Some(r) = t.strip_prefix("out ") {
-        return format!("export _HL_OUT={}", r);
+        return format!("echo {}", r);
     }
     if let Some(r) = t.strip_prefix("> ")  { return r.to_string(); }
     if let Some(r) = t.strip_prefix('>')   { return r.trim().to_string(); }
-    t.to_string()
+    // FIX: przepisz wywołania HL w komendach inline
+    rewrite_hl_calls_in_expr(t)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -373,11 +434,27 @@ fn emit_match_block(
                     prog: &mut BytecodeProgram,
 ) {
     if arms.is_empty() { return; }
-    let mut sh = format!("case {} in\n", cond);
+
+    // FIX: cond może zawierać $var — użyj go bezpośrednio w case
+    // Jeśli cond to "$var" → case "${var}" in
+    let case_expr = if cond.starts_with('$') {
+        // Zamień $var na "${var}" dla bezpieczeństwa
+        let varname = cond.trim_start_matches('$');
+        format!("\"${{{}}}\"", varname)
+    } else {
+        cond.to_string()
+    };
+
+    let mut sh = format!("case {} in\n", case_expr);
     for (val, cmd) in arms {
         let clean_val = if val == "_" { "*".to_string() }
-        else { val.trim_matches('"').trim_matches('\'').to_string() };
-        sh += &format!("  {}) {};;\n", clean_val, shell_inline(cmd));
+        else {
+            // Obsługuj wartości liczbowe i stringowe
+            let v = val.trim().trim_matches('"').trim_matches('\'').to_string();
+            v
+        };
+        let cmd_inline = shell_inline(cmd);
+        sh += &format!("  {}) {};;\n", clean_val, cmd_inline);
     }
     sh += "esac";
     let cmd_id = prog.pool.intern(&sh);
@@ -399,12 +476,38 @@ fn emit_pipe(steps: &[String], sudo: bool, prog: &mut BytecodeProgram) {
     } else {
         let parts: Vec<String> = steps.iter().map(|s| {
             let t = s.trim();
-            if is_hl_call(t) { t.trim_start_matches('.').to_string() }
-            else             { shell_inline(t) }
+            if is_hl_call(t) {
+                // FIX: moduły HL w pipe → _hl_Module_method
+                module_call_to_bash(t.trim_start_matches('.'), "")
+            } else {
+                shell_inline(t)
+            }
         }).collect();
         let sh     = parts.join(" | ");
         let cmd_id = prog.pool.intern(&sh);
         prog.ops.push(OpCode::Exec { cmd_id, sudo });
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// FIX 2: module_call_to_bash
+//
+// Zamienia path modułu na wywołanie bash:
+//   "Logger.log"  args  →  "_hl_Logger_log args"
+//   "list.filter" args  →  "_hl_list_filter args"
+//   ".Logger.log" args  →  "_hl_Logger_log args"  (z wiodącą kropką)
+//
+// Konwencja _hl_<Module>_<method> jest spójna z vm.rs stdlibs.
+// ─────────────────────────────────────────────────────────────
+fn module_call_to_bash(path: &str, args: &str) -> String {
+    let clean  = path.trim_start_matches('.');
+    let bash_fn = format!("_hl_{}", clean.replace('.', "_"));
+    if args.is_empty() {
+        bash_fn
+    } else {
+        // FIX: przepisz wywołania HL w argumentach
+        let args_rewritten = rewrite_hl_calls_in_expr(args);
+        format!("{} {}", bash_fn, args_rewritten)
     }
 }
 
@@ -450,7 +553,7 @@ fn emit_assign_local(
         return;
     }
 
-    // Sprawdź result unwrap w wartości: val ?! "msg"
+    // Sprawdź result unwrap
     if val.contains(" ?! ") {
         if let Some((expr, msg)) = parse_result_unwrap(val) {
             emit_result_unwrap_assign(key, &expr, &msg, is_global, prog);
@@ -458,9 +561,11 @@ fn emit_assign_local(
         }
     }
 
-    // Zwykłe przypisanie
+    // FIX: przepisz wywołania HL w wartości
+    let val_rewritten = rewrite_hl_calls_in_expr(val);
+
     let key_id = prog.pool.intern(key);
-    let val_id = prog.pool.intern(val);
+    let val_id = prog.pool.intern(&val_rewritten);
     if is_global {
         prog.ops.push(OpCode::SetEnv   { key_id, val_id });
     } else {
@@ -469,7 +574,7 @@ fn emit_assign_local(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pomocnik: parse result unwrap z wartości
+// Pomocnik: parse result unwrap
 // ─────────────────────────────────────────────────────────────
 fn parse_result_unwrap(val: &str) -> Option<(String, String)> {
     let pos = val.find(" ?! ")?;
@@ -479,27 +584,21 @@ fn parse_result_unwrap(val: &str) -> Option<(String, String)> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_result_unwrap_assign — key = expr ?! "msg"
-//
-// Kompiluje do:
-//   if ! ( <expr> ); then echo "msg" >&2; exit 1; fi
-//   key = $(<expr>)
-// przez SetLocal + warunkowe Exec z bailout
+// emit_result_unwrap_assign
 // ─────────────────────────────────────────────────────────────
 fn emit_result_unwrap_assign(
     key: &str, expr: &str, msg: &str, is_global: bool,
     prog: &mut BytecodeProgram,
 ) {
-    // Bailout jeśli expr jest komendą kończącą się błędem
+    let clean  = expr.trim_start_matches('.');
     let bailout = format!(
         "( {} ) || {{ echo '{}' >&2; exit 1; }}",
-                          expr.trim_start_matches('.'), msg
+                          clean, msg
     );
     let bailout_id = prog.pool.intern(&bailout);
     prog.ops.push(OpCode::Exec { cmd_id: bailout_id, sudo: false });
 
-    // Przypisz wynik
-    let capture = format!("$({})", expr.trim_start_matches('.'));
+    let capture = format!("$({})", clean);
     let key_id  = prog.pool.intern(key);
     let val_id  = prog.pool.intern(&capture);
     if is_global {
@@ -513,9 +612,6 @@ fn emit_result_unwrap_assign(
 // emit_collection_mut — $var.method args
 // ─────────────────────────────────────────────────────────────
 fn emit_collection_mut(var: &str, method: &str, args: &str, sudo: bool, prog: &mut BytecodeProgram) {
-    // Kompilujemy do shell: _HL_ARR_<var>_push <args> itp.
-    // W runtime vm.rs obsługuje SetLocal z flagą specjalną,
-    // tutaj emitujemy jako Exec z konwencją _HL_COLL_<method>
     let sh = match method {
         "push" => format!("_HL_COLL_PUSH {} {}", var, args),
         "pop"  => format!("_HL_COLL_POP {}", var),
@@ -529,10 +625,7 @@ fn emit_collection_mut(var: &str, method: &str, args: &str, sudo: bool, prog: &m
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_defer — defer expr
-//
-// defer jest rejestrowane na stosie defer w VM przez Exec z
-// konwencją _HL_DEFER_PUSH. Wykonanie następuje przy Return/Exit.
+// emit_defer
 // ─────────────────────────────────────────────────────────────
 fn emit_defer(expr: &str, sudo: bool, prog: &mut BytecodeProgram) {
     let clean  = expr.trim_start_matches('.');
@@ -542,25 +635,22 @@ fn emit_defer(expr: &str, sudo: bool, prog: &mut BytecodeProgram) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_module_call — module.method args
+// FIX 3: emit_module_call
+//
+// PRZED: hl_module_Logger_log args
+// PO:    _hl_Logger_log args
+//
+// Konwencja _hl_<Module>_<method> pozwala vm.rs dostarczyć
+// te funkcje jako bash functions w stdlib.
 // ─────────────────────────────────────────────────────────────
 fn emit_module_call(path: &str, args: &str, sudo: bool, prog: &mut BytecodeProgram) {
-    // path = "http.get", args = "\"url\""
-    // kompilujemy do: hl_module_<modul>_<metoda> args
-    let sh = if args.is_empty() {
-        format!("hl_module_{}", path.replace('.', "_"))
-    } else {
-        format!("hl_module_{} {}", path.replace('.', "_"), args)
-    };
+    let sh     = module_call_to_bash(path, args);
     let cmd_id = prog.pool.intern(&sh);
     prog.ops.push(OpCode::Exec { cmd_id, sudo });
 }
 
 // ─────────────────────────────────────────────────────────────
 // emit_lambda — { $x -> body } standalone
-//
-// Lambda standalone (np. jako argument) jest internowana jako
-// string w pool i przekazywana do vm.rs jako _HL_LAMBDA_PUSH.
 // ─────────────────────────────────────────────────────────────
 fn emit_lambda(params: &[String], body: &str, prog: &mut BytecodeProgram) {
     let params_str = params.join(",");
@@ -570,14 +660,13 @@ fn emit_lambda(params: &[String], body: &str, prog: &mut BytecodeProgram) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_assign_lambda — key = { $x -> body }
+// emit_assign_lambda
 // ─────────────────────────────────────────────────────────────
 fn emit_assign_lambda(
     key: &str, params: &[String], body: &str,
     is_raw: bool, is_global: bool,
     prog: &mut BytecodeProgram,
 ) {
-    // Zakoduj lambdę jako string: "__hl_lambda:<params>:<body>"
     let params_str = params.join(",");
     let encoded    = format!("__hl_lambda:{}:{}", params_str, body);
     let key_id     = prog.pool.intern(key);
@@ -590,12 +679,7 @@ fn emit_assign_lambda(
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_recur — recur args
-//
-// Rekurencja ogonowa: Jump z powrotem na początek bieżącej funkcji.
-// Używamy konwencji _HL_RECUR_ARGS dla argumentów, a skok
-// jest emitowany jako Exec z konwencją _HL_RECUR, które vm.rs
-// traktuje jako skok na bieżący adres bazowy funkcji.
+// emit_recur
 // ─────────────────────────────────────────────────────────────
 fn emit_recur(args: &str, sudo: bool, prog: &mut BytecodeProgram) {
     if !args.is_empty() {
@@ -607,34 +691,66 @@ fn emit_recur(args: &str, sudo: bool, prog: &mut BytecodeProgram) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_destruct_list — [head | tail] = $source
+// FIX 4: emit_destruct_list — [head | tail] = $source
+//
+// source może być:
+//   "$var"      → ${var[0]}, ${var[@]:1}   (bash array)
+//   "[1,2,3]"   → tworzy tymczasową tablicę __hl_tmp_arr
 // ─────────────────────────────────────────────────────────────
 fn emit_destruct_list(head: &str, tail: &str, source: &str, prog: &mut BytecodeProgram) {
-    // head = ${source}[0], tail = ${source}[@]:1
-    // Emitujemy dwa SetLocal
-    let head_val = format!("${{{}[0]}}", source.trim_start_matches('$'));
-    let tail_val = format!(
-        "${{{}[@]:1}}",
-        source.trim_start_matches('$')
-    );
+    let src_trimmed = source.trim();
 
-    let hk = prog.pool.intern(head);
-    let hv = prog.pool.intern(&head_val);
-    prog.ops.push(OpCode::SetLocal { key_id: hk, val_id: hv, is_raw: false });
+    if src_trimmed.starts_with('[') && src_trimmed.ends_with(']') {
+        // Literalna lista — utwórz tymczasową tablicę bash
+        let inner   = &src_trimmed[1..src_trimmed.len() - 1];
+        let items: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+        let arr_items = items.join(" ");
+        // declare -a __hl_tmp_arr=( items )
+        let decl_sh = format!("declare -a __hl_tmp_arr=( {} )", arr_items);
+        let decl_id = prog.pool.intern(&decl_sh);
+        prog.ops.push(OpCode::Exec { cmd_id: decl_id, sudo: false });
 
-    let tk = prog.pool.intern(tail);
-    let tv = prog.pool.intern(&tail_val);
-    prog.ops.push(OpCode::SetLocal { key_id: tk, val_id: tv, is_raw: false });
+        let hk = prog.pool.intern(head);
+        let hv = prog.pool.intern("${__hl_tmp_arr[0]}");
+        prog.ops.push(OpCode::SetLocal { key_id: hk, val_id: hv, is_raw: false });
+
+        let tk = prog.pool.intern(tail);
+        let tv = prog.pool.intern("${__hl_tmp_arr[@]:1}");
+        prog.ops.push(OpCode::SetLocal { key_id: tk, val_id: tv, is_raw: false });
+    } else {
+        // Zmienna — normalny przypadek
+        let varname = src_trimmed.trim_start_matches('$');
+        let head_val = format!("${{{}[0]}}", varname);
+        let tail_val = format!("${{{}[@]:1}}", varname);
+
+        let hk = prog.pool.intern(head);
+        let hv = prog.pool.intern(&head_val);
+        prog.ops.push(OpCode::SetLocal { key_id: hk, val_id: hv, is_raw: false });
+
+        let tk = prog.pool.intern(tail);
+        let tv = prog.pool.intern(&tail_val);
+        prog.ops.push(OpCode::SetLocal { key_id: tk, val_id: tv, is_raw: false });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_destruct_map — {field1, field2} = $source
+// FIX 5: emit_destruct_map — {field1, field2} = $source
+//
+// PRZED: ${source[field]}          — nieprawidłowy identyfikator bash
+// PO:    ${source["field"]}        — bash associative array
+//      + declare -A source jeśli nie zadeklarowano
 // ─────────────────────────────────────────────────────────────
 fn emit_destruct_map(fields: &[String], source: &str, prog: &mut BytecodeProgram) {
     let src = source.trim_start_matches('$');
+
+    // Emituj declare -A dla associative array (idempotentne w bash)
+    let decl_sh = format!("declare -A {} 2>/dev/null || true", src);
+    let decl_id = prog.pool.intern(&decl_sh);
+    prog.ops.push(OpCode::Exec { cmd_id: decl_id, sudo: false });
+
     for field in fields {
-        // field = ${source[field]} (bash associative array)
-        let val = format!("${{{}[{}]}}", src, field);
+        // FIX: ${source["field"]} zamiast ${source[field]}
+        let val    = format!("${{{}[\"{}\"]}}", src, field);
         let key_id = prog.pool.intern(field);
         let val_id = prog.pool.intern(&val);
         prog.ops.push(OpCode::SetLocal { key_id, val_id, is_raw: false });
@@ -642,10 +758,7 @@ fn emit_destruct_map(fields: &[String], source: &str, prog: &mut BytecodeProgram
 }
 
 // ─────────────────────────────────────────────────────────────
-// emit_adt_def — ==type Name [Variant1 [...], ...]
-//
-// ADT jest informacją typową — w runtime rejestrujemy konstruktory
-// jako callable przez konwencję _HL_ADT_DEF.
+// emit_adt_def
 // ─────────────────────────────────────────────────────────────
 fn emit_adt_def(
     name: &str,
@@ -677,7 +790,6 @@ pub fn compile_body(nodes: &[ProgramNode], prog: &mut BytecodeProgram) {
         let sudo = node.is_sudo;
 
         match &node.content {
-            // ── Bloki wielowęzłowe ────────────────────────────
             CommandType::If { cond, cmd } => {
                 let mut branches = vec![Branch {
                     cond: Some(wrap_cond(cond)),
@@ -733,17 +845,7 @@ pub fn compile_body(nodes: &[ProgramNode], prog: &mut BytecodeProgram) {
                 continue;
             }
 
-            // ── Arena :: name [size] def...done ───────────────
-            // Funkcja arenowa jest zarejestrowana w ast.functions
-            // z flagą is_arena_fn=true. Tutaj emitujemy ArenaEnter
-            // na początku ciała i ArenaExit na końcu.
-            // compile_to_bytecode() wywołuje compile_arena_func()
-            // zamiast compile_body() dla takich funkcji.
-            // W main_body ArenaDef to jednolinijkowe odwołanie — ignoruj.
             CommandType::ArenaDef { .. } => {
-                // ArenaDef w main_body = deklaracja bez ciała.
-                // Ciało jest w ast.functions i obsługiwane przez
-                // compile_to_bytecode() przez compile_arena_func().
                 i += 1;
                 continue;
             }
@@ -757,16 +859,7 @@ pub fn compile_body(nodes: &[ProgramNode], prog: &mut BytecodeProgram) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// compile_arena_func — funkcja z :: name [size] def...done
-//
-// Emituje:
-//   ArenaEnter { name_id, size_id }
-//   ... ciało (compile_body) ...
-//   ArenaExit
-//   Return
-//
-// GC nie jest zaangażowany — arena jest zwalniana jednym
-// hl_arena_free() przez ArenaExit → hl_jit_arena_exit().
+// compile_arena_func
 // ─────────────────────────────────────────────────────────────
 fn compile_arena_func(
     name: &str,
@@ -776,27 +869,20 @@ fn compile_arena_func(
 ) {
     let name_id = prog.pool.intern(name);
     let size_id = prog.pool.intern(size);
-
-    // Wejście w areną
     prog.ops.push(OpCode::ArenaEnter { name_id, size_id });
-
-    // Ciało funkcji — normalnie przez compile_body
     compile_body(nodes, prog);
-
-    // Wyjście z areny — jednorazowy hl_arena_free()
     prog.ops.push(OpCode::ArenaExit);
     prog.ops.push(OpCode::Return);
 }
 
 // ─────────────────────────────────────────────────────────────
-// compile_node — pojedynczy węzeł
+// FIX 6: compile_node — Assert z (.func args)
 // ─────────────────────────────────────────────────────────────
 fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
     let sudo = node.is_sudo;
 
     match &node.content {
 
-        // ── Komendy surowe ────────────────────────────────────
         CommandType::RawNoSub(s) | CommandType::RawSub(s) => {
             let cmd_id = prog.pool.intern(s);
             prog.ops.push(OpCode::Exec { cmd_id, sudo });
@@ -807,10 +893,11 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             prog.ops.push(OpCode::Exec { cmd_id, sudo });
         }
 
-        // ── Przypisania ───────────────────────────────────────
         CommandType::AssignEnv { key, val } => {
+            // FIX: przepisz HL calls w wartości
+            let val_r  = rewrite_hl_calls_in_expr(val);
             let key_id = prog.pool.intern(key);
-            let val_id = prog.pool.intern(val);
+            let val_id = prog.pool.intern(&val_r);
             prog.ops.push(OpCode::SetEnv { key_id, val_id });
         }
 
@@ -818,19 +905,16 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             emit_assign_local(key, val, *is_raw, false, prog);
         }
 
-        // AssignExpr: key = expr_z_operatorem / lista / mapa
         CommandType::AssignExpr { key, expr, is_raw, is_global } => {
             emit_assign_local(key, expr, *is_raw, *is_global, prog);
         }
 
-        // ── Stała % ───────────────────────────────────────────
         CommandType::Const { key, val } => {
             let key_id = prog.pool.intern(key);
             let val_id = prog.pool.intern(val);
             prog.ops.push(OpCode::SetConst { key_id, val_id });
         }
 
-        // ── Pętle ─────────────────────────────────────────────
         CommandType::Loop { count, cmd } => {
             if *count == 0 {
                 if let Some(nf) = parse_numfor_payload(cmd) {
@@ -870,7 +954,6 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             prog.ops.push(OpCode::Exec { cmd_id, sudo });
         }
 
-        // ── Asynchroniczność ──────────────────────────────────
         CommandType::Background(s) => {
             let bg     = format!("{} &", s);
             let cmd_id = prog.pool.intern(&bg);
@@ -901,13 +984,14 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             prog.ops.push(OpCode::AwaitAssign { key_id, expr_id });
         }
 
-        // ── Wywołania funkcji ─────────────────────────────────
         CommandType::Call { path, args } => {
             let fname   = path.trim_start_matches('.');
             let func_id = prog.pool.intern(fname);
             if !args.is_empty() {
                 let key_id = prog.pool.intern("_HL_ARGS");
-                let val_id = prog.pool.intern(args);
+                // FIX: przepisz HL calls w argumentach
+                let args_r = rewrite_hl_calls_in_expr(args);
+                let val_id = prog.pool.intern(&args_r);
                 prog.ops.push(OpCode::SetLocal { key_id, val_id, is_raw: false });
             }
             prog.ops.push(OpCode::CallFunc { func_id });
@@ -917,14 +1001,12 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             emit_module_call(path, args, sudo, prog);
         }
 
-        // ── Pluginy ───────────────────────────────────────────
         CommandType::Plugin { name, args, is_super } => {
             let name_id = prog.pool.intern(name);
             let args_id = prog.pool.intern(args);
             prog.ops.push(OpCode::Plugin { name_id, args_id, sudo: *is_super });
         }
 
-        // ── I/O ───────────────────────────────────────────────
         CommandType::Log(msg) => {
             let s      = format!("echo {}", msg);
             let cmd_id = prog.pool.intern(&s);
@@ -939,7 +1021,9 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
                 else        { prog.ops.push(OpCode::ReturnI { src }); }
                 return;
             }
-            let val_id = prog.pool.intern(val);
+            // FIX: przepisz HL calls w out
+            let val_r  = rewrite_hl_calls_in_expr(val);
+            let val_id = prog.pool.intern(&val_r);
             prog.ops.push(OpCode::SetOut { val_id });
         }
 
@@ -947,7 +1031,6 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             prog.ops.push(OpCode::Exit(*code));
         }
 
-        // ── Pamięć / GC ───────────────────────────────────────
         CommandType::Lock { key, val } => {
             let key_id = prog.pool.intern(key);
             let val_id = prog.pool.intern(val);
@@ -959,36 +1042,39 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             prog.ops.push(OpCode::Unlock { key_id });
         }
 
-        // ── Asercje ───────────────────────────────────────────
+        // ── FIX 7: Assert ────────────────────────────────────
+        // (.add 2 3) == 5  →  $(_hl_add 2 3) == 5
+        // Przepisujemy cond PRZED internowaniem do pool.
         CommandType::Assert { cond, msg } => {
-            let cond_id = prog.pool.intern(cond);
+            let cond_rewritten = rewrite_hl_calls_in_expr(cond);
+            let cond_id = prog.pool.intern(&cond_rewritten);
             let msg_id  = msg.as_deref().map(|m| prog.pool.intern(m));
             prog.ops.push(OpCode::Assert { cond_id, msg_id });
         }
 
-        // ── Obsługa błędów ────────────────────────────────────
         CommandType::Try { try_cmd, catch_cmd } => {
-            let s      = format!("( {} ) || ( {} )", try_cmd, catch_cmd);
+            // FIX: przepisz HL calls w obu gałęziach
+            let try_r   = rewrite_hl_calls_in_expr(try_cmd);
+            let catch_r = rewrite_hl_calls_in_expr(catch_cmd);
+            let s      = format!("( {} ) || ( {} )", try_r, catch_r);
             let cmd_id = prog.pool.intern(&s);
             prog.ops.push(OpCode::Exec { cmd_id, sudo });
         }
 
         CommandType::ResultUnwrap { expr, msg } => {
-            // Standalone: expr ?! "msg" (bez przypisania)
+            let clean  = expr.trim_start_matches('.');
             let sh     = format!(
                 "( {} ) || {{ echo '{}' >&2; exit 1; }}",
-                                 expr.trim_start_matches('.'), msg
+                                 clean, msg
             );
             let cmd_id = prog.pool.intern(&sh);
             prog.ops.push(OpCode::Exec { cmd_id, sudo });
         }
 
-        // ── Kolekcje ──────────────────────────────────────────
         CommandType::CollectionMut { var, method, args } => {
             emit_collection_mut(var, method, args, sudo, prog);
         }
 
-        // ── Lambdy / domknięcia ───────────────────────────────
         CommandType::Lambda { params, body } => {
             emit_lambda(params, body, prog);
         }
@@ -997,12 +1083,10 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             emit_assign_lambda(key, params, body, *is_raw, *is_global, prog);
         }
 
-        // ── Rekurencja ogonowa ────────────────────────────────
         CommandType::Recur { args } => {
             emit_recur(args, sudo, prog);
         }
 
-        // ── Destrukturyzacja ──────────────────────────────────
         CommandType::DestructList { head, tail, source } => {
             emit_destruct_list(head, tail, source, prog);
         }
@@ -1011,53 +1095,37 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             emit_destruct_map(fields, source, prog);
         }
 
-        // ── Typy algebraiczne ─────────────────────────────────
         CommandType::AdtDef { name, variants } => {
             emit_adt_def(name, variants, prog);
         }
 
-        // ── Defer ─────────────────────────────────────────────
         CommandType::Defer { expr } => {
             emit_defer(expr, sudo, prog);
         }
 
-        // ── Wieloliniowy pipe ─────────────────────────────────
         CommandType::PipeLine { step } => {
-            // Krok potoku jako standalone Exec
             let s      = shell_inline(step);
             let cmd_id = prog.pool.intern(&s);
             prog.ops.push(OpCode::PipeExec { cmd_id, sudo });
         }
 
-        // ── Do-blok ───────────────────────────────────────────
         CommandType::DoBlock { key, body } => {
-            // Kompiluj ciało sekwencyjnie, wynik w _HL_DO_OUT
             compile_body(body, prog);
-            // Przypisz _HL_DO_OUT do key
             let key_id = prog.pool.intern(key);
             let val_id = prog.pool.intern("${_HL_DO_OUT}");
             prog.ops.push(OpCode::SetLocal { key_id, val_id, is_raw: false });
         }
 
-        // ── Testy jednostkowe ─────────────────────────────────
         CommandType::TestBlock { desc, body } => {
-            // Emituj nagłówek testu
-            let header     = format!("_HL_TEST_BEGIN {}", desc);
-            let header_id  = prog.pool.intern(&header);
+            let header    = format!("_HL_TEST_BEGIN {}", desc);
+            let header_id = prog.pool.intern(&header);
             prog.ops.push(OpCode::Exec { cmd_id: header_id, sudo: false });
-
-            // Kompiluj ciało testu (asercje itp.)
             compile_body(body, prog);
-
-            // Emituj zakończenie testu
             let footer    = format!("_HL_TEST_END {}", desc);
             let footer_id = prog.pool.intern(&footer);
             prog.ops.push(OpCode::Exec { cmd_id: footer_id, sudo: false });
         }
 
-        // ── Interfejsy / impl — metadane typowe ──────────────
-        // Nie generują kodu wykonywalnego — tylko informacje dla
-        // type checkera (przyszłość). Emitujemy marker dla debugowania.
         CommandType::Interface { name, methods } => {
             let methods_str = methods.join(",");
             let sh          = format!("_HL_IFACE_DEF {} {}", name, methods_str);
@@ -1071,27 +1139,18 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
             prog.ops.push(OpCode::Exec { cmd_id, sudo: false });
         }
 
-        // ── Zasięg leksykalny ─────────────────────────────────
         CommandType::ScopeDef => {
-            // ;;scope def tworzy nowy zakres — nie generuje kodu VM,
-            // zakres jest obsługiwany przez parser przez push/pop Scope::Class.
-            // W runtime wystarczy marker dla debugowania.
             let cmd_id = prog.pool.intern("_HL_SCOPE_ENTER");
             prog.ops.push(OpCode::Exec { cmd_id, sudo: false });
         }
 
-        // ── Generics z constraints — metadane typowe ──────────
-        // Sygnatura generyczna jest informacją dla type checkera.
-        // Nie generuje kodu wykonywalnego.
         CommandType::FuncDefGeneric { .. } => {}
 
-        // ── Metadane — brak kodu wykonywalnego ────────────────
         CommandType::Extern { .. }
         | CommandType::Enum   { .. }
         | CommandType::Struct { .. }
         | CommandType::Import { .. } => {}
 
-        // ── Pochłaniane przez compile_body ────────────────────
         CommandType::If      { .. }
         | CommandType::Elif   { .. }
         | CommandType::Else   { .. }
@@ -1107,18 +1166,12 @@ fn compile_node(node: &ProgramNode, prog: &mut BytecodeProgram) {
 // ─────────────────────────────────────────────────────────────
 pub fn compile_to_bytecode(ast: &AnalysisResult) -> BytecodeProgram {
     let mut prog = BytecodeProgram::new();
-
-    // Kompiluj main body
     compile_body(&ast.main_body, &mut prog);
     prog.ops.push(OpCode::Exit(0));
 
-    // Kompiluj funkcje
     for (name, (is_arena_fn, _sig, nodes)) in &ast.functions {
         prog.functions.insert(name.clone(), prog.ops.len());
-
         if *is_arena_fn {
-            // Funkcja :: name [size] def — wyciągnij size z sygnatury
-            // Sygnatura wygląda jak "[arena:512kb]"
             let size = extract_arena_size(_sig.as_deref().unwrap_or("[arena:64b]"));
             compile_arena_func(name, &size, nodes, &mut prog);
         } else {
@@ -1131,12 +1184,9 @@ pub fn compile_to_bytecode(ast: &AnalysisResult) -> BytecodeProgram {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pomocnik: wyciągnij rozmiar areny z sygnatury "[arena:512kb]"
+// Pomocnik: wyciągnij rozmiar areny
 // ─────────────────────────────────────────────────────────────
 fn extract_arena_size(sig: &str) -> String {
-    // "[arena:512kb]" → "512kb"
-    // "[arena:1mb]"   → "1mb"
-    // fallback         → "64kb"
     if let Some(inner) = sig.strip_prefix("[arena:") {
         if let Some(size) = inner.strip_suffix(']') {
             return size.to_string();
