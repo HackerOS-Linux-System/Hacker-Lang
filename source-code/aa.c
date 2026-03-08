@@ -39,48 +39,29 @@
 #define HL_ARENA_MIN_SIZE   64
 
 /* ── Debug logging ─────────────────────────────────────────────────── */
-#ifdef HL_ARENA_DEBUG
+/* Tylko gdy jawnie zbudowano z -DHL_ARENA_DEBUG=1.                     */
+/* build.rs ustawia to WYLACZNIE przy debug_assertions (cargo build).   */
+/* cargo build --release => brak HL_ARENA_DEBUG => zero outputu.        */
+#if defined(HL_ARENA_DEBUG) && HL_ARENA_DEBUG
 #  define HL_DBG(fmt, ...) fprintf(stderr, "[aa] " fmt "\n", ##__VA_ARGS__)
 #else
-#  define HL_DBG(fmt, ...)
+#  define HL_DBG(fmt, ...)  ((void)0)
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════
  * HlArena — bufor z bump-pointer allocatorem
- *
- *   base                              end
- *    |<──────── capacity ─────────────>|
- *    |<── used ──>|<── wolne ─────────>|
- *                  ^
- *                 ptr  (bump pointer)
- *
- * Alokacja : ptr += align(n)   O(1)
- * Reset    : ptr = base        O(1), pamiec zachowana
- * Free     : free(base)        O(1), jednorazowe zwolnienie
  * ══════════════════════════════════════════════════════════════════════ */
 typedef struct HlArena {
     uint8_t* base;
     uint8_t* ptr;
     uint8_t* end;
-    size_t   peak;   /* maks. uzycie — do profilowania/debugowania */
+    size_t   peak;
 } HlArena;
 
 /* ══════════════════════════════════════════════════════════════════════
  * Wspolne API
  * ══════════════════════════════════════════════════════════════════════ */
 
-/*
- * hl_arena_parse_size — zamien string rozmiaru na bajty.
- *
- * Obslugiwane sufiksy (case-insensitive):
- *   "b"  lub brak  — bajty
- *   "kb"           — kilobajty (1024)
- *   "mb"           — megabajty (1024^2)
- *   "gb"           — gigabajty (1024^3)
- *
- * Przyklady: "512kb" -> 524288, "1mb" -> 1048576, "256" -> 256
- * Zwraca 0 przy bledzie parsowania.
- */
 size_t hl_arena_parse_size(const char* spec) {
     if (!spec || *spec == '\0') return 0;
 
@@ -90,7 +71,7 @@ size_t hl_arena_parse_size(const char* spec) {
 
     for (size_t i = 0; i <= len; i++)
         buf[i] = (char)((spec[i] >= 'A' && spec[i] <= 'Z')
-        ? spec[i] + 32 : spec[i]);
+            ? spec[i] + 32 : spec[i]);
 
     char*    endp  = NULL;
     uint64_t value = (uint64_t)strtoull(buf, &endp, 10);
@@ -110,10 +91,6 @@ size_t hl_arena_parse_size(const char* spec) {
     return (size_t)result;
 }
 
-/*
- * hl_arena_new — alokuj nowa arene o pojemnosci `size_bytes`.
- * Zwraca NULL jesli malloc zawiedzie.
- */
 HlArena* hl_arena_new(size_t size_bytes) {
     if (size_bytes < HL_ARENA_MIN_SIZE) size_bytes = HL_ARENA_MIN_SIZE;
     size_bytes = HL_ALIGN_UP(size_bytes, HL_ARENA_ALIGN);
@@ -132,11 +109,6 @@ HlArena* hl_arena_new(size_t size_bytes) {
     return a;
 }
 
-/*
- * hl_arena_alloc — alokuj `n` bajtow z areny (bump pointer, O(1)).
- * Zero-inicjalizuje przydzielona pamiec.
- * Zwraca NULL jesli brak miejsca.
- */
 void* hl_arena_alloc(HlArena* a, size_t n) {
     if (!a || n == 0) return NULL;
 
@@ -158,10 +130,6 @@ void* hl_arena_alloc(HlArena* a, size_t n) {
     return p;
 }
 
-/*
- * hl_arena_reset — cofnij bump pointer do poczatku.
- * Pamiec zachowana, wskaznik cofniety — O(1).
- */
 void hl_arena_reset(HlArena* a) {
     if (!a) return;
     HL_DBG("reset %p (used %zu, peak %zu)",
@@ -169,9 +137,6 @@ void hl_arena_reset(HlArena* a) {
     a->ptr = a->base;
 }
 
-/*
- * hl_arena_free — zwolnij cala arene jednorazowo — O(1).
- */
 void hl_arena_free(HlArena* a) {
     if (!a) return;
     HL_DBG("free %p (peak %zu)", (void*)a, a->peak);
@@ -179,50 +144,24 @@ void hl_arena_free(HlArena* a) {
     free(a);
 }
 
-/* Rozmiar uzytej pamieci. */
 size_t hl_arena_used(const HlArena* a) {
     return a ? (size_t)(a->ptr - a->base) : 0;
 }
 
-/* Calkowita pojemnosc areny. */
 size_t hl_arena_capacity(const HlArena* a) {
     return a ? (size_t)(a->end - a->base) : 0;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
  * TRYB KOMPILATORA — HL_ARENA_MODE_COMPILER
- *
- * Uzywany przez hl-compiler AOT przy generowaniu kodu IR
- * dla blokow :: name [size] def...done.
- *
- * Kompilator wywoluje emit_prologue / emit_epilogue w czasie
- * kompilacji (build-time) — NIE podczas wykonania programu.
- *
- * Schemat wstrzykniecia w skompilowany kod:
- *
- *   [prologue]  %arena.cache = hl_arena_new(524288)
- *               ... cialo :: bloku ...
- *               hl_arena_alloc(%arena.cache, n)
- *   [epilogue]  hl_arena_free(%arena.cache)
  * ══════════════════════════════════════════════════════════════════════ */
 #ifdef HL_ARENA_MODE_COMPILER
 
-/* Kontekst jednego :: bloku podczas emisji kodu. */
 typedef struct HlArenaEmitCtx {
-    char   arena_var[64];  /* nazwa zmiennej IR, np. "%arena.cache" */
-    size_t size_bytes;     /* rozmiar po parsowaniu size_spec        */
+    char   arena_var[64];
+    size_t size_bytes;
 } HlArenaEmitCtx;
 
-/*
- * hl_arena_emit_prologue — wygeneruj instrukcje inicjalizacji areny.
- *
- * Wypelnia `ctx` i zapisuje IR do `out`.
- * Przyklad wyjscia:
- *   ; arena prologue: cache [512kb = 524288 bytes]
- *   %arena.cache = call HlArena* @hl_arena_new(i64 524288)
- *
- * Zwraca liczbe zapisanych znakow lub -1 przy bledzie.
- */
 int hl_arena_emit_prologue(
     HlArenaEmitCtx* ctx,
     const char*     fn_name,
@@ -239,22 +178,15 @@ int hl_arena_emit_prologue(
     ctx->size_bytes = bytes;
 
     int n = snprintf(out, out_len,
-                     "; arena prologue: %s [%s = %zu bytes]\n"
-                     "%s = call HlArena* @hl_arena_new(i64 %zu)\n",
-                     fn_name, size_spec, bytes,
-                     ctx->arena_var, bytes);
+        "; arena prologue: %s [%s = %zu bytes]\n"
+        "%s = call HlArena* @hl_arena_new(i64 %zu)\n",
+        fn_name, size_spec, bytes,
+        ctx->arena_var, bytes);
 
     HL_DBG("emit_prologue: %s [%zu bytes]", fn_name, bytes);
     return (n > 0 && (size_t)n < out_len) ? n : -1;
 }
 
-/*
- * hl_arena_emit_epilogue — wygeneruj instrukcje sprzatania areny.
- *
- * Przyklad wyjscia:
- *   ; arena epilogue: cache
- *   call void @hl_arena_free(HlArena* %arena.cache)
- */
 int hl_arena_emit_epilogue(
     const HlArenaEmitCtx* ctx,
     char*                 out,
@@ -263,20 +195,14 @@ int hl_arena_emit_epilogue(
     if (!ctx || !out || out_len == 0) return -1;
 
     int n = snprintf(out, out_len,
-                     "; arena epilogue: %s\n"
-                     "call void @hl_arena_free(HlArena* %s)\n",
-                     ctx->arena_var, ctx->arena_var);
+        "; arena epilogue: %s\n"
+        "call void @hl_arena_free(HlArena* %s)\n",
+        ctx->arena_var, ctx->arena_var);
 
     HL_DBG("emit_epilogue: %s", ctx->arena_var);
     return (n > 0 && (size_t)n < out_len) ? n : -1;
 }
 
-/*
- * hl_arena_emit_alloc — wygeneruj instrukcje alokacji z areny.
- *
- * Przyklad wyjscia:
- *   %ptr.0 = call i8* @hl_arena_alloc(HlArena* %arena.cache, i64 128)
- */
 int hl_arena_emit_alloc(
     const HlArenaEmitCtx* ctx,
     const char*           result_var,
@@ -287,15 +213,12 @@ int hl_arena_emit_alloc(
     if (!ctx || !result_var || !out || out_len == 0) return -1;
 
     int n = snprintf(out, out_len,
-                     "%s = call i8* @hl_arena_alloc(HlArena* %s, i64 %zu)\n",
-                     result_var, ctx->arena_var, n_bytes);
+        "%s = call i8* @hl_arena_alloc(HlArena* %s, i64 %zu)\n",
+        result_var, ctx->arena_var, n_bytes);
 
     return (n > 0 && (size_t)n < out_len) ? n : -1;
 }
 
-/*
- * hl_arena_emit_reset — wygeneruj instrukcje resetu (dla petli w :: bloku).
- */
 int hl_arena_emit_reset(
     const HlArenaEmitCtx* ctx,
     char*                 out,
@@ -304,9 +227,9 @@ int hl_arena_emit_reset(
     if (!ctx || !out || out_len == 0) return -1;
 
     int n = snprintf(out, out_len,
-                     "; arena reset\n"
-                     "call void @hl_arena_reset(HlArena* %s)\n",
-                     ctx->arena_var);
+        "; arena reset\n"
+        "call void @hl_arena_reset(HlArena* %s)\n",
+        ctx->arena_var);
 
     return (n > 0 && (size_t)n < out_len) ? n : -1;
 }
@@ -316,16 +239,6 @@ int hl_arena_emit_reset(
 
 /* ══════════════════════════════════════════════════════════════════════
  * TRYB JIT — HL_ARENA_MODE_JIT
- *
- * Uzywany przez interpreter do ewaluacji :: blokow w locie
- * oraz przez skompilowane programy .hl zawierajace :: bloki.
- *
- * Interpreter wywoluje:
- *   hl_jit_arena_enter(&scope, "cache", "512kb")  // :: cache [512kb] def
- *   hl_jit_arena_alloc(&scope, n)                 // alokacje w ciele
- *   hl_jit_arena_exit(&scope)                     // done
- *
- * Stos obsługuje zagniezdzone :: bloki do HL_JIT_MAX_DEPTH poziomow.
  * ══════════════════════════════════════════════════════════════════════ */
 #ifdef HL_ARENA_MODE_JIT
 
@@ -342,42 +255,47 @@ typedef struct {
 } HlJitArenaScope;
 
 /*
- * hl_jit_arena_enter — wejdz w :: blok.
- * Alokuje nowa arene i wrzuca ja na stos scope.
- * Zwraca 0 przy sukcesie, -1 przy bledzie.
+ * FIX SEGFAULT: codegen.rs przekazuje rozmiar jako int64_t (już przeliczony
+ * przez ir.rs z "2mb" → 2097152), NIE jako const char* size_spec.
+ *
+ * Stary kod: hl_jit_arena_enter(scope, name, const char* size_spec)
+ *   → aa.c brało liczbę 2097152 jako wskaźnik do stringa
+ *   → strtoull(0x200000) → dereferencja losowego adresu → SEGFAULT
+ *
+ * Nowy kod: hl_jit_arena_enter(scope, name, int64_t size_bytes)
+ *   → używamy rozmiaru bezpośrednio, bez parsowania
  */
 int hl_jit_arena_enter(
     HlJitArenaScope* scope,
     const char*      name,
-    const char*      size_spec
+    int64_t          size_bytes
 ) {
-    if (!scope || !name || !size_spec) return -1;
+    if (!scope || !name) return -1;
     if (scope->depth >= HL_JIT_MAX_DEPTH) {
         HL_DBG("enter: za gleboko (%d)", scope->depth);
         return -1;
     }
+    if (size_bytes <= 0) {
+        HL_DBG("enter: nieprawidlowy rozmiar (%lld)", (long long)size_bytes);
+        return -1;
+    }
 
-    size_t bytes = hl_arena_parse_size(size_spec);
-    if (bytes == 0) { HL_DBG("enter: zly size_spec '%s'", size_spec); return -1; }
-
-    HlArena* a = hl_arena_new(bytes);
-    if (!a) { HL_DBG("enter: OOM przy new(%zu)", bytes); return -1; }
+    HlArena* a = hl_arena_new((size_t)size_bytes);
+    if (!a) { HL_DBG("enter: OOM przy new(%lld)", (long long)size_bytes); return -1; }
 
     HlJitFrame* f = &scope->frames[scope->depth++];
     f->arena = a;
     snprintf(f->name, sizeof(f->name), "%s", name);
 
-    HL_DBG("enter :: %s [%zu bytes] depth=%d", name, bytes, scope->depth);
+    HL_DBG("enter :: %s [%lld bytes] depth=%d", name, (long long)size_bytes, scope->depth);
     return 0;
 }
 
-/*
- * hl_jit_arena_exit — wyjdz z :: bloku.
- * Zwalnia arene na szczycie stosu.
- * Zwraca 0 przy sukcesie, -1 jesli stos pusty.
- */
 int hl_jit_arena_exit(HlJitArenaScope* scope) {
-    if (!scope || scope->depth <= 0) { HL_DBG("exit: pusty scope"); return -1; }
+    if (!scope || scope->depth <= 0) {
+        HL_DBG("exit: pusty scope%s", "");
+        return -1;
+    }
 
     HlJitFrame* f = &scope->frames[--scope->depth];
     HL_DBG("exit :: %s (peak %zu) depth=%d",
@@ -388,18 +306,11 @@ int hl_jit_arena_exit(HlJitArenaScope* scope) {
     return 0;
 }
 
-/*
- * hl_jit_arena_alloc — alokuj `n` bajtow z biezacej areny.
- * Zwraca NULL jesli scope pusty lub brak miejsca.
- */
 void* hl_jit_arena_alloc(HlJitArenaScope* scope, size_t n) {
     if (!scope || scope->depth <= 0) return NULL;
     return hl_arena_alloc(scope->frames[scope->depth - 1].arena, n);
 }
 
-/*
- * hl_jit_arena_reset — resetuj biezaca arene (dla petli w :: bloku).
- */
 void hl_jit_arena_reset(HlJitArenaScope* scope) {
     if (!scope || scope->depth <= 0) return;
     hl_arena_reset(scope->frames[scope->depth - 1].arena);
@@ -407,17 +318,24 @@ void hl_jit_arena_reset(HlJitArenaScope* scope) {
 }
 
 /*
- * hl_jit_arena_cleanup — zwolnij wszystkie areny (np. przy panic/unwind).
+ * hl_jit_arena_cleanup — zwolnij wszystkie areny (panic/unwind/shutdown).
+ *
+ * FIX: nie drukuje nic jesli scope byl pusty od poczatku (depth == 0).
+ * VM wywoluje cleanup zawsze przy shutdown niezaleznie czy uzywano :: blokow.
+ * Stary kod pisal "[aa] cleanup done" nawet gdy nie bylo zadnej areny —
+ * teraz komunikat pojawia sie TYLKO jesli rzeczywiscie cos sprzatamy.
  */
 void hl_jit_arena_cleanup(HlJitArenaScope* scope) {
     if (!scope) return;
+
+    /* Jezeli scope byl pusty — cicho wyjdz, nic do sprzatania. */
+    if (scope->depth == 0) return;
+
+    HL_DBG("cleanup: zwalniam %d aren", scope->depth);
     while (scope->depth > 0) hl_jit_arena_exit(scope);
-    HL_DBG("cleanup done");
+    HL_DBG("cleanup done%s", "");
 }
 
-/*
- * hl_jit_arena_current — zwroc wskaznik do biezacej areny (debug).
- */
 HlArena* hl_jit_arena_current(const HlJitArenaScope* scope) {
     if (!scope || scope->depth <= 0) return NULL;
     return scope->frames[scope->depth - 1].arena;
