@@ -1,12 +1,11 @@
 use crate::codegen::{
     build_case, fcmp_pred, icmp_pred,
-    shell_quote, uid, wrap_sudo, ArenaScope, Codegen,
+    uid, wrap_sudo, Codegen,
 };
 use crate::ir::{IrBinOp, IrBranch, IrOp, IrPipeStep, IrType, IrVar};
 use colored::*;
-use inkwell::AddressSpace;
 use inkwell::IntPredicate;
-use inkwell::values::{AnyValue, AnyValueEnum, FunctionValue, IntValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, ValueKind};
 
 impl<'ctx> Codegen<'ctx> {
     // ─────────────────────────────────────────────────────────
@@ -187,7 +186,7 @@ impl<'ctx> Codegen<'ctx> {
             }
 
             // ════════════════════════════════════════════════
-            // I64/F64 → ENV (snprintf + setenv, zero fork)
+            // I64/F64 → ENV
             // ════════════════════════════════════════════════
 
             IrOp::I64ToEnv { key, src, buf } => {
@@ -233,14 +232,7 @@ impl<'ctx> Codegen<'ctx> {
             // ════════════════════════════════════════════════
 
             IrOp::SetEnv { key, val } | IrOp::SetLocal { key, val } => {
-                let kp = self.str_ptr(key, "k");
-                let vp = self.str_ptr(val, "v");
-                let ow = self.ctx.i32_type().const_int(1, false);
-                self.builder.build_call(
-                    self.setenv_fn,
-                    &[kp.into(), vp.into(), ow.into()],
-                                        &uid("se"),
-                ).unwrap();
+                self.emit_setenv_native(key, val);
             }
 
             IrOp::SetEnvDyn { key, expr } | IrOp::SetLocalDyn { key, expr } => {
@@ -252,52 +244,22 @@ impl<'ctx> Codegen<'ctx> {
             // ════════════════════════════════════════════════
 
             IrOp::SetOut { val } => {
-                let kp = self.str_ptr("_HL_OUT", "outk");
-                let vp = self.str_ptr(val, "outv");
-                let ow = self.ctx.i32_type().const_int(1, false);
-                self.builder.build_call(
-                    self.setenv_fn,
-                    &[kp.into(), vp.into(), ow.into()],
-                                        &uid("setout"),
-                ).unwrap();
+                let is_dynamic = val.contains('$') || val.contains('`') || val.contains("$(");
+                if is_dynamic {
+                    self.emit_system(&format!("echo {}", val));
+                } else {
+                    self.emit_print(val);
+                }
             }
 
-            IrOp::SetOutI64 { src, buf } => {
-                let val     = self.operand_i64(src);
-                let buf_ptr = self.buf_ptr(buf);
-                let fmt_ptr = self.str_ptr("%lld", "fmt_lld");
-                let sz      = self.ctx.i64_type().const_int(32, false);
-                self.builder.build_call(
-                    self.snprintf_fn,
-                    &[buf_ptr.into(), sz.into(), fmt_ptr.into(), val.into()],
-                                        &uid("snp"),
-                ).unwrap();
-                let kp = self.str_ptr("_HL_OUT", "outk");
-                let ow = self.ctx.i32_type().const_int(1, false);
-                self.builder.build_call(
-                    self.setenv_fn,
-                    &[kp.into(), buf_ptr.into(), ow.into()],
-                                        &uid("sout"),
-                ).unwrap();
+            IrOp::SetOutI64 { src, buf: _ } => {
+                let val = self.operand_i64(src);
+                self.emit_print_i64(val);
             }
 
-            IrOp::SetOutF64 { src, buf } => {
-                let val     = self.operand_f64(src);
-                let buf_ptr = self.buf_ptr(buf);
-                let fmt_ptr = self.str_ptr("%g", "fmt_g");
-                let sz      = self.ctx.i64_type().const_int(32, false);
-                self.builder.build_call(
-                    self.snprintf_fn,
-                    &[buf_ptr.into(), sz.into(), fmt_ptr.into(), val.into()],
-                                        &uid("snp"),
-                ).unwrap();
-                let kp = self.str_ptr("_HL_OUT", "outk");
-                let ow = self.ctx.i32_type().const_int(1, false);
-                self.builder.build_call(
-                    self.setenv_fn,
-                    &[kp.into(), buf_ptr.into(), ow.into()],
-                                        &uid("sout"),
-                ).unwrap();
+            IrOp::SetOutF64 { src, buf: _ } => {
+                let val = self.operand_f64(src);
+                self.emit_print_f64(val);
             }
 
             // ════════════════════════════════════════════════
@@ -464,33 +426,38 @@ impl<'ctx> Codegen<'ctx> {
 
             // ════════════════════════════════════════════════
             // ARENA
+            // FIX SEGFAULT: scope pre-alokowany przez
+            // emit_arena_scope_alloca() (4624 bajtów) w codegen.rs.
             // ════════════════════════════════════════════════
 
             IrOp::ArenaEnter { name, size_spec: _, size_bytes } => {
-                let i64_t    = self.ctx.i64_type();
-                let scope_t  = i64_t.array_type(4);
-                let scope_sl = self.builder
-                .build_alloca(scope_t, &uid("arena_scope")).unwrap();
-                let z0 = self.ctx.i32_type().const_int(0, false);
-                let scope_ptr = unsafe {
-                    self.builder.build_gep(
-                        scope_t, scope_sl, &[z0, z0], &uid("scope_ptr"),
-                    ).unwrap()
+                let scope_ptr = match self.arena_scope {
+                    Some(ref s) => s.scope_ptr,
+                    None => {
+                        if self.verbose {
+                            eprintln!("{} ArenaEnter {:?} — brak pre-alloc scope, allokuję inline",
+                                      "[!]".yellow(), name);
+                        }
+                        self.emit_arena_scope_alloca();
+                        self.arena_scope.as_ref().unwrap().scope_ptr
+                    }
                 };
                 let name_ptr = self.str_ptr(name, "arena_name");
-                let sz       = i64_t.const_int(*size_bytes, false);
+                let sz       = self.ctx.i64_type().const_int(*size_bytes, false);
                 self.builder.build_call(
                     self.arena_enter_fn,
                     &[scope_ptr.into(), name_ptr.into(), sz.into()],
                                         &uid("aenter"),
                 ).unwrap();
-                self.arena_scope = Some(ArenaScope { scope_ptr });
                 if self.verbose {
                     eprintln!("{} ArenaEnter {:?} {} bytes", "[A]".cyan(), name, size_bytes);
                 }
             }
 
             IrOp::ArenaAllocPtr { dst, size } => {
+                // FIX: try_as_basic_value() → ValueKind<'ctx>
+                // Warianty: ValueKind::Basic(BasicValueEnum) | ValueKind::Instruction(...)
+                // Dla funkcji zwracających ptr → Basic(PointerValue(...))
                 if let Some(ref scope) = self.arena_scope {
                     let sp  = scope.scope_ptr;
                     let sz  = self.ctx.i64_type().const_int(*size, false);
@@ -499,10 +466,13 @@ impl<'ctx> Codegen<'ctx> {
                         &[sp.into(), sz.into()],
                                                       &uid("aalloc"),
                     ).unwrap();
-                    let any = ret.as_any_value_enum();
-                    if let inkwell::values::AnyValueEnum::PointerValue(pv) = any {
-                        self.tmps.insert(dst.0.clone(), pv.into());
-                        self.slots.insert(dst.0.clone(), (pv, IrType::Ptr));
+                    if let ValueKind::Basic(bv) = ret.try_as_basic_value() {
+                        self.tmps.insert(dst.0.clone(), bv);
+                        if let BasicValueEnum::PointerValue(pv) = bv {
+                            self.slots.insert(dst.0.clone(), (pv, IrType::Ptr));
+                        }
+                    } else if self.verbose {
+                        eprintln!("{} ArenaAllocPtr: call zwrócił void", "[!]".yellow());
                     }
                 } else {
                     if self.verbose {
@@ -512,9 +482,11 @@ impl<'ctx> Codegen<'ctx> {
                     let sz  = self.ctx.i64_type().const_int(*size, false);
                     let ret = self.builder
                     .build_call(self.gc_malloc_fn, &[sz.into()], &uid("gcfb")).unwrap();
-                    let any = ret.as_any_value_enum();
-                    if let inkwell::values::AnyValueEnum::PointerValue(pv) = any {
-                        self.tmps.insert(dst.0.clone(), pv.into());
+                    if let ValueKind::Basic(bv) = ret.try_as_basic_value() {
+                        self.tmps.insert(dst.0.clone(), bv);
+                        if let BasicValueEnum::PointerValue(pv) = bv {
+                            self.slots.insert(dst.0.clone(), (pv, IrType::Ptr));
+                        }
                     }
                 }
             }
@@ -541,21 +513,24 @@ impl<'ctx> Codegen<'ctx> {
                     if self.verbose {
                         eprintln!("{} ArenaExit {:?}", "[A]".cyan(), name);
                     }
+                } else if self.verbose {
+                    eprintln!("{} ArenaExit {:?} — brak aktywnej areny (noop)",
+                              "[!]".yellow(), name);
                 }
                 self.arena_scope = None;
             }
 
             // ════════════════════════════════════════════════
             // GC
+            // FIX: ValueKind::Basic(bv) zamiast ValueKind::Left(bv)
             // ════════════════════════════════════════════════
 
             IrOp::GcAlloc { var, size } => {
                 let sz  = self.ctx.i64_type().const_int(*size, false);
                 let ret = self.builder
                 .build_call(self.gc_malloc_fn, &[sz.into()], &uid("gcm")).unwrap();
-                let any = ret.as_any_value_enum();
-                if let inkwell::values::AnyValueEnum::PointerValue(pv) = any {
-                    self.tmps.insert(var.0.clone(), pv.into());
+                if let ValueKind::Basic(bv) = ret.try_as_basic_value() {
+                    self.tmps.insert(var.0.clone(), bv);
                 }
             }
 
@@ -608,36 +583,16 @@ impl<'ctx> Codegen<'ctx> {
 
             IrOp::Log { msg, to_stderr } => {
                 let is_dynamic = msg.contains('$') || msg.contains('`') || msg.contains("$(");
-
-                if *to_stderr && !is_dynamic {
-                    let ptr_t      = self.ctx.ptr_type(AddressSpace::default());
-                    let stderr_ptr = self.builder
-                    .build_load(
-                        ptr_t,
-                        self.stderr_global.as_pointer_value(),
-                                &uid("stderr"),
-                    )
-                    .unwrap()
-                    .into_pointer_value();
-                    let fmt_s = self.str_ptr("%s\n", "fmts");
-                    let msg_s = self.str_ptr(msg, "logmsg");
-                    self.builder.build_call(
-                        self.fprintf_fn,
-                        &[stderr_ptr.into(), fmt_s.into(), msg_s.into()],
-                                            &uid("fpr"),
-                    ).unwrap();
-                } else if *to_stderr {
-                    self.emit_system(&format!("echo {} >&2", msg));
-                } else if is_dynamic {
-                    self.emit_system(&format!("echo {}", msg));
+                if is_dynamic {
+                    let redirect = if *to_stderr { " >&2" } else { "" };
+                    self.emit_system(&format!("echo {}{}", msg, redirect));
                 } else {
-                    self.emit_system(&format!("echo {}", shell_quote(msg)));
+                    self.emit_log(msg, *to_stderr);
                 }
             }
 
             // ════════════════════════════════════════════════
             // KOLEKCJE
-            // NAPRAWA: format string dla "pop" — escapowane nawiasy klamrowe
             // ════════════════════════════════════════════════
 
             IrOp::CollectionMut { var, method, args } => {
@@ -735,7 +690,7 @@ impl<'ctx> Codegen<'ctx> {
 
             IrOp::ScopeBlock { body } => {
                 if !body.is_empty() {
-                    self.emit_ops(body, func);
+                    let _ = self.emit_ops(body, func);
                 }
             }
 
@@ -744,12 +699,10 @@ impl<'ctx> Codegen<'ctx> {
             // ════════════════════════════════════════════════
 
             IrOp::TestBlock { desc, body } => {
-                self.emit_system(&format!(
-                    "echo '=== TEST: {} ===' >&2",
-                    desc.replace('\'', "'\\''"),
-                ));
-                self.emit_ops(body, func);
-                self.emit_system("echo '=== PASS ===' >&2");
+                let header = format!("=== TEST: {} ===", desc);
+                self.emit_log(&header, true);
+                let _ = self.emit_ops(body, func);
+                self.emit_log("=== PASS ===", true);
             }
 
             // ════════════════════════════════════════════════
@@ -790,22 +743,12 @@ impl<'ctx> Codegen<'ctx> {
                 let sz = self.ctx.i64_type().const_int(*size, false);
                 self.builder.build_call(self.gc_malloc_fn, &[sz.into()], &uid("lkm")).unwrap();
                 let env_key = format!("_HL_LOCK_{}", key);
-                let kp = self.str_ptr(&env_key, "lkk");
-                let vp = self.str_ptr("1", "lkv");
-                let ow = self.ctx.i32_type().const_int(1, false);
-                self.builder.build_call(
-                    self.setenv_fn, &[kp.into(), vp.into(), ow.into()], &uid("lke"),
-                ).unwrap();
+                self.emit_setenv_native(&env_key, "1");
             }
 
             IrOp::Unlock { key } => {
                 let env_key = format!("_HL_LOCK_{}", key);
-                let kp = self.str_ptr(&env_key, "ulkk");
-                let vp = self.str_ptr("", "ulkv");
-                let ow = self.ctx.i32_type().const_int(1, false);
-                self.builder.build_call(
-                    self.setenv_fn, &[kp.into(), vp.into(), ow.into()], &uid("ulk"),
-                ).unwrap();
+                self.emit_setenv_native(&env_key, "");
                 self.builder.build_call(self.gc_unmark_fn, &[], &uid("unm")).unwrap();
                 self.builder.build_call(self.gc_sweep_fn,  &[], &uid("swp")).unwrap();
             }
@@ -873,7 +816,7 @@ impl<'ctx> Codegen<'ctx> {
 
         self.builder.build_unconditional_branch(bb_hdr).unwrap();
 
-        // ── Nagłówek: phi + test SLT ───────────────────────────
+        // ── Nagłówek ───────────────────────────────────────
         self.builder.position_at_end(bb_hdr);
         let phi       = self.builder.build_phi(i64_t, &uid("phi")).unwrap();
         let preheader = self.builder.get_insert_block().unwrap();
@@ -885,11 +828,11 @@ impl<'ctx> Codegen<'ctx> {
         ).unwrap();
         self.builder.build_conditional_branch(cmp, bb_body, bb_exit).unwrap();
 
-        // ── Ciało pętli ────────────────────────────────────────
+        // ── Ciało ──────────────────────────────────────────
         self.builder.position_at_end(bb_body);
         self.builder.build_store(var_slot, i_val).unwrap();
 
-        let z0      = self.ctx.i32_type().const_int(0, false);
+        let z0      = self.ctx.i64_type().const_int(0, false);
         let buf_ptr = unsafe {
             self.builder.build_gep(buf_arr, buf_slot, &[z0, z0], &uid("bgep")).unwrap()
         };
@@ -900,27 +843,21 @@ impl<'ctx> Codegen<'ctx> {
             &[buf_ptr.into(), sz.into(), fmt_ptr.into(), i_val.into()],
                                 &uid("snp"),
         ).unwrap();
-        let key_ptr = self.str_ptr(env_key, "ekey");
-        let ow      = self.ctx.i32_type().const_int(1, false);
-        self.builder.build_call(
-            self.setenv_fn,
-            &[key_ptr.into(), buf_ptr.into(), ow.into()],
-                                &uid("senv"),
-        ).unwrap();
+        self.emit_setenv_i64(env_key, i_val);
 
         for body_op in body {
             self.emit_one(body_op, func);
         }
         self.builder.build_unconditional_branch(bb_inc).unwrap();
 
-        // ── Inkrement ──────────────────────────────────────────
+        // ── Inkrement ──────────────────────────────────────
         self.builder.position_at_end(bb_inc);
         let i_next = self.builder
         .build_int_add(i_val, step_val, &uid("inc")).unwrap();
         phi.add_incoming(&[(&i_next, bb_inc)]);
         self.builder.build_unconditional_branch(bb_hdr).unwrap();
 
-        // ── Wyjście ────────────────────────────────────────────
+        // ── Wyjście ────────────────────────────────────────
         self.builder.position_at_end(bb_exit);
     }
 
@@ -929,7 +866,6 @@ impl<'ctx> Codegen<'ctx> {
     // ─────────────────────────────────────────────────────────
     pub(crate) fn emit_if_chain(&mut self, branches: &[IrBranch]) {
         if branches.is_empty() { return; }
-
         let mut sh = String::new();
         for (bi, br) in branches.iter().enumerate() {
             match (&br.cond, bi) {
