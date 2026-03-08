@@ -2,6 +2,18 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────
+// Helpers: serde default functions
+// ─────────────────────────────────────────────────────────────
+
+fn default_false() -> bool { false }
+fn default_empty_string() -> String { String::new() }
+fn default_empty_vec<T>() -> Vec<T> { Vec::new() }
+fn default_span() -> (usize, usize) { (0, 0) }
+fn default_arena_size() -> Option<String> { None }
+fn default_zero_u64() -> u64 { 0 }
+fn default_zero_i32() -> i32 { 0 }
+
+// ─────────────────────────────────────────────────────────────
 // Typy bibliotek (musi pasować do hl-plsa LibType)
 // ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -33,6 +45,14 @@ pub struct LibRef {
 
 // ─────────────────────────────────────────────────────────────
 // CommandType — pełne AST hacker-lang
+//
+// Zasady deserializacji:
+//   - Wszystkie pola String mogą mieć #[serde(default)] gdzie
+//     brakujące pole z hl-plsa nie powinno blokować kompilacji.
+//   - Vec<T> zawsze #[serde(default)] = pusty Vec.
+//   - bool zawsze #[serde(default)] = false.
+//   - Option<T> obsługuje null i brak pola automatycznie przez serde.
+//   - (usize, usize) span ma #[serde(default)] = (0, 0).
 // ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -50,185 +70,300 @@ pub enum CommandType {
     // ── Zmienne i przypisania ─────────────────────────────────
 
     /// @key = val — zmienna globalna (env)
-    AssignEnv   { key: String, val: String },
+    AssignEnv {
+        key: String,
+        val: String,
+    },
     /// key = val  — zmienna lokalna
     /// ~key = val — przypisanie bez quote-stripping (is_raw=true)
-    AssignLocal { key: String, val: String, is_raw: bool },
+    AssignLocal {
+        key:    String,
+        val:    String,
+        #[serde(default = "default_false")]
+        is_raw: bool,
+    },
     /// key = 2 + 3 * 4 / key = [$a, $b] / key = {k: "v"}
-    /// Wyrażenia arytmetyczne, logiczne, listy, mapy, interpolacje
-    AssignExpr  { key: String, expr: String, is_raw: bool, is_global: bool },
-    /// % KEY = val — stała (konwencja niezmienności)
-    Const       { key: String, val: String },
+    AssignExpr {
+        key:       String,
+        expr:      String,
+        #[serde(default = "default_false")]
+        is_raw:    bool,
+        #[serde(default = "default_false")]
+        is_global: bool,
+    },
+    /// % KEY = val — stała
+    Const {
+        key: String,
+        val: String,
+    },
 
     // ── Przepływ sterowania ───────────────────────────────────
 
     /// = N > cmd  — pętla N razy
-    Loop        { count: u64, cmd: String },
+    Loop {
+        #[serde(default = "default_zero_u64")]
+        count: u64,
+        cmd:   String,
+    },
     /// ? cond > cmd — if
-    If          { cond: String, cmd: String },
+    If   { cond: String, cmd: String },
     /// ?? cond > cmd — elif
-    Elif        { cond: String, cmd: String },
+    Elif { cond: String, cmd: String },
     /// ?: > cmd   — else
-    Else        { cmd: String },
+    Else { cmd: String },
     /// while cond > cmd
-    While       { cond: String, cmd: String },
+    While { cond: String, cmd: String },
     /// for x in cond > cmd
-    For         { var: String, in_: String, cmd: String },
-    /// end [code] — wyjście z programu
-    End         { code: i32 },
-    /// out [val]  — output wartości (return z main)
+    For   { var: String, in_: String, cmd: String },
+    /// end [code]
+    End   {
+        #[serde(default = "default_zero_i32")]
+        code: i32,
+    },
+    /// out [val]
     Out(String),
 
     // ── Wywołania ─────────────────────────────────────────────
 
     /// .path args — wywołanie funkcji/metody
-    Call        { path: String, args: String },
-    /// module.method args — wywołanie metody modułu (;;Moduł def)
-    ModuleCall  { path: String, args: String },
-    /// \\ plugin [args] — uruchom plugin z plugins/
-    Plugin      { name: String, args: String, is_super: bool },
-    /// -- [static] path — linkuj zewnętrzną bibliotekę
-    Extern      { path: String, static_link: bool },
+    Call {
+        path: String,
+        #[serde(default = "default_empty_string")]
+        args: String,
+    },
+    /// module.method args — wywołanie metody modułu
+    ModuleCall {
+        path: String,
+        #[serde(default = "default_empty_string")]
+        args: String,
+    },
+    /// \\ plugin [args]
+    Plugin {
+        name:     String,
+        #[serde(default = "default_empty_string")]
+        args:     String,
+        #[serde(default = "default_false")]
+        is_super: bool,
+    },
+    /// -- [static] path
+    Extern {
+        path:        String,
+        #[serde(default = "default_false")]
+        static_link: bool,
+    },
 
     // ── Import i zależności ───────────────────────────────────
 
-    /// // dep — zależność systemowa (apt/dnf/pacman)
-    SysDep(String),   // nie jest w CommandType głównym — obsługiwane przez deps Vec
-    /// << "path" [in ns] — import pliku/modułu
-    Import      { resource: String, namespace: Option<String> },
+    /// // dep — zależność systemowa
+    SysDep(String),
+    /// << "path" [in ns]
+    Import {
+        resource:  String,
+        namespace: Option<String>,
+    },
 
     // ── Typy i struktury ──────────────────────────────────────
 
-    /// == Name [V1, V2, V3] — enum
-    Enum        { name: String, variants: Vec<String> },
-    /// struct Name [field: type, ...] — struktura
-    Struct      { name: String, fields: Vec<(String, String)> },
-    /// ==type Shape [Circle [r: float], Rect [w: float, h: float]] — ADT
-    AdtDef      { name: String, variants: Vec<(String, Vec<(String, String)>)> },
-    /// ==interface Name [method1, method2] — protokół/interfejs
-    Interface   { name: String, methods: Vec<String> },
-    /// ;;Class impl Interface def — deklaracja implementacji
-    ImplDef     { class: String, interface: String },
+    /// == Name [V1, V2] — enum
+    Enum {
+        name:     String,
+        #[serde(default = "default_empty_vec")]
+        variants: Vec<String>,
+    },
+    /// struct Name [field: type, ...]
+    Struct {
+        name:   String,
+        #[serde(default = "default_empty_vec")]
+        fields: Vec<(String, String)>,
+    },
+    /// ==type Shape [...] — ADT
+    AdtDef {
+        name:     String,
+        #[serde(default = "default_empty_vec")]
+        variants: Vec<(String, Vec<(String, String)>)>,
+    },
+    /// ==interface Name [methods]
+    Interface {
+        name:    String,
+        #[serde(default = "default_empty_vec")]
+        methods: Vec<String>,
+    },
+    /// ;;Class impl Interface def
+    ImplDef { class: String, interface: String },
 
     // ── Funkcje i klasy ───────────────────────────────────────
-    // Uwaga: FuncDef/ClassDef nie są węzłami w main_body —
-    // są kluczami w HashMap<String, (bool, Option<String>, Vec<ProgramNode>)>
-    // (is_arena_fn, type_sig, body)
+
+    FuncDefGeneric {
+        name: String,
+        sig:  String,
+    },
+
+    // ── Arena allocator ───────────────────────────────────────
     //
-    // Generics: :serialize [T impl Serializable -> str] def
-    FuncDefGeneric { name: String, sig: String },
-
-    // ── Arena allocator — :: name [size] def...done ───────────
+    // FIX: size_spec jest Option<String> z #[serde(default)].
     //
-    // :: cache [512kb] def
-    //   .do_work $data
-    // done
+    // Dlaczego: hl-plsa emituje ArenaDef na dwa sposoby:
     //
-    // Semantyka:
-    //   - Przy wejściu do bloku: hl_arena_init(&arena, size_bytes)
-    //   - Alokacje wewnątrz przez hl_arena_alloc (bump pointer, zero GC)
-    //   - Przy wyjściu: hl_arena_free(&arena) — jednorazowe zwolnienie
-    //   - NIGDY nie miesza się z GC (gc.c) wewnątrz bloku areny
+    //   1. Standalone w main_body / ciele funkcji:
+    //      { "type": "ArenaDef", "data": { "name": "cache", "size_spec": "512kb" } }
+    //      Tutaj size_spec jest w JSON.
+    //
+    //   2. Jako marker że funkcja ma własną arenę (is_arena_fn=true w functions[]):
+    //      { "type": "ArenaDef", "data": { "name": "cache" } }
+    //      size_spec NIE jest w JSON — jest zakodowane w sygnaturze "[arena:512kb]".
+    //      To powoduje błąd "missing field size_spec" w starym ast.rs.
+    //
+    //   Rozwiązanie: size_spec: Option<String>, body: Vec<ProgramNode> z default.
+    //   ir.rs/codegen.rs powinny użyć resolve_arena_size() żeby wyciągnąć
+    //   rozmiar z sygnatury funkcji jeśli size_spec jest None.
 
-    /// :: name [size_spec] def...done — funkcja z dedykowaną areną
-    /// size_spec: "512b" | "4kb" | "1mb" | "2gb"
-    /// body: węzły wewnątrz bloku (kompilowane bez GC)
-    ArenaDef    { name: String, size_spec: String, body: Vec<ProgramNode> },
-    /// key = arena.name.alloc size_bytes — alokacja z areny (wynik to wskaźnik)
-    ArenaAlloc  { key: String, arena_name: String, size: u64 },
-    /// arena.name.reset — przywróć wskaźnik do początku (zachowaj pamięć)
-    ArenaReset  { arena_name: String },
-    /// arena.name.free — zwolnij całą arenę (hl_arena_free)
-    ArenaFree   { arena_name: String },
+    /// :: name [size_spec] def...done — blok z dedykowaną areną
+    ArenaDef {
+        name: String,
 
-    // ── Kolekcje — natywna mutacja ────────────────────────────
+        /// Rozmiar areny: "512b" | "4kb" | "1mb" | "2gb"
+        /// None gdy hl-plsa emituje ArenaDef jako marker is_arena_fn —
+        /// rozmiar jest wtedy w sygnaturze functions[name].1 = "[arena:512kb]"
+        #[serde(default = "default_arena_size")]
+        size_spec: Option<String>,
 
-    /// $list.push val / $map.set key val / $list.pop / $map.del key
-    CollectionMut { var: String, method: String, args: String },
+        /// Ciało bloku areny — węzły wewnątrz def...done.
+        /// Puste gdy ArenaDef jest markerem w functions[] (ciało jest osobno).
+        #[serde(default = "default_empty_vec")]
+        body: Vec<ProgramNode>,
+    },
+
+    /// key = arena.name.alloc size_bytes
+    ArenaAlloc {
+        key:        String,
+        arena_name: String,
+        #[serde(default = "default_zero_u64")]
+        size:       u64,
+    },
+    /// arena.name.reset
+    ArenaReset {
+        arena_name: String,
+    },
+    /// arena.name.free
+    ArenaFree {
+        arena_name: String,
+    },
+
+    // ── Kolekcje ─────────────────────────────────────────────
+
+    CollectionMut {
+        var:    String,
+        method: String,
+        #[serde(default = "default_empty_string")]
+        args:   String,
+    },
 
     // ── Error handling ────────────────────────────────────────
 
-    /// try body catch handler
-    Try         { try_cmd: String, catch_cmd: String },
-    /// expr ?! "komunikat" — unwrap lub panik (jak Rust ?)
-    ResultUnwrap { expr: String, msg: String },
+    Try {
+        try_cmd:   String,
+        catch_cmd: String,
+    },
+    ResultUnwrap {
+        expr: String,
+        msg:  String,
+    },
 
-    // ── Async — spawn / await ─────────────────────────────────
+    // ── Async ─────────────────────────────────────────────────
 
-    /// spawn rest — uruchom zadanie (fire & forget)
     Spawn(String),
-    /// await rest — czekaj (bez przypisania)
     Await(String),
-    /// key = spawn rest — uruchom, przypisz handle
-    AssignSpawn { key: String, task: String },
-    /// key = await rest — czekaj, przypisz wynik
-    AssignAwait { key: String, expr: String },
+    AssignSpawn {
+        key:  String,
+        task: String,
+    },
+    AssignAwait {
+        key:  String,
+        expr: String,
+    },
 
     // ── Pattern matching ──────────────────────────────────────
 
-    /// match cond |> — nagłówek bloku dopasowania
-    Match       { cond: String },
-    /// val > cmd — ramię match
-    MatchArm    { val: String, cmd: String },
+    Match    { cond: String },
+    MatchArm { val: String, cmd: String },
 
     // ── Pipe ──────────────────────────────────────────────────
 
-    /// .a |> .b |> .c — łańcuch wywołań (inline)
     Pipe(Vec<String>),
-    /// | .step args — krok wieloliniowego potoku
-    PipeLine    { step: String },
+    PipeLine { step: String },
 
-    // ── Lambdy / domknięcia ───────────────────────────────────
+    // ── Lambdy ────────────────────────────────────────────────
 
-    /// { $x -> $x * 2 } — lambda jako argument inline
-    Lambda      { params: Vec<String>, body: String },
-    /// key = { $x -> $x * 2 } — lambda przypisana do zmiennej
-    AssignLambda { key: String, params: Vec<String>, body: String, is_raw: bool, is_global: bool },
+    Lambda {
+        #[serde(default = "default_empty_vec")]
+        params: Vec<String>,
+        body:   String,
+    },
+    AssignLambda {
+        key:       String,
+        #[serde(default = "default_empty_vec")]
+        params:    Vec<String>,
+        body:      String,
+        #[serde(default = "default_false")]
+        is_raw:    bool,
+        #[serde(default = "default_false")]
+        is_global: bool,
+    },
 
     // ── Rekurencja ogonowa ────────────────────────────────────
 
-    /// recur args — tail call bieżącej funkcji (stack-safe)
-    Recur       { args: String },
+    Recur {
+        #[serde(default = "default_empty_string")]
+        args: String,
+    },
 
     // ── Destrukturyzacja ──────────────────────────────────────
 
-    /// [head | tail] = $lista — destrukturyzacja listy
-    DestructList { head: String, tail: String, source: String },
-    /// {name, age} = $user — destrukturyzacja mapy/struktury
-    DestructMap  { fields: Vec<String>, source: String },
+    DestructList {
+        head:   String,
+        tail:   String,
+        source: String,
+    },
+    DestructMap {
+        #[serde(default = "default_empty_vec")]
+        fields: Vec<String>,
+        source: String,
+    },
 
     // ── Zasięg leksykalny ─────────────────────────────────────
 
-    /// ;;scope def...done — anonimowy zakres leksykalny
     ScopeDef,
 
     // ── Do-notacja ────────────────────────────────────────────
 
-    /// key = do...done — blok sekwencyjny (monadic-style)
-    DoBlock     { key: String, body: Vec<ProgramNode> },
+    DoBlock {
+        key:  String,
+        #[serde(default = "default_empty_vec")]
+        body: Vec<ProgramNode>,
+    },
 
     // ── Testy jednostkowe ─────────────────────────────────────
 
-    /// ==test "opis" [ assert ... ] — blok testowy jako pierwsza klasa
-    TestBlock   { desc: String, body: Vec<ProgramNode> },
+    TestBlock {
+        desc: String,
+        #[serde(default = "default_empty_vec")]
+        body: Vec<ProgramNode>,
+    },
 
     // ── Walidacja ─────────────────────────────────────────────
 
-    /// assert cond ["komunikat"] — walidacja w miejscu, exit 1 przy błędzie
-    Assert      { cond: String, msg: Option<String> },
+    Assert {
+        cond: String,
+        msg:  Option<String>,
+    },
 
     // ── Inne ──────────────────────────────────────────────────
 
-    /// log "wiadomość" — log do stderr
     Log(String),
-    /// lock $key = val — mutex lock
-    Lock        { key: String, val: String },
-    /// unlock $key — mutex unlock
-    Unlock      { key: String },
-    /// & cmd — uruchom w tle
+    Lock   { key: String, val: String },
+    Unlock { key: String },
     Background(String),
-    /// defer expr — sprzątanie przy wyjściu ze scope (Go-style)
-    Defer       { expr: String },
+    Defer  { expr: String },
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -236,11 +371,17 @@ pub enum CommandType {
 // ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProgramNode {
+    #[serde(default)]
     pub line_num:      usize,
+    #[serde(default = "default_false")]
     pub is_sudo:       bool,
     pub content:       CommandType,
+    #[serde(default = "default_empty_string")]
     pub original_text: String,
-    /// (byte_offset, byte_len) w pliku źródłowym
+    /// (byte_offset, byte_len) w pliku źródłowym.
+    /// FIX: #[serde(default)] bo hl-plsa może emitować span jako []
+    /// lub w ogóle nie emitować tego pola dla starszych węzłów.
+    #[serde(default = "default_span")]
     pub span:          (usize, usize),
 }
 
@@ -250,42 +391,45 @@ pub struct ProgramNode {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnalysisResult {
     /// Zależności systemowe (//)
+    #[serde(default = "default_empty_vec")]
     pub deps:  Vec<String>,
     /// Biblioteki (#<lib_type/name:version>)
+    #[serde(default = "default_empty_vec")]
     pub libs:  Vec<LibRef>,
     /// Funkcje i metody klas:
     ///   key   = "NazwaKlasy.nazwa_funkcji" lub "nazwa_funkcji"
     ///   value = (is_arena_fn, Option<type_sig>, Vec<ProgramNode>)
-    ///
-    /// is_arena_fn=true gdy funkcja zdefiniowana przez :: name [size] def
-    /// type_sig np. "[int int -> int]" lub "[T impl Serializable -> str]"
+    #[serde(default)]
     pub functions:             HashMap<String, (bool, Option<String>, Vec<ProgramNode>)>,
     /// Kod poza funkcjami (globalny main body)
+    #[serde(default = "default_empty_vec")]
     pub main_body:             Vec<ProgramNode>,
-    /// true jeśli jakikolwiek węzeł ma is_sudo=true (^ prefix)
+    /// true jeśli jakikolwiek węzeł ma is_sudo=true
+    #[serde(default = "default_false")]
     pub is_potentially_unsafe: bool,
-    /// Lista ostrzeżeń sudo, np. "Linia 42: sudo (^)"
+    /// Lista ostrzeżeń sudo
+    #[serde(default = "default_empty_vec")]
     pub safety_warnings:       Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// Helpers — metody na AnalysisResult
 // ─────────────────────────────────────────────────────────────
 impl AnalysisResult {
-    /// Zwraca wszystkie węzły (main_body + wnętrza funkcji) jako flat iterator.
+    /// Wszystkie węzły (main_body + wnętrza funkcji) — flat iterator.
     pub fn all_nodes(&self) -> impl Iterator<Item = &ProgramNode> {
         self.main_body
         .iter()
         .chain(self.functions.values().flat_map(|(_, _, nodes)| nodes.iter()))
     }
 
-    /// Zwraca true jeśli w programie jest jakikolwiek :: blok areny.
+    /// true jeśli program używa arena (:: blok).
     pub fn uses_arena(&self) -> bool {
         self.functions.values().any(|(is_arena, _, _)| *is_arena)
         || self.all_nodes().any(|n| matches!(&n.content, CommandType::ArenaDef { .. }))
     }
 
-    /// Zwraca true jeśli program używa spawn/await (wymaga -lpthread).
+    /// true jeśli program używa spawn/await (wymaga -lpthread).
     pub fn uses_async(&self) -> bool {
         self.all_nodes().any(|n| matches!(
             &n.content,
@@ -296,7 +440,7 @@ impl AnalysisResult {
         ))
     }
 
-    /// Zwraca listę extern libs: (path, is_static).
+    /// Lista extern libs: (path, is_static).
     pub fn extern_libs(&self) -> Vec<(String, bool)> {
         self.all_nodes()
         .filter_map(|n| match &n.content {
@@ -304,5 +448,134 @@ impl AnalysisResult {
                     _ => None,
         })
         .collect()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// resolve_arena_size — wyciągnij rozmiar areny
+//
+// FIX: ArenaDef.size_spec może być None gdy hl-plsa emituje
+// ArenaDef jako marker is_arena_fn. Rozmiar jest wtedy
+// zakodowany w sygnaturze funkcji: "[arena:512kb]".
+//
+// Używane przez ir.rs i codegen.rs zamiast bezpośredniego
+// dostępu do size_spec.
+// ─────────────────────────────────────────────────────────────
+pub fn resolve_arena_size(
+    size_spec:   Option<&str>,
+    func_sig:    Option<&str>,
+    default_val: &str,
+) -> String {
+    // 1. Bezpośredni size_spec z węzła ArenaDef
+    if let Some(s) = size_spec {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+
+    // 2. Wyciągnij z sygnatury funkcji "[arena:512kb]"
+    if let Some(sig) = func_sig {
+        if let Some(inner) = sig.strip_prefix("[arena:") {
+            if let Some(size) = inner.strip_suffix(']') {
+                if !size.is_empty() {
+                    return size.to_string();
+                }
+            }
+        }
+        // Alternatywna forma: "arena:512kb" bez nawiasów
+        if let Some(rest) = sig.strip_prefix("arena:") {
+            let size = rest.trim_end_matches(']').trim();
+            if !size.is_empty() {
+                return size.to_string();
+            }
+        }
+    }
+
+    // 3. Fallback
+    default_val.to_string()
+}
+
+// ─────────────────────────────────────────────────────────────
+// Testy jednostkowe
+// ─────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_arena_def_without_size_spec() {
+        // hl-plsa emituje ArenaDef bez size_spec — nie powinno panikować
+        let json = r#"{
+        "type": "ArenaDef",
+        "data": { "name": "cache" }
+    }"#;
+    let ct: CommandType = serde_json::from_str(json).expect("deserializacja ArenaDef bez size_spec");
+    match ct {
+        CommandType::ArenaDef { name, size_spec, body } => {
+            assert_eq!(name, "cache");
+            assert!(size_spec.is_none());
+            assert!(body.is_empty());
+        }
+        _ => panic!("Zły wariant"),
+    }
+    }
+
+    #[test]
+    fn test_arena_def_with_size_spec() {
+        let json = r#"{
+        "type": "ArenaDef",
+        "data": { "name": "buf", "size_spec": "512kb" }
+    }"#;
+    let ct: CommandType = serde_json::from_str(json).expect("deserializacja ArenaDef z size_spec");
+    match ct {
+        CommandType::ArenaDef { name, size_spec, .. } => {
+            assert_eq!(name, "buf");
+            assert_eq!(size_spec.as_deref(), Some("512kb"));
+        }
+        _ => panic!("Zły wariant"),
+    }
+    }
+
+    #[test]
+    fn test_program_node_without_span() {
+        // hl-plsa może nie emitować span
+        let json = r#"{
+        "line_num": 10,
+        "is_sudo": false,
+        "content": { "type": "Log", "data": "hello" },
+        "original_text": "log hello"
+    }"#;
+    let node: ProgramNode = serde_json::from_str(json).expect("ProgramNode bez span");
+    assert_eq!(node.span, (0, 0));
+    }
+
+    #[test]
+    fn test_resolve_arena_size_from_spec() {
+        assert_eq!(resolve_arena_size(Some("512kb"), None, "64kb"), "512kb");
+    }
+
+    #[test]
+    fn test_resolve_arena_size_from_sig() {
+        assert_eq!(resolve_arena_size(None, Some("[arena:1mb]"), "64kb"), "1mb");
+    }
+
+    #[test]
+    fn test_resolve_arena_size_fallback() {
+        assert_eq!(resolve_arena_size(None, None, "64kb"), "64kb");
+        assert_eq!(resolve_arena_size(Some(""), Some(""), "64kb"), "64kb");
+    }
+
+    #[test]
+    fn test_assign_local_without_is_raw() {
+        // is_raw powinno defaultować do false
+        let json = r#"{
+        "type": "AssignLocal",
+        "data": { "key": "x", "val": "42" }
+    }"#;
+    let ct: CommandType = serde_json::from_str(json).unwrap();
+    match ct {
+        CommandType::AssignLocal { is_raw, .. } => assert!(!is_raw),
+        _ => panic!(),
+    }
     }
 }
