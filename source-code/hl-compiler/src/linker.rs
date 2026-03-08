@@ -1,5 +1,4 @@
-use crate::ast::{AnalysisResult, LibType};
-use crate::paths::get_libs_base;
+use crate::ast::AnalysisResult;
 use colored::*;
 use std::path::PathBuf;
 use std::process::{exit, Command};
@@ -9,7 +8,12 @@ use std::process::{exit, Command};
 // ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-enum LinkerKind { Mold, Lld, Gold, Bfd }
+enum LinkerKind {
+    Mold,
+    Lld,
+    Gold,
+    Bfd,
+}
 
 impl LinkerKind {
     fn supports_icf(&self) -> bool {
@@ -19,7 +23,12 @@ impl LinkerKind {
         matches!(self, Self::Gold | Self::Lld | Self::Mold)
     }
     fn name(&self) -> &'static str {
-        match self { Self::Mold=>"mold", Self::Lld=>"lld", Self::Gold=>"gold", Self::Bfd=>"ld.bfd" }
+        match self {
+            Self::Mold => "mold",
+            Self::Lld  => "lld",
+            Self::Gold => "gold",
+            Self::Bfd  => "ld.bfd",
+        }
     }
     fn gcc_flag(&self) -> Option<&'static str> {
         match self {
@@ -44,22 +53,31 @@ fn detect_linker() -> LinkerKind {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-        if ok { return kind.clone(); }
+        if ok {
+            return kind.clone();
+        }
     }
     LinkerKind::Bfd
 }
 
 // ─────────────────────────────────────────────────────────────
-// Sciezki do bibliotek
+// Ścieżka do bibliotek runtime HL
+// ~/.hackeros/hacker-lang/libs/
 // ─────────────────────────────────────────────────────────────
 
-/// ~/.hackeros/hacker-lang/libs/ — jedyna lokalizacja libgc.a i libaa.a
-fn hl_libs_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".hackeros/hacker-lang/libs"))
+fn hl_libs_dir() -> PathBuf {
+    dirs::home_dir()
+    .unwrap_or_else(|| PathBuf::from("/tmp"))
+    .join(".hackeros")
+    .join("hacker-lang")
+    .join("libs")
 }
 
 // ─────────────────────────────────────────────────────────────
-// Glowna funkcja linkowania
+// link — główna funkcja linkowania
+//
+// Sygnatura zgodna z wywołaniem w main.rs:
+//   linker::link(&obj_path, &output_name, &ast, args.pie, args.verbose)
 // ─────────────────────────────────────────────────────────────
 
 pub fn link(
@@ -70,20 +88,31 @@ pub fn link(
     verbose:     bool,
 ) {
     if verbose {
-        eprintln!("{} Linkuje: {} -> {}", "[*]".green(), obj_path, output_name);
+        eprintln!("{} Linkuje: {} → {}", "[*]".green(), obj_path, output_name);
     }
 
-    let linker = detect_linker();
+    let linker   = detect_linker();
+    let libs_dir = hl_libs_dir();
+
     if verbose {
         eprintln!("{} Linker: {}", "[i]".blue(), linker.name());
+        eprintln!("{} Libs:   {}", "[i]".blue(), libs_dir.display());
     }
 
     let mut gcc = Command::new("gcc");
-    gcc.arg(obj_path).arg("-o").arg(output_name);
 
-    if let Some(f) = linker.gcc_flag() { gcc.arg(f); }
+    // Plik obiektowy (musi być PRZED -l*)
+    gcc.arg(obj_path);
 
-    // -- Optymalizacje -------------------------------------------
+    // Plik wyjściowy
+    gcc.arg("-o").arg(output_name);
+
+    // Wybrany linker
+    if let Some(f) = linker.gcc_flag() {
+        gcc.arg(f);
+    }
+
+    // ── Optymalizacje ─────────────────────────────────────────
     gcc.arg("-O2")
     .arg("-march=native")
     .arg("-mtune=native")
@@ -91,17 +120,19 @@ pub fn link(
     .arg("-ffunction-sections")
     .arg("-fdata-sections");
 
-    // -- LTO -----------------------------------------------------
+    // ── LTO ──────────────────────────────────────────────────
     if linker.supports_lto_plugin() {
         gcc.arg("-flto=auto").arg("-fuse-linker-plugin");
     } else {
         gcc.arg("-flto");
     }
 
-    // -- PIE -----------------------------------------------------
-    if !pie { gcc.arg("-no-pie"); }
+    // ── PIE ──────────────────────────────────────────────────
+    if !pie {
+        gcc.arg("-no-pie");
+    }
 
-    // -- Flagi linkera -------------------------------------------
+    // ── Flagi linkera ─────────────────────────────────────────
     gcc.arg("-Wl,-O2")
     .arg("-Wl,--gc-sections")
     .arg("-Wl,--as-needed")
@@ -110,44 +141,74 @@ pub fn link(
         gcc.arg("-Wl,--icf=all");
     }
 
-    // -- libgc.a — zawsze ----------------------------------------
-    link_hl_lib(&mut gcc, "libgc.a", verbose);
+    // ── Ścieżka wyszukiwania bibliotek HL ─────────────────────
+    gcc.arg(format!("-L{}", libs_dir.display()));
 
-    // -- libaa.a — tylko gdy :: bloki ----------------------------
-    // Wariant JIT (aa.c -DHL_ARENA_MODE_JIT):
-    //   HlJitArenaScope, hl_jit_arena_enter/exit/alloc/reset/cleanup
-    //   + wspolne API: hl_arena_new/alloc/reset/free/used/capacity
+    // ── Biblioteki runtime HL (kolejność KRYTYCZNA!) ──────────
+    //
+    // Przy static linking ld.bfd przetwarza archiwum .a tylko raz,
+    // od lewej do prawej. Symbol musi być zażądany PRZED archiwum
+    // które go zawiera.
+    //
+    // Łańcuch zależności:
+    //   hl_runtime  ──► gc_malloc  (libgc.a)
+    //   hl_string   ──► gc_malloc  (libgc.a)
+    //   hl_collections ─► gc_malloc (libgc.a)
+    //   libaa.a     ──► (brak zależności od innych HL libs)
+    //   libgc.a     ──► (niezależna)
+    //
+    // Poprawna kolejność:
+    //   -lhl_runtime -lhl_string -lhl_collections -lgc [-laa]
+    //
+    // PRZED naprawą: brak tych flag → 30+ "undefined reference" błędów
+    gcc.arg("-lhl_runtime");
+    gcc.arg("-lhl_string");
+    gcc.arg("-lhl_collections");
+    gcc.arg("-lgc");
+
+    // ── libaa.a — tylko gdy program używa :: bloków ───────────
     if ast.uses_arena() {
         if verbose {
             eprintln!("{} Arena: libaa.a (HL_ARENA_MODE_JIT)", "[i]".blue());
         }
-        link_hl_lib(&mut gcc, "libaa.a", verbose);
+        gcc.arg("-laa");
     }
 
-    // -- Biblioteki z AST (#<bytes/...>) -------------------------
-    link_ast_libs(&mut gcc, ast, verbose);
+    // ── Biblioteki z AST (#<bytes/...>, #<github/...>) ────────
+    link_ast_libs(&mut gcc, ast, &libs_dir, verbose);
 
-    // -- Extern libs (-- [static] path) --------------------------
+    // ── Extern libs (-- [static] path) ────────────────────────
     for (path, is_static) in ast.extern_libs() {
         let clean = path.trim_matches('"');
         if is_static {
+            gcc.arg("-Wl,-Bstatic");
             gcc.arg(format!("-l:{}.a", clean));
+            gcc.arg("-Wl,-Bdynamic");
         } else {
             gcc.arg(format!("-l:{}.so", clean));
         }
     }
 
-    // -- Systemowe -----------------------------------------------
+    // ── Biblioteki systemowe ──────────────────────────────────
     gcc.arg("-lm").arg("-ldl");
-    if ast.uses_async() { gcc.arg("-lpthread"); }
+    if ast.uses_async() {
+        gcc.arg("-lpthread");
+    }
 
-    if verbose { eprintln!("  cmd: {:?}", gcc); }
+    if verbose {
+        let args: Vec<_> = gcc
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+        eprintln!("{} gcc {}", "[cmd]".dimmed(), args.join(" "));
+    }
 
     let status = gcc.status().unwrap_or_else(|e| {
-        eprintln!("{} Nie mozna uruchomic gcc: {}", "[x]".red(), e);
+        eprintln!("{} Nie można uruchomić gcc: {}", "[x]".red(), e);
         exit(1);
     });
 
+    // Zawsze usuń .o (niezależnie od wyniku)
     let _ = std::fs::remove_file(obj_path);
 
     if status.success() {
@@ -155,76 +216,56 @@ pub fn link(
         eprintln!("{} Skompilowano: {}", "[+]".green(), output_name);
     } else {
         eprintln!("{} Linkowanie nieudane", "[x]".red());
+        diagnose_libs(&libs_dir, verbose);
         exit(1);
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// link_ast_libs — biblioteki zadeklarowane w kodzie .hl
 // ─────────────────────────────────────────────────────────────
 
-/// Szuka `lib_name` w ~/.hackeros/hacker-lang/libs/ i dodaje do gcc.
-/// Dla libgc.a jako ostatni ratunek probuje systemowego -lgc.
-fn link_hl_lib(gcc: &mut Command, lib_name: &str, verbose: bool) {
-    if let Some(libs_dir) = hl_libs_dir() {
-        let lib = libs_dir.join(lib_name);
-        if lib.exists() {
-            gcc.arg(&lib);
-            if verbose {
-                eprintln!("{} {}", "[+]".blue(), lib.display());
-            }
-            return;
-        }
-        eprintln!(
-            "{} {} nie znaleziona w: {}\n  Uruchom: cargo build --release",
-            "[!]".yellow(), lib_name, libs_dir.display()
-        );
-    } else {
-        eprintln!("{} Nie mozna ustalic HOME", "[!]".yellow());
-    }
-
-    // Ostatni ratunek tylko dla libgc (ma odpowiednik systemowy)
-    if lib_name == "libgc.a" {
-        eprintln!("  Probuje systemowego -lgc (ostrzezenie: moze byc Boehm GC).");
-        gcc.arg("-lgc");
-    }
-}
-
-fn link_ast_libs(gcc: &mut Command, ast: &AnalysisResult, verbose: bool) {
-    let libs_base = get_libs_base();
+fn link_ast_libs(
+    gcc:      &mut Command,
+    ast:      &AnalysisResult,
+    libs_dir: &std::path::Path,
+    verbose:  bool,
+) {
+    use crate::ast::LibType;
 
     for lib in &ast.libs {
         match lib.lib_type {
-            LibType::Bytes | LibType::Virus => {
-                let lib_dir = libs_base.join("bytes").join(&lib.name);
+            LibType::Bytes | LibType::Virus | LibType::Vira => {
+                let lib_dir = libs_dir.join("bytes").join(&lib.name);
                 let so = lib_dir.join(format!("{}.so", lib.name));
                 let a  = lib_dir.join(format!("{}.a",  lib.name));
                 if so.exists() {
                     gcc.arg(format!("-L{}", lib_dir.display()))
                     .arg(format!("-Wl,-rpath,{}", lib_dir.display()))
                     .arg(format!("-l:{}.so", lib.name));
-                    if verbose { eprintln!("{} lib (dyn): {}", "[+]".blue(), so.display()); }
+                    if verbose {
+                        eprintln!("{} lib (dyn): {}", "[+]".blue(), so.display());
+                    }
                 } else if a.exists() {
                     gcc.arg(a.to_str().unwrap());
-                    if verbose { eprintln!("{} lib (sta): {}", "[+]".blue(), a.display()); }
+                    if verbose {
+                        eprintln!("{} lib (sta): {}", "[+]".blue(), a.display());
+                    }
                 } else if verbose {
                     eprintln!("{} Lib '{}' nie znaleziona", "[!]".yellow(), lib.name);
                 }
             }
             LibType::Github => {
-                let lib_dir = libs_base.join("github").join(&lib.name);
+                let lib_dir = libs_dir.join("github").join(&lib.name);
                 if lib_dir.exists() {
                     gcc.arg(format!("-L{}", lib_dir.display()))
                     .arg(format!("-Wl,-rpath,{}", lib_dir.display()))
                     .arg(format!("-l:{}.so", lib.name));
-                    if verbose { eprintln!("{} lib (gh): {}", "[+]".blue(), lib_dir.display()); }
+                    if verbose {
+                        eprintln!("{} lib (gh): {}", "[+]".blue(), lib_dir.display());
+                    }
                 } else if verbose {
                     eprintln!("{} Github lib '{}' nie znaleziona", "[!]".yellow(), lib.name);
-                }
-            }
-            LibType::Vira => {
-                if verbose {
-                    eprintln!("{} lib/vira: {} (vira package manager)", "[i]".blue(), lib.name);
                 }
             }
             LibType::Source | LibType::Core => {}
@@ -232,10 +273,52 @@ fn link_ast_libs(gcc: &mut Command, ast: &AnalysisResult, verbose: bool) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// diagnose_libs — pokaż które .a brakuje gdy linkowanie padło
+// ─────────────────────────────────────────────────────────────
+
+fn diagnose_libs(libs_dir: &std::path::Path, verbose: bool) {
+    let required = [
+        "libhl_runtime.a",
+        "libhl_string.a",
+        "libhl_collections.a",
+        "libgc.a",
+        "libaa.a",
+    ];
+
+    let mut any_missing = false;
+    for lib in &required {
+        let path = libs_dir.join(lib);
+        if !path.exists() {
+            eprintln!("{} BRAK: {} ({})", "[!]".red(), lib, path.display());
+            any_missing = true;
+        } else if verbose {
+            eprintln!("{} OK:   {}", "[i]".blue(), path.display());
+        }
+    }
+
+    if any_missing {
+        eprintln!(
+            "{} Uruchom 'cargo build' w hl-compiler aby zainstalować biblioteki.",
+            "[!]".yellow()
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// strip_binary — usuń symbole debug z finalnej binarki
+// ─────────────────────────────────────────────────────────────
+
 fn strip_binary(path: &str, verbose: bool) {
-    match Command::new("strip").arg("--strip-all").arg(path).status() {
+    match Command::new("strip")
+    .arg("--strip-all")
+    .arg(path)
+    .status()
+    {
         Ok(s) if s.success() => {
-            if verbose { eprintln!("{} Strip: {}", "[+]".blue(), path); }
+            if verbose {
+                eprintln!("{} Strip: {}", "[+]".blue(), path);
+            }
         }
         _ => {}
     }
