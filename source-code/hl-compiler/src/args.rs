@@ -3,7 +3,7 @@ use clap::Parser;
 /// hl-compiler — .hl → native binary via LLVM + gcc
 #[derive(Parser, Debug)]
 #[command(
-author  = "HackerOS Team <hackeros068@gmail.com>",
+author  = "HackerOS",
 version = "1.8.0",
 about   = "hacker-lang compiler — .hl → native binary via LLVM + gcc"
 )]
