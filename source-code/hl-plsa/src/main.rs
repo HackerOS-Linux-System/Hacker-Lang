@@ -13,7 +13,7 @@ use crate::parser::{parse_file, plugins_root};
 #[derive(ClapParser, Debug)]
 #[command(
 name    = "hl-plsa",
-author  = "HackerOS Team <hackeros068@gmail.com>",
+author  = "HackerOS",
 version = env!("CARGO_PKG_VERSION"),
           about   = "hacker-lang static analyser"
 )]
