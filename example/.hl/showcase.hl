@@ -192,7 +192,7 @@ log "tryb debug aktywny"
     |] deprecated "użyj find_by_id_v2"
     :find_by_id [str -> str] def
       id = $1
-      row = sqlite3.query "SELECT * FROM tasks WHERE id='$id'"
+      row = sqlite3.query "SELECT * FROM tasks WHERE id=$id"
       row ?! "nie znaleziono zadania: $id"
       out $row
     done
@@ -202,7 +202,7 @@ log "tryb debug aktywny"
       cache_key = "task:$id"
       cached = redis.get $cache_key
       ? $cached != "" |> out $cached
-      row = sqlite3.query "SELECT * FROM tasks WHERE id='$id'"
+      row = sqlite3.query "SELECT * FROM tasks WHERE id=$id"
       out $row
     done
 
@@ -220,7 +220,8 @@ log "tryb debug aktywny"
 
     pub :delete [str -> bool] def
       id = $1
-      sqlite3.exec "DELETE FROM tasks WHERE id='$id'"
+      query = "DELETE FROM tasks WHERE id=$id"
+      sqlite3.exec $query
       out true
     done
 
