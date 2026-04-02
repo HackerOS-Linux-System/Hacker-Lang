@@ -1,8 +1,0 @@
-[project]
-name = "hl"
-version = "0.1.0"
-description = "Hacker Lang Interpreter"
-entry = "src/main.hcs"
-is_lib = false
-build_system = "cmake"
-standalone = false
