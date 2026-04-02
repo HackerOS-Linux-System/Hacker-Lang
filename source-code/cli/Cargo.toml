@@ -1,0 +1,29 @@
+[package]
+name = "hl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "hl"
+path = "src/main.rs"
+
+[dependencies]
+hacker-core = { path = "../core" }
+hacker-shell = { path = "../shell" }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+colored.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
