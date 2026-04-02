@@ -1,0 +1,23 @@
+[package]
+name = "hacker-shell"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "hacker_shell"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+hacker-core = { path = "../core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+colored.workspace = true
+rustyline.workspace = true
+nix.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+which.workspace = true
