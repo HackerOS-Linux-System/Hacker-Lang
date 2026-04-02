@@ -1,0 +1,24 @@
+/// Witaj w Hacker Lang!
+;; To jest standardowy program Hello World
+
+% greeting = Witaj, Hackerze!
+% version = 0.1.0
+
+:: @greeting
+:: Hacker Lang wersja @version na HackerOS
+
+;; Definicja prostej funkcji
+: say_hello def
+    :: Hej! Jestem funkcja w Hacker Lang.
+    > uname -a
+done
+
+-- say_hello
+
+? ok
+    :: System dziala poprawnie.
+done
+
+? err
+    :: Blad podczas sprawdzania systemu.
+done
