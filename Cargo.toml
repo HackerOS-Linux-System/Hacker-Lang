@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "core",
-    "shell",
-    "cli",
+    "source-code/core",
+    "source-code/shell",
+    "source-code/cli",
 ]
 resolver = "2"
 
