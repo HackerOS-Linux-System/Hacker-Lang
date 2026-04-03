@@ -1,11 +1,11 @@
 [package]
-name = "hacker-core"
+name = "hl-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
 [lib]
-name = "hacker_core"
+name = "hl_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
