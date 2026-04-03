@@ -1,1 +1,224 @@
+/// ============================================================
+/// Hacker Lang — Showcase wszystkich funkcji
+/// Wersja: 0.1.0 | HackerOS
+/// ============================================================
 
+;; ── 1. KOMENTARZE ─────────────────────────────────────────────
+;; To jest komentarz liniowy (ignorowany przez interpreter)
+
+/// To jest komentarz dokumentacyjny (zachowany w AST)
+
+// To jest komentarz blokowy.
+   Może zajmować wiele linii.
+   Kończy się dwoma backslashami. \\
+
+:: ============================================================
+:: 1. KOMENTARZE — OK
+:: ============================================================
+
+;; ── 2. ZMIENNE ────────────────────────────────────────────────
+
+% name       = HackerOS
+% version    = 0.1.0
+% port       = 8080
+% debug      = true
+% target     = 127.0.0.1
+% output_dir = /tmp/hl_showcase
+% greeting   = Witaj w @name v@version!
+
+:: ============================================================
+:: 2. ZMIENNE
+:: ============================================================
+:: Nazwa systemu: @name
+:: Wersja:        @version
+:: Port:          @port
+:: Debug:         @debug
+:: Target:        @target
+:: Interpolacja:  @greeting
+
+;; ── 3. KOMENDY ────────────────────────────────────────────────
+
+:: ============================================================
+:: 3. KOMENDY
+:: ============================================================
+
+;; > zwykła komenda
+> mkdir -p @output_dir
+
+;; >> komenda z interpolacją zmiennych
+>> echo "test" > @output_dir/test.txt
+
+;; -> komenda w izolowanym namespace (unshare)
+;; (wymaga uprawnień lub konfiguracji jądra)
+;; -> ls /tmp
+
+;; ^> komenda z sudo (odkomentuj jeśli masz sudo)
+;; ^> ls /root
+
+;; >> z interpolacją + zapis do pliku
+>> ls -la @output_dir
+
+:: Komendy wykonane poprawnie.
+
+;; ── 4. ZALEŻNOŚCI SYSTEMOWE ───────────────────────────────────
+
+:: ============================================================
+:: 4. ZALEŻNOŚCI (// pakiet)
+:: ============================================================
+
+// curl
+// which
+
+:: Zależności sprawdzone/zainstalowane.
+
+;; ── 5. IMPORT BIBLIOTEK ───────────────────────────────────────
+
+:: ============================================================
+:: 5. BIBLIOTEKI (# lib lub # lib <- detail)
+:: ============================================================
+
+# std/sys
+# std/net <- ports
+# std/fs
+# std/str
+# std/crypto
+
+:: Informacje systemowe z std/sys:
+:: OS:       @SYS_OS
+:: Kernel:   @SYS_KERNEL
+:: CPU:      @SYS_CPU rdzeni
+:: RAM:      @SYS_MEMTOTAL
+:: Hostname: @SYS_HOSTNAME
+:: Uptime:   @SYS_UPTIME
+
+:: Sieć z std/net:
+:: SSH port: @PORT_SSH
+:: HTTP:     @PORT_HTTP
+:: HTTPS:    @PORT_HTTPS
+
+:: System plików z std/fs:
+:: Home:    @FS_HOME
+:: Tmp:     @FS_TMP
+:: Log:     @FS_VAR_LOG
+
+:: Kryptografia z std/crypto:
+:: SHA256:  @CRYPTO_SHA256_CMD
+
+;; ── 6. FUNKCJE ────────────────────────────────────────────────
+
+:: ============================================================
+:: 6. FUNKCJE (: nazwa def ... done)
+:: ============================================================
+
+: say_hello def
+    :: Hej! Jestem funkcją w Hacker Lang.
+    :: Wywołano z kontekstem: @name
+done
+
+: show_system_info def
+    :: --- Informacje o systemie ---
+    > uname -a
+    :: Architektura: @SYS_ARCH
+done
+
+: create_report def
+    :: Tworzę raport...
+    > mkdir -p @output_dir
+    >> ls -la @output_dir
+    :: Raport gotowy w @output_dir
+done
+
+: check_network def
+    :: Sprawdzam sieć...
+    >> ping -c 1 -W 1 @target
+
+    ? ok
+        :: Host @target jest ONLINE ✓
+    done
+
+    ? err
+        :: Host @target jest OFFLINE ✗
+    done
+done
+
+: nested_example def
+    :: Przykład zagnieżdżonej logiki...
+    > ls /tmp
+
+    ? ok
+        :: /tmp istnieje ✓
+        >> ls @FS_TMP
+    done
+
+    ? err
+        :: Błąd sprawdzania /tmp
+    done
+done
+
+;; ── 7. WYWOŁANIA FUNKCJI ──────────────────────────────────────
+
+:: ============================================================
+:: 7. WYWOŁANIA FUNKCJI (-- nazwa)
+:: ============================================================
+
+-- say_hello
+-- show_system_info
+-- create_report
+-- check_network
+-- nested_example
+
+;; ── 8. LOGIKA ? ok / ? err ────────────────────────────────────
+
+:: ============================================================
+:: 8. LOGIKA WARUNKOWA
+:: ============================================================
+
+> ls /etc/hostname
+
+? ok
+    :: /etc/hostname istnieje ✓
+    > cat /etc/hostname
+done
+
+? err
+    :: /etc/hostname nie istnieje ✗
+done
+
+;; Kolejny test — celowy sukces
+> echo "test" > /dev/null
+
+? ok
+    :: Ostatnia komenda zakończyła się sukcesem (exit 0)
+done
+
+;; ── 9. INTERPOLACJA ZMIENNYCH ─────────────────────────────────
+
+:: ============================================================
+:: 9. INTERPOLACJA ZMIENNYCH W KOMENDACH
+:: ============================================================
+
+% scan_file  = @output_dir/scan_result.txt
+% user_label = scan_@name
+
+:: Zmienna złożona: @scan_file
+:: Label:           @user_label
+
+>> ls @output_dir
+
+;; ── 10. ZMIENNE SYSTEMOWE HL ──────────────────────────────────
+
+:: ============================================================
+:: 10. ZMIENNE SYSTEMOWE WBUDOWANE
+:: ============================================================
+
+:: HL_VERSION: @HL_VERSION
+:: HL_OS:      @HL_OS
+:: HL_SCRIPT:  @HL_SCRIPT
+:: argc:       @argc
+
+;; ── PODSUMOWANIE ──────────────────────────────────────────────
+
+:: ============================================================
+:: SHOWCASE ZAKOŃCZONY POMYŚLNIE
+:: Hacker Lang v@HL_VERSION — HackerOS
+:: ============================================================
