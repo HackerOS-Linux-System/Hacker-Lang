@@ -1,9 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use hacker_core::env::Env;
-use hacker_core::{check_source, run_source};
-use hacker_shell::{run_file, run_interactive};
+use hl_core::diagnostics::{parse_error_to_diag, DiagRenderer, DiagSummary, lint_source};
+use hl_core::env::Env;
+use hl_core::{check_source, run_source};
+use hl_shell::{run_file, run_interactive};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -11,7 +12,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 #[derive(Parser, Debug)]
 #[command(
 name = "hl",
-version = "0.1.0",
+version = "0.0.1",
 author = "HackerOS Team",
 about = "Hacker Lang — the scripting language of HackerOS",
 long_about = r#"
@@ -20,7 +21,7 @@ long_about = r#"
 ███████║██║
 ██╔══██║██║
 ██║  ██║███████╗
-╚═╝  ╚═╝╚══════╝  Hacker Lang v0.1.0
+╚═╝  ╚═╝╚══════╝  Hacker Lang v0.0.2
 
 A powerful scripting language for HackerOS (Debian-based).
 Files use .hl extension. Run 'hl shell' for the interactive REPL.
@@ -87,21 +88,42 @@ fn main() -> Result<()> {
 
         Some(Commands::Check { file }) => {
             let source = std::fs::read_to_string(&file)?;
-            match check_source(&source) {
-                Ok(nodes) => {
-                    println!(
-                        "{} {} ({} nodes)",
-                             "✓".green().bold(),
-                             file.display().to_string().bright_white(),
-                             nodes.len()
-                    );
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("{} {}: {}", "✗".red().bold(), file.display(), e);
-                    std::process::exit(1);
+            let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("<unknown>");
+            let renderer = DiagRenderer::new(filename, &source);
+            let mut exit_code = 0i32;
+
+            // Lint pass
+            let lint_diags = lint_source(&source);
+            if !lint_diags.is_empty() {
+                renderer.emit_all(&lint_diags);
+                let summary = DiagSummary::from_diags(&lint_diags);
+                summary.print();
+                if summary.has_errors() {
+                    exit_code = 2;
                 }
             }
+
+            if exit_code == 0 {
+                // Parse pass
+                match check_source(&source) {
+                    Ok(nodes) => {
+                        println!(
+                            "{} {} ({} węzłów AST, {} ostrzeżeń)",
+                                 "✓".green().bold(),
+                                 file.display().to_string().bright_white(),
+                                 nodes.len(),
+                                 lint_diags.len()
+                        );
+                    }
+                    Err(e) => {
+                        let diag = parse_error_to_diag(&e);
+                        renderer.emit(&diag);
+                        exit_code = 1;
+                    }
+                }
+            }
+
+            std::process::exit(exit_code);
         }
 
         Some(Commands::Ast { file }) => {
@@ -153,7 +175,7 @@ fn main() -> Result<()> {
                 // Inject script path
                 env.set_var(
                     "HL_SCRIPT",
-                    hacker_core::Value::String(file.display().to_string()),
+                    hl_core::Value::String(file.display().to_string()),
                 );
                 let code = run_file(&file, &mut env)?;
                 std::process::exit(code);
@@ -172,12 +194,12 @@ fn main() -> Result<()> {
 fn inject_args(env: &mut Env, args: &[String]) {
     env.set_var(
         "argc",
-        hacker_core::Value::Number(args.len() as f64),
+        hl_core::Value::Number(args.len() as f64),
     );
     for (i, arg) in args.iter().enumerate() {
         env.set_var(
             &format!("arg{}", i),
-                    hacker_core::Value::String(arg.clone()),
+                    hl_core::Value::String(arg.clone()),
         );
     }
 }
@@ -188,7 +210,7 @@ fn print_version() {
         "Hacker Lang".bright_cyan().bold(),
              "v0.1.0".bright_white()
     );
-    println!("{} {}", "Shell:".bright_black(), "hacker-shell v0.1.0");
-    println!("{} {}", "Core: ".bright_black(), "hacker-core v0.1.0");
+    println!("{} {}", "Shell:".bright_black(), "hl-shell v0.0.2");
+    println!("{} {}", "Core: ".bright_black(), "hl-core v0.0.1");
     println!("{} {}", "OS:   ".bright_black(), "HackerOS (Debian-based)");
 }
