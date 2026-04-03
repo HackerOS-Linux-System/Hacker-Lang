@@ -4,8 +4,11 @@ pub mod prompt;
 
 use anyhow::Result;
 use colored::Colorize;
-use hacker_core::env::Env;
-use hacker_core::{run_source, check_source};
+use hl_core::diagnostics::{
+    parse_error_to_diag, DiagRenderer, DiagSummary, lint_source,
+};
+use hl_core::env::Env;
+use hl_core::{check_source, run_source};
 use rustyline::error::ReadlineError;
 use rustyline::{CompletionType, Config, EditMode, Editor};
 use std::path::Path;
@@ -17,7 +20,6 @@ use prompt::Prompt;
 
 const HISTORY_FILE: &str = ".hl_history";
 
-/// Start the interactive Hacker Lang REPL
 pub fn run_interactive(env: &mut Env) -> Result<()> {
     print_banner();
 
@@ -31,7 +33,6 @@ pub fn run_interactive(env: &mut Env) -> Result<()> {
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(helper));
 
-    // Load history
     let history_path = dirs::home_dir()
     .map(|h| h.join(HISTORY_FILE))
     .unwrap_or_else(|| Path::new(HISTORY_FILE).to_path_buf());
@@ -57,18 +58,16 @@ pub fn run_interactive(env: &mut Env) -> Result<()> {
 
                 if trimmed.is_empty() {
                     if in_multiline {
-                        // Execute accumulated multiline block
                         let src = multiline_buf.clone();
                         multiline_buf.clear();
                         in_multiline = false;
-                        execute_line(&src, env);
+                        execute_line(&src, "<repl>", env);
                     }
                     continue;
                 }
 
                 rl.add_history_entry(trimmed).ok();
 
-                // Detect multiline blocks (function definitions, conditionals)
                 if is_block_start(trimmed) {
                     in_multiline = true;
                 }
@@ -81,23 +80,21 @@ pub fn run_interactive(env: &mut Env) -> Result<()> {
                         let src = multiline_buf.clone();
                         multiline_buf.clear();
                         in_multiline = false;
-                        execute_line(&src, env);
+                        execute_line(&src, "<repl>", env);
                     }
                     continue;
                 }
 
-                execute_line(trimmed, env);
+                execute_line(trimmed, "<repl>", env);
             }
 
             Err(ReadlineError::Interrupted) => {
-                // Ctrl-C: cancel current input
                 in_multiline = false;
                 multiline_buf.clear();
                 println!("{}", "^C".bright_red());
             }
 
             Err(ReadlineError::Eof) => {
-                // Ctrl-D: exit
                 println!("\n{}", "Goodbye, hacker.".bright_cyan());
                 break;
             }
@@ -113,14 +110,12 @@ pub fn run_interactive(env: &mut Env) -> Result<()> {
     Ok(())
 }
 
-/// Execute a source string in the shell context
-fn execute_line(source: &str, env: &mut Env) {
+fn execute_line(source: &str, filename: &str, env: &mut Env) {
     let trimmed = source.trim();
     if trimmed.is_empty() {
         return;
     }
 
-    // Try builtins first
     match try_builtin(trimmed, env) {
         BuiltinResult::Handled(code) => {
             env.last_exit = code;
@@ -129,11 +124,25 @@ fn execute_line(source: &str, env: &mut Env) {
         BuiltinResult::NotBuiltin => {}
     }
 
-    // Syntax-check before executing
+    let renderer = DiagRenderer::new(filename, source);
+
+    let lint_diags = lint_source(source);
+    if !lint_diags.is_empty() {
+        renderer.emit_all(&lint_diags);
+        let summary = DiagSummary::from_diags(&lint_diags);
+        if summary.has_errors() {
+            summary.print();
+            env.last_exit = 2;
+            return;
+        }
+        summary.print();
+    }
+
     match check_source(source) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{} {}", "[hl parse]".red().bold(), e);
+            let diag = parse_error_to_diag(&e);
+            renderer.emit(&diag);
             env.last_exit = 2;
             return;
         }
@@ -146,35 +155,57 @@ fn execute_line(source: &str, env: &mut Env) {
             env.last_exit = result.exit_code;
         }
         Err(e) => {
-            eprintln!("{} {}", "[hl error]".red().bold(), e);
+            let diag = hl_core::diagnostics::Diag::error(e.to_string())
+            .with_note("błąd w trakcie wykonania skryptu");
+            renderer.emit(&diag);
             env.last_exit = 1;
         }
     }
 }
 
-/// Run a .hl script file
 pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
     let source = std::fs::read_to_string(path)?;
+    let filename = path.file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or("<unknown>");
+
+    let renderer = DiagRenderer::new(filename, &source);
+
+    let lint_diags = lint_source(&source);
+    if !lint_diags.is_empty() {
+        renderer.emit_all(&lint_diags);
+        let summary = DiagSummary::from_diags(&lint_diags);
+        summary.print();
+        if summary.has_errors() {
+            return Ok(2);
+        }
+    }
+
+    match check_source(&source) {
+        Ok(_) => {}
+        Err(e) => {
+            let diag = parse_error_to_diag(&e);
+            renderer.emit(&diag);
+            return Ok(2);
+        }
+    }
+
     match run_source(&source, env) {
         Ok(result) => Ok(result.exit_code),
         Err(e) => {
-            eprintln!("{} {}", "[hl error]".red().bold(), e);
+            let diag = hl_core::diagnostics::Diag::error(e.to_string())
+            .with_note(format!("błąd runtime w pliku `{}`", filename));
+            renderer.emit(&diag);
             Ok(1)
         }
     }
 }
 
-/// Check if a line starts a block that needs `done`
 fn is_block_start(line: &str) -> bool {
-    // Function definition starts with `: name def`
     if line.starts_with(':') && line.ends_with("def") {
         return true;
     }
-    // Conditional blocks
-    if line.starts_with("? ok") || line.starts_with("? err") {
-        return true;
-    }
-    false
+    line.starts_with("? ok") || line.starts_with("? err")
 }
 
 fn print_banner() {
