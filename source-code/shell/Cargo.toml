@@ -1,15 +1,15 @@
 [package]
-name = "hacker-shell"
+name = "hl-shell"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
 [lib]
-name = "hacker_shell"
+name = "hl_shell"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-hacker-core = { path = "../core" }
+hl-core = { path = "../core" }
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
