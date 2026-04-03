@@ -9,8 +9,8 @@ name = "hl"
 path = "src/main.rs"
 
 [dependencies]
-hacker-core = { path = "../core" }
-hacker-shell = { path = "../shell" }
+hl-core = { path = "../core" }
+hl-shell = { path = "../shell" }
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
