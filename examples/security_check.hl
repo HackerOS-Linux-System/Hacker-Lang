@@ -1,0 +1,139 @@
+/// Security Hardening Check dla HackerOS/Debian
+/// Uzycie: hl security_check.hl (jako root)
+/// Sprawdza podstawowe ustawienia bezpieczenstwa systemu
+
+// netstat
+// ss
+
+# std/sys
+# std/fs
+# std/net
+
+:: hr 56
+:: bold   HL Security Check — HackerOS
+:: hr 56
+
+~> System:   @SYS_OS
+~> Kernel:   @SYS_KERNEL
+~> Hostname: @SYS_HOSTNAME
+
+% wynik_ok  = 0
+% wynik_err = 0
+
+: sprawdz_ssh_config def
+    :: nl
+    :: cyan  [SSH] Konfiguracja SSH...
+
+    :: isfile /etc/ssh/sshd_config
+
+    ? ok
+        :: green SSH config istnieje.
+        >> grep -i "PermitRootLogin" /etc/ssh/sshd_config
+
+        ? ok
+            :: yellow Sprawdz czy PermitRootLogin = no
+        done
+
+        >> grep -i "PasswordAuthentication" /etc/ssh/sshd_config
+
+        ? ok
+            :: yellow Sprawdz czy PasswordAuthentication = no
+        done
+    done
+
+    ? err
+        :: yellow SSH nie jest skonfigurowany.
+    done
+done
+
+: sprawdz_firewall def
+    :: nl
+    :: cyan  [FW] Firewall (ufw/iptables)...
+
+    :: which ufw
+
+    ? ok
+        >> ufw status
+
+        ? ok
+            :: green UFW dostepny.
+        done
+    done
+
+    ? err
+        :: yellow UFW niedostepny — sprawdz iptables.
+        > iptables -L -n
+    done
+done
+
+: sprawdz_otwarte_porty def
+    :: nl
+    :: cyan  [NET] Otwarte porty...
+
+    :: which ss
+
+    ? ok
+        >> ss -tlnp
+
+        ? ok
+            :: yellow Sprawdz powyzsze porty.
+        done
+    done
+
+    ? err
+        :: which netstat
+
+        ? ok
+            >> netstat -tlnp
+        done
+
+        ? err
+            :: yellow Brak ss i netstat.
+        done
+    done
+done
+
+: sprawdz_sudo def
+    :: nl
+    :: cyan  [SUDO] Konfiguracja sudo...
+
+    :: isfile /etc/sudoers
+
+    ? ok
+        :: green /etc/sudoers istnieje.
+        >> grep -v "^#" /etc/sudoers
+    done
+done
+
+: sprawdz_usytkownikow def
+    :: nl
+    :: cyan  [USERS] Uzytkownicy z loginem:
+
+    >> grep -v "nologin\|false" /etc/passwd
+done
+
+: sprawdz_aktualizacje def
+    :: nl
+    :: cyan  [APT] Dostepne aktualizacje bezpieczenstwa...
+
+    :: which apt-get
+
+    ? ok
+        > apt-get -s upgrade
+    done
+done
+
+:: nl
+-- sprawdz_ssh_config
+-- sprawdz_firewall
+-- sprawdz_otwarte_porty
+-- sprawdz_sudo
+-- sprawdz_usytkownikow
+-- sprawdz_aktualizacje
+
+:: nl
+:: hr 56
+:: bold   Sprawdzanie zakonczone.
+:: cyan   Przejrzyj wyniki powyzej i popraw ostrzezenia.
+:: hr 56
+:: nl
