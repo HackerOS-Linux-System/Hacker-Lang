@@ -1,0 +1,71 @@
+/// Demo wszystkich operacji na stringach
+/// Uzycie: hl string_demo.hl
+
+:: hr 50
+:: bold   HL String Operations Demo
+:: hr 50
+:: nl
+
+% tekst      = Hello Hacker Lang World
+% url        = https://hackeros.io/path/file.hl
+% csv_line   = root:x:0:0:root:/root:/bin/bash
+% code       = HL-2025-PROD-001
+
+:: cyan  Podstawowe operacje:
+~> Oryginalny:  @tekst
+:: upper  @tekst
+:: lower  @tekst
+:: len    @tekst
+:: rev    @tekst
+
+:: nl
+:: cyan  Trim:
+% z_bialymi = "   hello world   "
+:: trim @z_bialymi
+
+:: nl
+:: cyan  Wyszukiwanie:
+:: contains   @tekst Hacker
+:: startswith @tekst Hello
+:: endswith   @tekst World
+
+:: nl
+:: cyan  Podzial stringa:
+~> Split po spacji:
+:: split @tekst " "
+
+~> Split URL po slash:
+:: split @url /
+
+~> Split CSV po dwukropku:
+:: split @csv_line :
+
+:: nl
+:: cyan  Repeat:
+:: repeat Ha 5
+:: repeat =  20
+
+:: nl
+:: cyan  Operacje na sciezkach:
+~> URL basename:
+:: basename @url
+
+~> URL dirname:
+:: dirname @url
+
+:: nl
+:: cyan  Typy i zmienne:
+:: type tekst
+:: type HL_VERSION
+:: get  HL_VERSION
+
+:: nl
+:: cyan  Zapis dynamiczny:
+:: set wynik  obliczono
+:: set status aktywny
+~> Wynik: @wynik | Status: @status
+
+:: nl
+:: hr 50
+:: green Demo stringow zakonczone.
+:: hr 50
