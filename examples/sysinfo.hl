@@ -1,0 +1,42 @@
+/// Informacje o systemie HackerOS
+/// Uzycie: hl sysinfo.hl
+
+# std/sys
+# std/net
+# std/fs
+
+:: hr 50
+:: bold   HackerOS System Information
+:: hr 50
+:: nl
+
+:: cyan  System
+~>   OS:       @SYS_OS
+~>   Wersja:   @SYS_VERSION
+~>   Kernel:   @SYS_KERNEL
+~>   Arch:     @SYS_ARCH
+~>   Hostname: @SYS_HOSTNAME
+~>   CPU:      @SYS_CPU rdzeni
+~>   RAM:      @SYS_MEMTOTAL
+~>   Uptime:   @SYS_UPTIME
+
+:: nl
+:: cyan  Siec
+~>   Interfejs: @NET_IFACE
+~>   Lokalny IP: @NET_MYIP
+~>   Gateway:   @NET_GATEWAY
+
+:: nl
+:: cyan  System plikow
+~>   Home:    @FS_HOME
+~>   Tmp:     @FS_TMP
+~>   Log:     @FS_VAR_LOG
+
+:: nl
+:: cyan  Szczegoly (live)
+> uname -a
+> df -h /
+> free -h
+
+:: nl
+:: hr 50
