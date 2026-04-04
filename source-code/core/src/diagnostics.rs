@@ -1,8 +1,3 @@
-//! Hacker Lang — system diagnostyczny
-//!
-//! Obsługuje błędy, ostrzeżenia i podpowiedzi z dokładnym wskazaniem
-//! miejsca w kodzie źródłowym oraz kolorowymi komunikatami.
-
 use colored::Colorize;
 use std::fmt;
 
@@ -337,11 +332,11 @@ pub fn lint_source(source: &str) -> Vec<Diag> {
                     Diag::error("`echo` jest zabronione w blokach komend Hacker Lang")
                     .with_span(Span::new(line_no, col, trimmed.len()))
                     .with_suggestion(if msg.is_empty() {
-                        "użyj: `:: <wiadomość>`".to_string()
+                        "użyj: `~> <wiadomość>`".to_string()
                     } else {
-                        format!("zamień na: `:: {}`", msg)
+                        format!("zamień na: `~> {}`", msg)
                     })
-                    .with_note("operator `::` to jedyny sposób wypisywania tekstu w HL"),
+                    .with_note("operator `~>` to jedyny sposób wypisywania tekstu w HL"),
                 );
             }
         }
@@ -355,8 +350,8 @@ pub fn lint_source(source: &str) -> Vec<Diag> {
                 diags.push(
                     Diag::error("`echo` jest zabronione w blokach komend Hacker Lang")
                     .with_span(Span::new(line_no, col, trimmed.len()))
-                    .with_suggestion(format!("zamień na: `:: {}`", msg))
-                    .with_note("zmienne (@var) są automatycznie interpolowane przez `::`"),
+                    .with_suggestion(format!("zamień na: `~> {}`", msg))
+                    .with_note("zmienne (@var) są automatycznie interpolowane przez `~>`"),
                 );
             }
         }
