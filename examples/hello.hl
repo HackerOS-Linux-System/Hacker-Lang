@@ -1,24 +1,16 @@
 /// Witaj w Hacker Lang!
-;; To jest standardowy program Hello World
+/// Pierwszy program — Hello World
 
-% greeting = Witaj, Hackerze!
+% name    = HackerOS
 % version = 0.1.0
 
-:: @greeting
-:: Hacker Lang wersja @version na HackerOS
+:: hr 40
+:: bold  Hacker Lang v@version
+:: hr 40
 
-;; Definicja prostej funkcji
-: say_hello def
-    :: Hej! Jestem funkcja w Hacker Lang.
-    > uname -a
-done
+~> Witaj w @name!
+~> To jest Hacker Lang — jezyk skryptowy HackerOS.
 
--- say_hello
-
-? ok
-    :: System dziala poprawnie.
-done
-
-? err
-    :: Blad podczas sprawdzania systemu.
-done
+:: nl
+:: green  Wszystko dziala poprawnie.
+:: nl
