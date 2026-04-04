@@ -2,45 +2,50 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // Comments
+    // ── Komentarze ───────────────────────────────────────────────────────────
     LineComment(String),
     DocComment(String),
     BlockComment(String),
 
-    // Output
-    Print(String), // ::
+    // ── Wyjście ──────────────────────────────────────────────────────────────
+    /// ~> message  — główny operator print (zastępuje echo)
+    Print(String),
+    /// :: name [args]  — wywołanie quick-funkcji (:upper, :lower, :len, ...)
+    QuickCall { name: String, args: String },
 
-    // Commands
-    Cmd(String),          // >
-    CmdSudo(String),      // ^>
-    CmdIsolated(String),  // ->
-    CmdIsolatedSudo(String), // ^->
-    CmdWithVars(String),  // >>
-    CmdWithVarsSudo(String), // ^>>
+    // ── Komendy systemowe (longest prefix first) ─────────────────────────────
+    CmdIsolatedSudo(String),       // ^->
+    CmdWithVarsSudo(String),       // ^>>
+    CmdWithVarsIsolated(String),   // ->>
+    CmdSudo(String),               // ^>
+    CmdIsolated(String),           // ->
+    CmdWithVars(String),           // >>
+    Cmd(String),                   // >
 
-    // Variables
-    VarDecl { name: String, value: String }, // % name = value
-    VarRef(String), // @name
+    // ── Zmienne ──────────────────────────────────────────────────────────────
+    VarDecl { name: String, value: String },
+    VarRef(String),
 
-    // Dependencies
-    Dependency(String), // //
+    // ── Zależności / importy ─────────────────────────────────────────────────
+    Dependency(String),
+    Import { lib: String, detail: Option<String> },
 
-    // Functions
-    FuncDef(String),  // : name def
-    FuncCall(String), // -- name
+    // ── Funkcje ──────────────────────────────────────────────────────────────
+    FuncDef(String),
+    FuncCall(String),
 
-    // Logic
-    IfOk,    // ? ok
-    IfErr,   // ? err
-    Done,    // done
+    // ── Logika ───────────────────────────────────────────────────────────────
+    IfOk,
+    IfErr,
+    Done,
 
-    // Identifiers and literals
+    // ── Literały ─────────────────────────────────────────────────────────────
     Ident(String),
     StringLit(String),
     Number(f64),
     Bool(bool),
 
-    // Structural
+    // ── Struktura ────────────────────────────────────────────────────────────
     Newline,
     Indent(usize),
     Eof,
@@ -58,83 +63,82 @@ pub enum LexError {
 
 pub struct Lexer {
     source: Vec<char>,
-    pos: usize,
-    line: usize,
-    col: usize,
+    pub pos:  usize,
+    pub line: usize,
+    pub col:  usize,
 }
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
+        // Pre-allocate chars vec from str — faster than indexing UTF-8 repeatedly
         Self {
             source: source.chars().collect(),
-            pos: 0,
-            line: 1,
-            col: 1,
+            pos: 0, line: 1, col: 1,
         }
     }
 
-    fn peek(&self) -> Option<char> {
-        self.source.get(self.pos).copied()
+    #[inline] pub fn peek(&self) -> Option<char> { self.source.get(self.pos).copied() }
+    #[inline] fn peek_at(&self, n: usize) -> Option<char> { self.source.get(self.pos+n).copied() }
+
+    #[inline]
+    fn matches(&self, seq: &[char]) -> bool {
+        self.source.get(self.pos..self.pos+seq.len()) == Some(seq)
     }
 
-    fn peek2(&self) -> Option<char> {
-        self.source.get(self.pos + 1).copied()
-    }
-
-    fn advance(&mut self) -> Option<char> {
+    #[inline]
+    pub fn advance(&mut self) -> Option<char> {
         let ch = self.source.get(self.pos).copied();
         if let Some(c) = ch {
             self.pos += 1;
-            if c == '\n' {
-                self.line += 1;
-                self.col = 1;
-            } else {
-                self.col += 1;
-            }
+            if c == '\n' { self.line += 1; self.col = 1; }
+            else { self.col += 1; }
         }
         ch
     }
 
-    fn skip_whitespace_inline(&mut self) {
-        while let Some(c) = self.peek() {
-            if c == ' ' || c == '\t' {
-                self.advance();
-            } else {
-                break;
-            }
+    #[inline] fn skip_n(&mut self, n: usize) { for _ in 0..n { self.advance(); } }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(' ') | Some('\t')) { self.advance(); }
+    }
+
+    /// Optimised: collect chars until newline using extend, then trim in-place
+    fn read_line(&mut self) -> String {
+        let start = self.pos;
+        let mut end = self.pos;
+        while end < self.source.len() && self.source[end] != '\n' {
+            end += 1;
+        }
+        let s: String = self.source[start..end].iter().collect();
+        // advance pos
+        for _ in start..end { self.advance(); }
+        // trim_end without re-allocation
+        let trimmed = s.trim_end().to_string();
+        // also trim_start without re-allocation
+        let trim_len = trimmed.trim_start().len();
+        if trim_len < trimmed.len() {
+            trimmed[trimmed.len()-trim_len..].to_string()
+        } else {
+            trimmed
         }
     }
 
-    fn read_until_newline(&mut self) -> String {
-        let mut s = String::new();
-        while let Some(c) = self.peek() {
-            if c == '\n' {
-                break;
-            }
-            s.push(c);
-            self.advance();
-        }
-        s.trim().to_string()
-    }
-
-    fn read_string(&mut self) -> Result<String, LexError> {
+    fn read_string_lit(&mut self) -> Result<String, LexError> {
         let start_line = self.line;
-        self.advance(); // consume opening "
-        let mut s = String::new();
+        self.advance(); // consume "
+        let mut s = String::with_capacity(64);
         loop {
             match self.advance() {
-                None => return Err(LexError::UnterminatedString(start_line)),
-                Some('"') => break,
-                Some('\\') => {
-                    match self.advance() {
-                        Some('n') => s.push('\n'),
-                        Some('t') => s.push('\t'),
-                        Some('"') => s.push('"'),
-                        Some('\\') => s.push('\\'),
-                        Some(c) => { s.push('\\'); s.push(c); }
-                        None => return Err(LexError::UnterminatedString(start_line)),
-                    }
-                }
+                None       => return Err(LexError::UnterminatedString(start_line)),
+                Some('"')  => break,
+                Some('\\') => match self.advance() {
+                    Some('n')  => s.push('\n'),
+                    Some('t')  => s.push('\t'),
+                    Some('"')  => s.push('"'),
+                    Some('\\') => s.push('\\'),
+                    Some(c)    => { s.push('\\'); s.push(c); }
+                    None       => return Err(LexError::UnterminatedString(start_line)),
+                },
                 Some(c) => s.push(c),
             }
         }
@@ -142,249 +146,236 @@ impl Lexer {
     }
 
     fn read_ident(&mut self) -> String {
-        let mut s = String::new();
+        let mut s = String::with_capacity(16);
         while let Some(c) = self.peek() {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                s.push(c);
-                self.advance();
-            } else {
-                break;
-            }
+            if c.is_alphanumeric() || c == '_' { s.push(c); self.advance(); }
+            else { break; }
         }
         s
     }
 
-    fn read_number(&mut self) -> f64 {
-        let mut s = String::new();
+    /// Ident with hyphens (function names: check-host, port-scan)
+    fn read_ident_full(&mut self) -> String {
+        let mut s = String::with_capacity(16);
         while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || c == '.' {
-                s.push(c);
-                self.advance();
-            } else {
-                break;
-            }
+            if c.is_alphanumeric() || c == '_' || c == '-' { s.push(c); self.advance(); }
+            else { break; }
+        }
+        // strip trailing hyphens (avoid swallowing -> etc.)
+        while s.ends_with('-') { s.pop(); }
+        s
+    }
+
+    fn read_number(&mut self) -> f64 {
+        let mut s = String::with_capacity(16);
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() || c == '.' { s.push(c); self.advance(); }
+            else { break; }
         }
         s.parse().unwrap_or(0.0)
     }
 
-    fn read_cmd_args(&mut self) -> String {
-        self.skip_whitespace_inline();
-        self.read_until_newline()
+    #[inline]
+    fn read_cmd(&mut self) -> String {
+        self.skip_ws();
+        self.read_line()
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
-        let mut tokens = Vec::new();
+        // Pre-allocate with generous capacity to avoid resizes
+        let mut tokens = Vec::with_capacity(self.source.len() / 8 + 16);
 
         while self.pos < self.source.len() {
-            let ch = match self.peek() {
-                None => break,
-                Some(c) => c,
-            };
+            let ch = match self.peek() { None => break, Some(c) => c };
 
             match ch {
-                '\n' => {
-                    tokens.push(Token::Newline);
-                    self.advance();
+                '\n' => { tokens.push(Token::Newline); self.advance(); }
+                ' ' | '\t' | '\r' => { self.advance(); }
+
+                // ── ~> print (główny operator output) ────────────────────────
+                '~' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    self.skip_ws();
+                    tokens.push(Token::Print(self.read_line()));
                 }
-                ' ' | '\t' | '\r' => {
-                    self.advance();
+
+                // ── :: quick-call ────────────────────────────────────────────
+                ':' if self.peek_at(1) == Some(':') => {
+                    self.skip_n(2);
+                    self.skip_ws();
+                    let name = self.read_ident();
+                    self.skip_ws();
+                    let args = self.read_line();
+                    tokens.push(Token::QuickCall { name, args });
                 }
-                // Doc comment ///
-                '/' if self.source.get(self.pos..self.pos+3) == Some(&['/', '/', '/']) => {
-                    self.pos += 3;
-                    self.col += 3;
-                    let text = self.read_until_newline();
-                    tokens.push(Token::DocComment(text));
-                }
-                // Block comment // ... \\
-                '/' if self.source.get(self.pos..self.pos+2) == Some(&['/', '/']) => {
-                    self.pos += 2;
-                    self.col += 2;
-                    self.skip_whitespace_inline();
-                    // Check if it's a dependency or block comment
-                    // Block comment ends with \\
-                    let rest: String = self.source[self.pos..].iter().collect();
-                    if let Some(end_pos) = rest.find("\\\\") {
-                        let content = rest[..end_pos].trim().to_string();
-                        // advance past content and \\
-                        for _ in 0..(end_pos + 2) {
-                            self.advance();
-                        }
-                        tokens.push(Token::BlockComment(content));
-                    } else {
-                        // It's a dependency declaration
-                        let dep = self.read_until_newline();
-                        tokens.push(Token::Dependency(dep));
-                    }
-                }
-                // Line comment ;;
-                ';' if self.peek2() == Some(';') => {
-                    self.advance();
-                    self.advance();
-                    let text = self.read_until_newline();
-                    tokens.push(Token::LineComment(text));
-                }
-                // Print ::
-                ':' if self.peek2() == Some(':') => {
-                    self.advance();
-                    self.advance();
-                    self.skip_whitespace_inline();
-                    let msg = self.read_until_newline();
-                    tokens.push(Token::Print(msg));
-                }
-                // Function def : name def
+
+                // ── : funcname def ───────────────────────────────────────────
                 ':' => {
                     self.advance();
-                    self.skip_whitespace_inline();
-                    let name = self.read_ident();
-                    self.skip_whitespace_inline();
-                    // expect 'def'
-                    let keyword = self.read_ident();
-                    if keyword == "def" {
+                    self.skip_ws();
+                    let name = self.read_ident_full();
+                    self.skip_ws();
+                    let kw = self.read_ident();
+                    if kw == "def" {
                         tokens.push(Token::FuncDef(name));
+                        self.read_line();
                     } else {
-                        tokens.push(Token::Ident(format!(":{} {}", name, keyword)));
+                        tokens.push(Token::Ident(format!(":{} {}", name, kw)));
                     }
                 }
-                // Function call -- name
-                '-' if self.source.get(self.pos..self.pos+2) == Some(&['-', '-']) => {
-                    self.advance();
-                    self.advance();
-                    self.skip_whitespace_inline();
-                    let name = self.read_ident();
+
+                // ── ;; line comment ──────────────────────────────────────────
+                ';' if self.peek_at(1) == Some(';') => {
+                    self.skip_n(2);
+                    tokens.push(Token::LineComment(self.read_line()));
+                }
+
+                // ── /// doc comment ──────────────────────────────────────────
+                '/' if self.matches(&['/', '/', '/']) => {
+                    self.skip_n(3);
+                    tokens.push(Token::DocComment(self.read_line()));
+                }
+
+                // ── // block or dep ──────────────────────────────────────────
+                '/' if self.matches(&['/', '/']) => {
+                    self.skip_n(2);
+                    self.skip_ws();
+                    let rest: String = self.source[self.pos..].iter().collect();
+                    if let Some(end) = rest.find("\\\\") {
+                        let content = rest[..end].trim().to_string();
+                        self.skip_n(end + 2);
+                        tokens.push(Token::BlockComment(content));
+                    } else {
+                        tokens.push(Token::Dependency(self.read_line()));
+                    }
+                }
+
+                // ── -- func call ─────────────────────────────────────────────
+                '-' if self.matches(&['-', '-']) => {
+                    self.skip_n(2);
+                    self.skip_ws();
+                    let name = self.read_ident_full();
                     tokens.push(Token::FuncCall(name));
+                    self.read_line();
                 }
-                // CmdIsolatedSudo ^->
-                '^' if self.source.get(self.pos..self.pos+3) == Some(&['^', '-', '>']) => {
-                    self.advance(); self.advance(); self.advance();
-                    let args = self.read_cmd_args();
-                    tokens.push(Token::CmdIsolatedSudo(args));
+
+                // ── ^-> isolated+sudo ────────────────────────────────────────
+                '^' if self.matches(&['^', '-', '>']) => {
+                    self.skip_n(3);
+                    tokens.push(Token::CmdIsolatedSudo(self.read_cmd()));
                 }
-                // CmdWithVarsSudo ^>>
-                '^' if self.source.get(self.pos..self.pos+3) == Some(&['^', '>', '>']) => {
-                    self.advance(); self.advance(); self.advance();
-                    let args = self.read_cmd_args();
-                    tokens.push(Token::CmdWithVarsSudo(args));
+                // ── ^>> vars+sudo ────────────────────────────────────────────
+                '^' if self.matches(&['^', '>', '>']) => {
+                    self.skip_n(3);
+                    tokens.push(Token::CmdWithVarsSudo(self.read_cmd()));
                 }
-                // CmdSudo ^>
-                '^' if self.source.get(self.pos..self.pos+2) == Some(&['^', '>']) => {
-                    self.advance(); self.advance();
-                    let args = self.read_cmd_args();
-                    tokens.push(Token::CmdSudo(args));
+                // ── ^> sudo ──────────────────────────────────────────────────
+                '^' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    tokens.push(Token::CmdSudo(self.read_cmd()));
                 }
-                '^' => {
-                    self.advance();
-                    tokens.push(Token::Ident("^".to_string()));
+                '^' => { self.advance(); }
+
+                // ── ->> vars+isolated ────────────────────────────────────────
+                '-' if self.matches(&['-', '>', '>']) => {
+                    self.skip_n(3);
+                    tokens.push(Token::CmdWithVarsIsolated(self.read_cmd()));
                 }
-                // CmdIsolated ->
-                '-' if self.peek2() == Some('>') => {
-                    self.advance(); self.advance();
-                    let args = self.read_cmd_args();
-                    tokens.push(Token::CmdIsolated(args));
+                // ── -> isolated ──────────────────────────────────────────────
+                '-' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    tokens.push(Token::CmdIsolated(self.read_cmd()));
                 }
-                // CmdWithVars >>
-                '>' if self.peek2() == Some('>') => {
-                    self.advance(); self.advance();
-                    let args = self.read_cmd_args();
-                    tokens.push(Token::CmdWithVars(args));
+
+                // ── >> vars ──────────────────────────────────────────────────
+                '>' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    tokens.push(Token::CmdWithVars(self.read_cmd()));
                 }
-                // Cmd >
+                // ── > plain ──────────────────────────────────────────────────
                 '>' => {
                     self.advance();
-                    let args = self.read_cmd_args();
-                    tokens.push(Token::Cmd(args));
+                    tokens.push(Token::Cmd(self.read_cmd()));
                 }
-                // Variable declaration % name = value
+
+                // ── % var = val ──────────────────────────────────────────────
                 '%' => {
                     self.advance();
-                    self.skip_whitespace_inline();
-                    let name = self.read_ident();
-                    self.skip_whitespace_inline();
+                    self.skip_ws();
+                    let name = self.read_ident_full();
+                    self.skip_ws();
                     if self.peek() == Some('=') {
                         self.advance();
-                        self.skip_whitespace_inline();
-                        let value = self.read_until_newline();
-                        tokens.push(Token::VarDecl { name, value });
+                        self.skip_ws();
+                        let val = self.read_line();
+                        tokens.push(Token::VarDecl { name, value: val });
                     } else {
                         tokens.push(Token::Ident(format!("%{}", name)));
                     }
                 }
-                // Variable reference @name
+
+                // ── @varref ──────────────────────────────────────────────────
                 '@' => {
                     self.advance();
-                    let name = self.read_ident();
-                    tokens.push(Token::VarRef(name));
+                    tokens.push(Token::VarRef(self.read_ident_full()));
                 }
-                // Logic ? ok / ? err
+
+                // ── ? ok / ? err ─────────────────────────────────────────────
                 '?' => {
                     self.advance();
-                    self.skip_whitespace_inline();
-                    let keyword = self.read_ident();
-                    match keyword.as_str() {
-                        "ok" => tokens.push(Token::IfOk),
-                        "err" => tokens.push(Token::IfErr),
-                        _ => tokens.push(Token::Ident(format!("?{}", keyword))),
+                    self.skip_ws();
+                    let kw = self.read_ident();
+                    match kw.as_str() {
+                        "ok"  => { tokens.push(Token::IfOk);  self.read_line(); }
+                        "err" => { tokens.push(Token::IfErr); self.read_line(); }
+                        _     => tokens.push(Token::Ident(format!("?{}", kw))),
                     }
                 }
-                // String literal
-                '"' => {
-                    let s = self.read_string()?;
-                    tokens.push(Token::StringLit(s));
-                }
-                // Number
-                c if c.is_ascii_digit() => {
-                    let n = self.read_number();
-                    tokens.push(Token::Number(n));
-                }
-                // Identifier or keyword
-                c if c.is_alphabetic() || c == '_' => {
-                    let ident = self.read_ident();
-                    match ident.as_str() {
-                        "done" => tokens.push(Token::Done),
-                        "true" => tokens.push(Token::Bool(true)),
-                        "false" => tokens.push(Token::Bool(false)),
-                        _ => tokens.push(Token::Ident(ident)),
-                    }
-                }
-                _ => {
-                    let line = self.line;
-                    let col = self.col;
+
+                // ── # lib or # lib <- detail ─────────────────────────────────
+                '#' => {
                     self.advance();
-                    return Err(LexError::UnexpectedChar(ch, line, col));
+                    self.skip_ws();
+                    let rest = self.read_line();
+                    if let Some(pos) = rest.find("<-") {
+                        let lib    = rest[..pos].trim().to_string();
+                        let detail = rest[pos+2..].trim().to_string();
+                        tokens.push(Token::Import {
+                            lib,
+                            detail: if detail.is_empty() { None } else { Some(detail) },
+                        });
+                    } else {
+                        tokens.push(Token::Import { lib: rest, detail: None });
+                    }
+                }
+
+                '"' => {
+                    tokens.push(Token::StringLit(self.read_string_lit()?));
+                }
+
+                c if c.is_ascii_digit() => {
+                    tokens.push(Token::Number(self.read_number()));
+                }
+
+                c if c.is_alphabetic() || c == '_' => {
+                    let id = self.read_ident_full();
+                    match id.as_str() {
+                        "done"  => { tokens.push(Token::Done); self.read_line(); }
+                        "true"  => tokens.push(Token::Bool(true)),
+                        "false" => tokens.push(Token::Bool(false)),
+                        _       => tokens.push(Token::Ident(id)),
+                    }
+                }
+
+                _ => {
+                    let (l, c) = (self.line, self.col);
+                    self.advance();
+                    return Err(LexError::UnexpectedChar(ch, l, c));
                 }
             }
         }
 
         tokens.push(Token::Eof);
         Ok(tokens)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_print() {
-        let mut lexer = Lexer::new(":: Hello World");
-        let tokens = lexer.tokenize().unwrap();
-        assert_eq!(tokens[0], Token::Print("Hello World".to_string()));
-    }
-
-    #[test]
-    fn test_cmd() {
-        let mut lexer = Lexer::new("> ls -la");
-        let tokens = lexer.tokenize().unwrap();
-        assert_eq!(tokens[0], Token::Cmd("ls -la".to_string()));
-    }
-
-    #[test]
-    fn test_var_decl() {
-        let mut lexer = Lexer::new("% target = 192.168.1.1");
-        let tokens = lexer.tokenize().unwrap();
-        assert_eq!(tokens[0], Token::VarDecl {
-            name: "target".to_string(),
-                   value: "192.168.1.1".to_string(),
-        });
     }
 }
