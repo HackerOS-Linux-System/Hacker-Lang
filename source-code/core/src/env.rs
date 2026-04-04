@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use rustc_hash::FxHashMap;
 use crate::ast::{Node, StringPart};
 
 /// Resolved runtime value
@@ -13,6 +12,7 @@ pub enum Value {
 }
 
 impl Value {
+    #[inline]
     pub fn to_string_val(&self) -> String {
         match self {
             Value::String(s) => s.clone(),
@@ -21,71 +21,96 @@ impl Value {
                 else { format!("{}", n) }
             }
             Value::Bool(b) => b.to_string(),
-            Value::Nil => String::new(),
+            Value::Nil     => String::new(),
+        }
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Value::String(s) => s.as_str(),
+            _ => "",
         }
     }
 }
 
+/// Function body stored behind Arc to avoid cloning on every call
+pub type FuncBody = Arc<Vec<Node>>;
+
 /// Execution environment: variables + defined functions
-#[derive(Debug, Clone)]
+/// Uses FxHashMap (rustc-hash) — ~30% faster than std HashMap for short string keys
 pub struct Env {
-    pub vars: HashMap<String, Value>,
-    pub functions: HashMap<String, Vec<Node>>,
+    pub vars:      FxHashMap<String, Value>,
+    pub functions: FxHashMap<String, FuncBody>,
     pub last_exit: i32,
+    /// Scratch buffer reused for string interpolation — avoids repeated allocs
+    interp_buf: String,
 }
 
 impl Default for Env {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Env {
     pub fn new() -> Self {
-        let mut vars = HashMap::new();
-        // Inject some useful defaults
-        vars.insert("HL_VERSION".to_string(), Value::String("0.1.0".to_string()));
-        vars.insert("HL_OS".to_string(), Value::String("HackerOS/Debian".to_string()));
+        let mut vars: FxHashMap<String, Value> = FxHashMap::default();
+        vars.insert("HL_VERSION".into(), Value::String("0.1.0".into()));
+        vars.insert("HL_OS".into(),      Value::String("HackerOS/Debian".into()));
         Self {
             vars,
-            functions: HashMap::new(),
+            functions: FxHashMap::default(),
             last_exit: 0,
+            interp_buf: String::with_capacity(256),
         }
     }
 
+    #[inline]
     pub fn set_var(&mut self, name: &str, val: Value) {
         self.vars.insert(name.to_string(), val);
     }
 
-    pub fn get_var(&self, name: &str) -> Value {
-        self.vars.get(name).cloned().unwrap_or(Value::Nil)
+    #[inline]
+    pub fn get_var(&self, name: &str) -> &Value {
+        static NIL: Value = Value::Nil;
+        self.vars.get(name).unwrap_or(&NIL)
     }
 
-    pub fn resolve_string_parts(&self, parts: &[StringPart]) -> String {
-        parts.iter().map(|p| match p {
-            StringPart::Literal(s) => s.clone(),
-                         StringPart::Var(v) => self.get_var(v).to_string_val(),
-        }).collect()
+    /// Resolve StringParts into a String — reuses internal buffer
+    pub fn resolve_string_parts(&mut self, parts: &[StringPart]) -> String {
+        self.interp_buf.clear();
+        for part in parts {
+            match part {
+                StringPart::Literal(s) => self.interp_buf.push_str(s),
+                StringPart::Var(v)     => {
+                    let val = self.vars.get(v.as_str());
+                    match val {
+                        Some(Value::String(s)) => self.interp_buf.push_str(s),
+                        Some(v)                => self.interp_buf.push_str(&v.to_string_val()),
+                        None                   => {} // @undefined = ""
+                    }
+                }
+            }
+        }
+        self.interp_buf.clone()
     }
 
     /// Interpolate @varname references in a raw string
-    pub fn interpolate(&self, raw: &str) -> String {
+    pub fn interpolate(&mut self, raw: &str) -> String {
+        if !raw.contains('@') {
+            return raw.to_string(); // fast path: no interpolation needed
+        }
         let parts = crate::ast::parse_string_parts(raw);
         self.resolve_string_parts(&parts)
     }
 
+    #[inline]
     pub fn define_function(&mut self, name: String, body: Vec<Node>) {
-        self.functions.insert(name, body);
+        self.functions.insert(name, Arc::new(body));
     }
 
-    pub fn get_function(&self, name: &str) -> Option<Vec<Node>> {
+    /// Returns Arc clone — cheap, no deep copy of Vec<Node>
+    #[inline]
+    pub fn get_function(&self, name: &str) -> Option<FuncBody> {
         self.functions.get(name).cloned()
     }
-}
-
-/// Shared environment for use across async tasks
-pub type SharedEnv = Arc<RwLock<Env>>;
-
-pub fn new_shared_env() -> SharedEnv {
-    Arc::new(RwLock::new(Env::new()))
 }
