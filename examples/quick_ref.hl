@@ -1,0 +1,114 @@
+/// Hacker Lang — Quick Reference Card
+/// Uruchom aby zobaczyc wszystkie operatory i quick-functions
+/// Uzycie: hl quick_ref.hl
+
+:: hr 60
+:: bold   HACKER LANG — QUICK REFERENCE CARD
+:: hr 60
+:: nl
+
+:: cyan  WYJSCIE:
+~> ~> message          wypisz tekst (interpoluje @zmienne)
+~> :: fn [args]        quick-function
+
+:: nl
+:: cyan  KOMENDY:
+~> >   cmd             zwykla komenda
+~> ^>  cmd             z sudo
+~> ->  cmd             izolowany namespace
+~> ^-> cmd             izolowany + sudo
+~> >>  cmd @var        z interpolacja zmiennych
+~> ^>> cmd @var        z interp + sudo
+~> ->> cmd @var        z interp + izolacja
+
+:: nl
+:: cyan  ZMIENNE:
+~> % name = value      deklaracja
+~> @name               uzycie / interpolacja
+
+:: nl
+:: cyan  FUNKCJE:
+~> : nazwa def         definicja
+~>     ...
+~> done
+~> -- nazwa            wywolanie
+
+:: nl
+:: cyan  LOGIKA:
+~> ? ok  ... done      jesli exit 0
+~> ? err ... done      jesli exit != 0
+
+:: nl
+:: cyan  BIBLIOTEKI:
+~> // pakiet           zaleznosc (auto-install)
+~> # std/net           importuj biblioteke
+~> # std/net <- ports  importuj modul
+
+:: nl
+:: cyan  KOMENTARZE:
+~> ;; tekst            liniowy
+~> /// tekst           dokumentacyjny
+~> // tekst \\         blokowy
+
+:: nl
+:: hr 60
+:: cyan  QUICK FUNCTIONS (:: nazwa [args]):
+:: hr 60
+
+:: nl
+:: yellow STRINGI:
+~> :: upper @t   :: lower @t   :: len @t    :: trim @t
+~> :: rev @t     :: repeat @t N             :: split @t SEP
+~> :: contains @t pat           :: startswith @t pat
+~> :: endswith @t pat           :: words @t  :: lines @t
+
+:: nl
+:: yellow MATEMATYKA:
+~> :: abs N     :: ceil N    :: floor N   :: round N
+~> :: max A B   :: min A B   :: rand
+
+:: nl
+:: yellow SYSTEM:
+~> :: date      :: time      :: pid       :: which bin
+~> :: env VAR
+
+:: nl
+:: yellow PLIKI:
+~> :: exists path    :: isdir path     :: isfile path
+~> :: basename path  :: dirname path   :: read path
+
+:: nl
+:: yellow ZMIENNE:
+~> :: set name val   :: get name   :: type name   :: unset name
+
+:: nl
+:: yellow OUTPUT:
+~> :: nl       :: hr [N]    :: bold text
+~> :: red t    :: green t   :: yellow t  :: cyan t
+
+:: nl
+:: hr 60
+:: cyan  BIBLIOTEKI WBUDOWANE:
+:: hr 60
+
+~> # std/sys     SYS_OS SYS_KERNEL SYS_ARCH SYS_CPU SYS_MEMTOTAL
+~>               SYS_HOSTNAME SYS_UPTIME SYS_VERSION
+~> # std/net     NET_IFACE NET_MYIP NET_GATEWAY NET_LOCALHOST
+~> # std/net <- ports  PORT_SSH PORT_HTTP PORT_HTTPS PORT_FTP ...
+~> # std/fs      FS_HOME FS_TMP FS_ETC FS_VAR_LOG FS_PROC
+~> # std/crypto  CRYPTO_SHA256_CMD CRYPTO_MD5_CMD CRYPTO_GPG_CMD
+~> # std/str     STR_NEWLINE STR_TAB STR_EMPTY
+~> # std/proc    PROC_SELF_PID PROC_PPID
+~> # owner/repo  GitHub (auto git clone do ~/.hl/libs/)
+
+:: nl
+:: hr 60
+:: bold   hl shell  -  interaktywna powloka (zamiennik bash)
+:: bold   hl repl   -  REPL do testowania kodu
+:: bold   hl run    -  uruchom skrypt .hl
+:: bold   hl check  -  sprawdz skladnie
+:: bold   hl ast    -  wydrukuj AST (JSON)
+:: bold   hl lib    -  menedzer bibliotek
+:: bold   hl clean  -  wyczysc cache
+:: hr 60
+:: nl
