@@ -1,0 +1,98 @@
+/// Analizator logow systemowych
+/// Uzycie: hl log_analyzer.hl
+
+# std/sys
+# std/fs
+
+% log_file   = /var/log/syslog
+% out_dir    = /tmp/hl_logs
+% max_lines  = 50
+
+:: hr 52
+:: bold   HL Log Analyzer
+:: hr 52
+
+~> Plik logu: @log_file
+~> System:    @SYS_OS
+
+: sprawdz_log def
+    :: isfile @log_file
+
+    ? ok
+        :: green Log dostepny: @log_file
+    done
+
+    ? err
+        :: yellow Brak @log_file — probuje alternatywy...
+
+        % log_file = /var/log/messages
+
+        :: isfile @log_file
+
+        ? ok
+            :: green Znaleziono: @log_file
+        done
+
+        ? err
+            :: yellow Probuje journalctl...
+        done
+    done
+done
+
+: ostatnie_wpisy def
+    ~> Ostatnie @max_lines wpisow:
+    :: hr 40
+    >> tail -n @max_lines @log_file
+
+    ? err
+        ~> Uzywam journalctl...
+        >> journalctl -n @max_lines --no-pager
+    done
+done
+
+: bledy def
+    ~> Wyszukuje bledow (ERROR/error/FAIL)...
+    :: hr 40
+    >> grep -i "error\|fail\|critical" @log_file
+
+    ? ok
+        :: yellow Znaleziono wpisy bledow.
+    done
+
+    ? err
+        :: green  Brak bledow w logu.
+    done
+done
+
+: statystyki def
+    :: hr 40
+    ~> Statystyki systemu:
+    > uptime
+    > free -h
+    > df -h /
+done
+
+: zapisz_raport def
+    > mkdir -p @out_dir
+
+    ? ok
+        ~> Zapisuje raport do @out_dir/report.txt
+        >> tail -n @max_lines @log_file
+
+        ? ok
+            :: green Raport gotowy w @out_dir
+        done
+    done
+done
+
+:: nl
+-- sprawdz_log
+-- ostatnie_wpisy
+-- bledy
+-- statystyki
+-- zapisz_raport
+
+:: nl
+:: hr 52
+:: green Analiza zakonczona.
+:: hr 52
