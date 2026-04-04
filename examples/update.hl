@@ -1,1 +1,41 @@
-> sudo apt update
+/// Aktualizacja systemu HackerOS
+/// Uzycie: hl update.hl
+
+// curl
+
+# std/sys
+
+:: hr 48
+:: bold   HackerOS System Updater
+:: hr 48
+
+~> System: @SYS_OS
+~> Kernel: @SYS_KERNEL
+
+:: nl
+:: cyan   Aktualizacja list pakietow...
+
+^> apt-get update
+
+? ok
+    :: green Lista pakietow zaktualizowana.
+    :: nl
+    :: cyan  Instalowanie aktualizacji...
+    ^> apt-get -y upgrade
+
+    ? ok
+        :: green System zaktualizowany pomyslnie!
+    done
+
+    ? err
+        :: red   Blad podczas aktualizacji pakietow.
+    done
+done
+
+? err
+    :: red  Blad pobierania list pakietow.
+    ~> Sprawdz polaczenie z internetem.
+done
+
+:: nl
+:: hr 48
