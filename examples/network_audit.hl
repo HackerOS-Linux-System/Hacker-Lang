@@ -1,71 +1,98 @@
 /// Network Audit Tool for HackerOS
+/// Uzycie: hl network_audit.hl
 /// Autor: HackerOS Team
-/// Wersja: 1.0
 
-;; Deklaracja zaleznosci systemowych
 // nmap
 // curl
 // whois
+// ping
 
-;; Zmienne konfiguracyjne
-% target = 192.168.1.1
-% output_dir = /tmp/audit
-% ports = 1-1024
-% scan_name = audit_report
+# std/net <- ports
+# std/sys
 
-:: ============================================
-:: =      HACKER LANG  — Network Auditor     =
-:: ============================================
+% target     = 192.168.1.1
+% output_dir = /tmp/hl_audit
+% ports      = 1-1024
 
-;; Tworzymy katalog na wyniki
+:: hr 52
+:: bold   HACKER LANG  -  Network Auditor
+:: hr 52
+
+~> System:  @SYS_OS
+~> Kernel:  @SYS_KERNEL
+~> Target:  @target
+~> Ports:   @ports
+~> Output:  @output_dir
+
 > mkdir -p @output_dir
 
-// // To jest komentarz blokowy wewnątrz skryptu \\
-
 : check_host def
-    :: Sprawdzam dostepnosc hosta @target...
-    >> ping -c 1 -W 2 @target
+    :: nl
+    :: cyan  [1/4] Sprawdzam dostepnosc hosta...
+    >> ping -c 2 -W 2 @target
 
     ? ok
-        :: Host @target jest ONLINE
+        :: green Host @target ONLINE
     done
 
     ? err
-        :: UWAGA: Host @target nie odpowiada na ping
+        :: yellow Host @target nie odpowiada na ping (moze filtrowac ICMP)
     done
 done
 
 : port_scan def
-    :: Rozpoczynam skan portow @ports na @target...
-    >> nmap -sV -T4 -p @ports @target -oN @output_dir/@scan_name.txt
+    :: nl
+    :: cyan  [2/4] Skanowanie portow @ports...
+    >> nmap -sV -T4 -p @ports @target
 
     ? ok
-        :: Skan zakonczony. Wyniki: @output_dir/@scan_name.txt
+        :: green Skan zakonczony.
     done
 
     ? err
-        :: Skan zakonczony z bledami (sprawdz uprawnienia lub polaczenie)
+        :: red   Skan zakonczony z bledami.
     done
 done
 
 : whois_lookup def
-    :: Wykonuje zapytanie WHOIS dla @target...
+    :: nl
+    :: cyan  [3/4] Zapytanie WHOIS...
     >> whois @target
+
+    ? ok
+        :: green WHOIS OK
+    done
+
+    ? err
+        :: yellow WHOIS niedostepny
+    done
 done
 
-: isolated_test def
-    :: Testuje polaczenie w izolowanym srodowisku...
-    ->> curl -s --max-time 5 http://@target
+: isolated_probe def
+    :: nl
+    :: cyan  [4/4] Sondowanie w izolowanym namespace...
+    ->> curl -s --max-time 5 -o /dev/null -w "%{http_code}" http://@target
+
+    ? ok
+        :: green Probe zakonczony.
+    done
+
+    ? err
+        :: yellow Brak odpowiedzi HTTP.
+    done
 done
 
-;; === Glowne wykonanie ===
-
-:: Uruchamiam audyt sieci dla hosta: @target
+:: nl
+:: cyan  Uruchamiam audyt...
+:: nl
 
 -- check_host
 -- port_scan
 -- whois_lookup
--- isolated_test
+-- isolated_probe
 
-:: Audyt zakonczony!
-> ls -la @output_dir
+:: nl
+:: hr 52
+:: green Audyt zakonczony! Wyniki w @output_dir
+:: hr 52
+:: nl
