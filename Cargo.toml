@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.2"
+version = "0.3.0"
 edition = "2021"
 authors = ["HackerOS Team <hackeros068@gmail.com>"]
 license = "GPL-3.0"
@@ -26,3 +26,5 @@ rustyline = "14.0"
 nix = { version = "0.27", features = ["process", "signal", "user"] }
 which = "6.0"
 dirs = "5.0"
+rustc-hash = "1.1"
+smallvec = { version = "1.11", features = ["const_generics"] }
