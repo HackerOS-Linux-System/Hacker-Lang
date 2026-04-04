@@ -1,0 +1,157 @@
+/// Prosty deployment script dla HackerOS
+/// Uzycie: hl deploy.hl
+/// Symuluje deploy aplikacji webowej
+
+// git
+// curl
+// systemctl
+
+# std/sys
+# std/fs
+
+% app_name    = myapp
+% app_dir     = /opt/@app_name
+% git_repo    = https://github.com/example/@app_name
+% service     = @app_name
+% backup_dir  = /tmp/deploy_backup
+% health_url  = http://localhost:8080/health
+
+:: hr 54
+:: bold   HL Deploy Tool — @app_name
+:: hr 54
+:: nl
+
+~> System:  @SYS_OS
+~> App:     @app_name
+~> Dir:     @app_dir
+~> Service: @service
+
+: sprawdz_narzedzia def
+    :: nl
+    :: cyan  Sprawdzam wymagane narzedzia...
+
+    :: which git
+
+    ? ok
+        :: green git OK
+    done
+
+    ? err
+        :: red   git niedostepny!
+    done
+
+    :: which curl
+
+    ? ok
+        :: green curl OK
+    done
+done
+
+: backup_obecnej_wersji def
+    :: nl
+    :: cyan  Backup biezacej wersji...
+
+    :: isdir @app_dir
+
+    ? ok
+        > mkdir -p @backup_dir
+        >> cp -r @app_dir @backup_dir/
+
+        ? ok
+            :: green Backup wykonany w @backup_dir
+        done
+
+        ? err
+            :: yellow Backup nie powiodl sie — kontynuuje.
+        done
+    done
+
+    ? err
+        :: yellow Brak katalogu @app_dir — pierwsza instalacja.
+    done
+done
+
+: pobierz_kod def
+    :: nl
+    :: cyan  Pobieranie kodu...
+
+    :: isdir @app_dir
+
+    ? ok
+        ~> Aktualizacja przez git pull...
+        >> git -C @app_dir pull origin main
+
+        ? ok
+            :: green Kod zaktualizowany.
+        done
+
+        ? err
+            :: red   Blad git pull.
+        done
+    done
+
+    ? err
+        ~> Pierwsze pobranie...
+        >> git clone @git_repo @app_dir
+
+        ? ok
+            :: green Repo sklonowane.
+        done
+
+        ? err
+            :: red   Blad klonowania repo.
+        done
+    done
+done
+
+: restart_serwisu def
+    :: nl
+    :: cyan  Restart serwisu @service...
+
+    :: which systemctl
+
+    ? ok
+        >> systemctl restart @service
+
+        ? ok
+            :: green Serwis @service zrestartowany.
+        done
+
+        ? err
+            :: red   Blad restartu serwisu @service
+        done
+    done
+
+    ? err
+        :: yellow systemctl niedostepny.
+    done
+done
+
+: health_check def
+    :: nl
+    :: cyan  Health check: @health_url
+
+    >> curl -sf --max-time 10 @health_url
+
+    ? ok
+        :: green Aplikacja odpowiada poprawnie!
+    done
+
+    ? err
+        :: red   Aplikacja nie odpowiada na @health_url
+    done
+done
+
+:: nl
+-- sprawdz_narzedzia
+-- backup_obecnej_wersji
+-- pobierz_kod
+-- restart_serwisu
+-- health_check
+
+:: nl
+:: hr 54
+:: bold   Deploy zakonczony!
+:: cyan   App: @app_name  |  System: @SYS_OS
+:: hr 54
+:: nl
