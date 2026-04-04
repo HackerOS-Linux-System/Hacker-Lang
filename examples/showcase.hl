@@ -1,224 +1,401 @@
 /// ============================================================
-/// Hacker Lang — Showcase wszystkich funkcji
-/// Wersja: 0.1.0 | HackerOS
+/// Hacker Lang v0.1.0 — Pelny Showcase
+/// Pokazuje WSZYSTKIE dostepne funkcje jezyka
+/// Uzycie: hl showcase.hl
 /// ============================================================
-
-;; ── 1. KOMENTARZE ─────────────────────────────────────────────
-;; To jest komentarz liniowy (ignorowany przez interpreter)
-
-/// To jest komentarz dokumentacyjny (zachowany w AST)
-
-// To jest komentarz blokowy.
-   Może zajmować wiele linii.
-   Kończy się dwoma backslashami. \\
-
-:: ============================================================
-:: 1. KOMENTARZE — OK
-:: ============================================================
-
-;; ── 2. ZMIENNE ────────────────────────────────────────────────
-
-% name       = HackerOS
-% version    = 0.1.0
-% port       = 8080
-% debug      = true
-% target     = 127.0.0.1
-% output_dir = /tmp/hl_showcase
-% greeting   = Witaj w @name v@version!
-
-:: ============================================================
-:: 2. ZMIENNE
-:: ============================================================
-:: Nazwa systemu: @name
-:: Wersja:        @version
-:: Port:          @port
-:: Debug:         @debug
-:: Target:        @target
-:: Interpolacja:  @greeting
-
-;; ── 3. KOMENDY ────────────────────────────────────────────────
-
-:: ============================================================
-:: 3. KOMENDY
-:: ============================================================
-
-;; > zwykła komenda
-> mkdir -p @output_dir
-
-;; >> komenda z interpolacją zmiennych
->> echo "test" > @output_dir/test.txt
-
-;; -> komenda w izolowanym namespace (unshare)
-;; (wymaga uprawnień lub konfiguracji jądra)
-;; -> ls /tmp
-
-;; ^> komenda z sudo (odkomentuj jeśli masz sudo)
-;; ^> ls /root
-
-;; >> z interpolacją + zapis do pliku
->> ls -la @output_dir
-
-:: Komendy wykonane poprawnie.
-
-;; ── 4. ZALEŻNOŚCI SYSTEMOWE ───────────────────────────────────
-
-:: ============================================================
-:: 4. ZALEŻNOŚCI (// pakiet)
-:: ============================================================
-
-// curl
-// which
-
-:: Zależności sprawdzone/zainstalowane.
-
-;; ── 5. IMPORT BIBLIOTEK ───────────────────────────────────────
-
-:: ============================================================
-:: 5. BIBLIOTEKI (# lib lub # lib <- detail)
-:: ============================================================
 
 # std/sys
 # std/net <- ports
 # std/fs
-# std/str
 # std/crypto
+# std/str
 
-:: Informacje systemowe z std/sys:
-:: OS:       @SYS_OS
-:: Kernel:   @SYS_KERNEL
-:: CPU:      @SYS_CPU rdzeni
-:: RAM:      @SYS_MEMTOTAL
-:: Hostname: @SYS_HOSTNAME
-:: Uptime:   @SYS_UPTIME
+// curl
+// which
 
-:: Sieć z std/net:
-:: SSH port: @PORT_SSH
-:: HTTP:     @PORT_HTTP
-:: HTTPS:    @PORT_HTTPS
+:: hr 60
+:: bold   HACKER LANG v0.1.0 — SHOWCASE
+:: hr 60
+:: nl
 
-:: System plików z std/fs:
-:: Home:    @FS_HOME
-:: Tmp:     @FS_TMP
-:: Log:     @FS_VAR_LOG
+;; ═══════════════════════════════════════════════════════════
+;; 1. OPERATORY WYJSCIA
+;; ═══════════════════════════════════════════════════════════
 
-:: Kryptografia z std/crypto:
-:: SHA256:  @CRYPTO_SHA256_CMD
+:: cyan  [1] OPERATORY WYJSCIA
 
-;; ── 6. FUNKCJE ────────────────────────────────────────────────
+;; ~> to glowny operator wyjscia (odpowiednik echo)
+~> Zwykly tekst
 
-:: ============================================================
-:: 6. FUNKCJE (: nazwa def ... done)
-:: ============================================================
+% os_name = HackerOS
+~> Interpolacja zmiennych: @os_name
 
-: say_hello def
-    :: Hej! Jestem funkcją w Hacker Lang.
-    :: Wywołano z kontekstem: @name
+;; :: to quick-function
+:: bold   Pogrubiony tekst
+:: green  Zielony tekst
+:: yellow Zolty tekst
+:: red    Czerwony tekst
+:: cyan   Niebieski tekst
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 2. ZMIENNE
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [2] ZMIENNE (% i @)
+
+% projekt    = HackerOS
+% wersja     = 1.0
+% debug      = true
+% port       = 8080
+% target     = 127.0.0.1
+% output_dir = /tmp/showcase
+
+~> Projekt:  @projekt
+~> Wersja:   @wersja
+~> Debug:    @debug
+~> Port:     @port
+~> Target:   @target
+
+;; Interpolacja wielu zmiennych w jednej linii
+~> Laczony: @projekt v@wersja na porcie @port
+
+;; Dynamiczne ustawianie zmiennych przez quick-function
+:: set   build_id   HL-2025-001
+:: set   env_name   production
+~> Build:  @build_id
+~> Env:    @env_name
+
+:: type projekt
+:: type port
+:: type debug
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 3. KOMENDY SYSTEMOWE
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [3] KOMENDY SYSTEMOWE
+
+;; > zwykla komenda
+> mkdir -p @output_dir
+
+;; >> komenda z interpolacja zmiennych
+>> ls -la @output_dir
+
+;; ^> z sudo (odkomentuj gdy potrzebujesz)
+;; ^> ls /root
+
+;; -> w izolowanym namespace
+;; -> ls /tmp
+
+;; ->> z interpolacja + izolacja
+;; ->> curl -s http://@target
+
+~> Komendy wykonane.
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 4. ZALEZNOSCI SYSTEMOWE
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [4] ZALEZNOSCI (// pakiet)
+
+// curl
+// which
+
+~> Zaleznosci curl i which dostepne.
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 5. BIBLIOTEKI
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [5] BIBLIOTEKI (# lib lub # lib <- modul)
+
+~> Dane z std/sys:
+~>   OS:       @SYS_OS
+~>   Kernel:   @SYS_KERNEL
+~>   Arch:     @SYS_ARCH
+~>   CPU:      @SYS_CPU rdzeni
+~>   RAM:      @SYS_MEMTOTAL
+~>   Hostname: @SYS_HOSTNAME
+~>   Uptime:   @SYS_UPTIME
+
+~> Dane z std/net:
+~>   SSH:    @PORT_SSH
+~>   HTTP:   @PORT_HTTP
+~>   HTTPS:  @PORT_HTTPS
+~>   FTP:    @PORT_FTP
+~>   DNS:    @PORT_DNS
+~>   RDP:    @PORT_RDP
+~>   MySQL:  @PORT_MYSQL
+
+~> Dane z std/fs:
+~>   Home:    @FS_HOME
+~>   Tmp:     @FS_TMP
+~>   Etc:     @FS_ETC
+~>   Log:     @FS_VAR_LOG
+~>   Proc:    @FS_PROC
+
+~> Dane z std/crypto:
+~>   SHA256:  @CRYPTO_SHA256_CMD
+~>   MD5:     @CRYPTO_MD5_CMD
+
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 6. QUICK FUNCTIONS — STRINGI
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [6] QUICK FUNCTIONS — STRINGI
+
+% tekst = Hello Hacker Lang World
+
+~> Oryginalny tekst: @tekst
+:: upper  @tekst
+:: lower  @tekst
+:: len    @tekst
+:: rev    @tekst
+
+% z_spacjami = "  hello world  "
+~> Trim:
+:: trim @z_spacjami
+
+~> Repeat 3x:
+:: repeat Hello 3
+
+~> Split po spacji:
+:: split @tekst " "
+
+~> Contains 'Hacker':
+:: contains @tekst Hacker
+
+~> StartsWith 'Hello':
+:: startswith @tekst Hello
+
+~> EndsWith 'World':
+:: endswith @tekst World
+
+~> Words:
+:: words @tekst
+
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 7. QUICK FUNCTIONS — MATEMATYKA
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [7] QUICK FUNCTIONS — MATEMATYKA
+
+~> abs(-42):
+:: abs -42
+
+~> ceil(3.2):
+:: ceil 3.2
+
+~> floor(3.9):
+:: floor 3.9
+
+~> round(3.5):
+:: round 3.5
+
+~> max(10, 99):
+:: max 10 99
+
+~> min(10, 99):
+:: min 10 99
+
+~> rand (0-99):
+:: rand
+
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 8. QUICK FUNCTIONS — SYSTEM
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [8] QUICK FUNCTIONS — SYSTEM
+
+~> date:
+:: date
+
+~> time:
+:: time
+
+~> pid:
+:: pid
+
+~> which curl:
+:: which curl
+
+~> env HOME:
+:: env HOME
+
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 9. QUICK FUNCTIONS — PLIKI
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [9] QUICK FUNCTIONS — PLIKI
+
+~> exists /etc/hostname:
+:: exists /etc/hostname
+
+? ok
+    :: green   Plik /etc/hostname istnieje
 done
 
-: show_system_info def
-    :: --- Informacje o systemie ---
+~> isdir /tmp:
+:: isdir /tmp
+
+? ok
+    :: green   /tmp jest katalogiem
+done
+
+~> isfile /etc/hostname:
+:: isfile /etc/hostname
+
+~> basename /etc/os-release:
+:: basename /etc/os-release
+
+~> dirname /etc/os-release:
+:: dirname /etc/os-release
+
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 10. QUICK FUNCTIONS — OUTPUT
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [10] QUICK FUNCTIONS — OUTPUT
+
+:: nl
+:: hr 50
+:: bold  Linia pozioma i pogrubienie
+:: hr 50
+:: nl
+:: green  Kolor zielony — sukces
+:: yellow Kolor zolty  — ostrzezenie
+:: red    Kolor czerwony — blad
+:: cyan   Kolor niebieski — info
+:: bold   Pogrubienie
+:: nl
+
+;; ═══════════════════════════════════════════════════════════
+;; 11. FUNKCJE
+;; ═══════════════════════════════════════════════════════════
+
+:: cyan  [11] FUNKCJE (: nazwa def ... done)
+
+: greet def
+    ~> Hej! Jestem funkcja greet.
+    ~> Wywolana w kontekscie: @projekt v@wersja
+done
+
+: system_info def
+    :: hr 40
+    ~> Informacje o systemie:
     > uname -a
-    :: Architektura: @SYS_ARCH
+    :: hr 40
 done
 
-: create_report def
-    :: Tworzę raport...
-    > mkdir -p @output_dir
-    >> ls -la @output_dir
-    :: Raport gotowy w @output_dir
+: check_dir def
+    :: isdir @output_dir
+
+    ? ok
+        :: green Katalog @output_dir istnieje
+    done
+
+    ? err
+        ~> Tworze katalog @output_dir...
+        > mkdir -p @output_dir
+    done
 done
 
-: check_network def
-    :: Sprawdzam sieć...
+: network_check def
+    ~> Sprawdzam localhost...
     >> ping -c 1 -W 1 @target
 
     ? ok
-        :: Host @target jest ONLINE ✓
+        :: green @target ONLINE
     done
 
     ? err
-        :: Host @target jest OFFLINE ✗
+        :: yellow @target OFFLINE lub brak odpowiedzi
     done
 done
 
-: nested_example def
-    :: Przykład zagnieżdżonej logiki...
-    > ls /tmp
-
-    ? ok
-        :: /tmp istnieje ✓
-        >> ls @FS_TMP
-    done
-
-    ? err
-        :: Błąd sprawdzania /tmp
-    done
+: file_demo def
+    ~> Operacje na plikach:
+    :: basename /etc/os-release
+    :: dirname  /etc/os-release
+    :: exists   /etc/hostname
 done
 
-;; ── 7. WYWOŁANIA FUNKCJI ──────────────────────────────────────
+;; ═══════════════════════════════════════════════════════════
+;; 12. WYWOLANIA FUNKCJI
+;; ═══════════════════════════════════════════════════════════
 
-:: ============================================================
-:: 7. WYWOŁANIA FUNKCJI (-- nazwa)
-:: ============================================================
+:: cyan  [12] WYWOLANIA FUNKCJI (-- nazwa)
 
--- say_hello
--- show_system_info
--- create_report
--- check_network
--- nested_example
+-- greet
+-- system_info
+-- check_dir
+-- network_check
+-- file_demo
 
-;; ── 8. LOGIKA ? ok / ? err ────────────────────────────────────
+:: nl
 
-:: ============================================================
-:: 8. LOGIKA WARUNKOWA
-:: ============================================================
+;; ═══════════════════════════════════════════════════════════
+;; 13. LOGIKA WARUNKOWA
+;; ═══════════════════════════════════════════════════════════
 
-> ls /etc/hostname
+:: cyan  [13] LOGIKA WARUNKOWA (? ok / ? err)
+
+> ls /etc
 
 ? ok
-    :: /etc/hostname istnieje ✓
-    > cat /etc/hostname
+    :: green /etc dostepny
 done
+
+> ls /nieistniejacy_katalog_xyz
 
 ? err
-    :: /etc/hostname nie istnieje ✗
+    :: yellow Katalog nie istnieje — oczekiwany blad
 done
 
-;; Kolejny test — celowy sukces
-> echo "test" > /dev/null
+;; Zagniezdzona logika
+:: exists /proc/version
 
 ? ok
-    :: Ostatnia komenda zakończyła się sukcesem (exit 0)
+    :: green /proc/version istnieje
+    :: read  /proc/version
 done
 
-;; ── 9. INTERPOLACJA ZMIENNYCH ─────────────────────────────────
+:: nl
 
-:: ============================================================
-:: 9. INTERPOLACJA ZMIENNYCH W KOMENDACH
-:: ============================================================
+;; ═══════════════════════════════════════════════════════════
+;; 14. ZMIENNE WBUDOWANE HL
+;; ═══════════════════════════════════════════════════════════
 
-% scan_file  = @output_dir/scan_result.txt
-% user_label = scan_@name
+:: cyan  [14] ZMIENNE WBUDOWANE
 
-:: Zmienna złożona: @scan_file
-:: Label:           @user_label
+~> HL_VERSION: @HL_VERSION
+~> HL_OS:      @HL_OS
+~> HL_SCRIPT:  @HL_SCRIPT
+~> argc:       @argc
 
->> ls @output_dir
+:: nl
 
-;; ── 10. ZMIENNE SYSTEMOWE HL ──────────────────────────────────
+;; ═══════════════════════════════════════════════════════════
+;; KONIEC SHOWCASE
+;; ═══════════════════════════════════════════════════════════
 
-:: ============================================================
-:: 10. ZMIENNE SYSTEMOWE WBUDOWANE
-:: ============================================================
-
-:: HL_VERSION: @HL_VERSION
-:: HL_OS:      @HL_OS
-:: HL_SCRIPT:  @HL_SCRIPT
-:: argc:       @argc
-
-;; ── PODSUMOWANIE ──────────────────────────────────────────────
-
-:: ============================================================
-:: SHOWCASE ZAKOŃCZONY POMYŚLNIE
-:: Hacker Lang v@HL_VERSION — HackerOS
-:: ============================================================
+:: nl
+:: hr 60
+:: bold   SHOWCASE ZAKONCZONY POMYSLNIE
+:: cyan   Hacker Lang v@HL_VERSION  -  HackerOS
+:: hr 60
+:: nl
