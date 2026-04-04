@@ -3,112 +3,163 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use hl_core::diagnostics::{parse_error_to_diag, DiagRenderer, DiagSummary, lint_source};
 use hl_core::env::Env;
-use hl_core::{check_source, run_source};
-use hl_shell::{run_file, run_interactive};
+use hl_core::{check_source, run_source, cmd_lib_list, cmd_lib_install, cmd_lib_remove, cmd_clean_cache};
+use hl_shell::{run_file, run_interactive, run_as_shell};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, fmt};
 
-/// hl - Hacker Lang interpreter and shell
 #[derive(Parser, Debug)]
 #[command(
 name = "hl",
-version = "0.0.1",
+version = "0.3",
 author = "HackerOS Team",
-about = "Hacker Lang — the scripting language of HackerOS",
-long_about = r#"
-██╗  ██╗██╗
-██║  ██║██║
-███████║██║
-██╔══██║██║
-██║  ██║███████╗
-╚═╝  ╚═╝╚══════╝  Hacker Lang v0.0.2
-
-A powerful scripting language for HackerOS (Debian-based).
-Files use .hl extension. Run 'hl shell' for the interactive REPL.
-"#
+about = "Hacker Lang — język skryptowy HackerOS",
+long_about = None,
+disable_version_flag = false,
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Script file to execute (.hl)
+    /// Plik .hl do uruchomienia (skrót dla `hl run`)
     #[arg(value_name = "FILE")]
     file: Option<PathBuf>,
 
-    /// Arguments passed to the script
+    /// Argumenty przekazane do skryptu
     #[arg(value_name = "ARGS", last = true)]
     script_args: Vec<String>,
 
-    /// Enable verbose/debug output
+    /// Tryb verbose (debug)
     #[arg(short, long)]
     verbose: bool,
 
-    /// Execute inline Hacker Lang code
+    /// Wykonaj kod inline
     #[arg(short = 'c', long = "code", value_name = "CODE")]
     inline_code: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Start the interactive Hacker Lang shell (REPL)
-    Shell,
+    /// Uruchom skrypt .hl
+    Run {
+        /// Plik .hl do uruchomienia
+        file: PathBuf,
+        /// Argumenty skryptu
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 
-    /// Check syntax of a .hl file without running it
+    /// Interaktywna powłoka REPL (do testowania kodu HL)
+    Repl,
+
+    /// Uruchom HL jako powłokę systemową (zamiennik bash/zsh)
+    Shell {
+        /// Plik konfiguracyjny powłoki (domyślnie ~/.hlrc)
+        #[arg(short, long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        /// Wykonaj komendę i wyjdź
+        #[arg(short = 'c', long = "command", value_name = "CMD")]
+        command: Option<String>,
+    },
+
+    /// Sprawdź składnię pliku .hl bez uruchamiania
     Check {
-        /// File to check
         file: PathBuf,
     },
 
-    /// Print the AST of a .hl file (for debugging)
+    /// Wydrukuj AST pliku .hl (debug)
     Ast {
-        /// File to parse
         file: PathBuf,
     },
 
-    /// Print version information
+    /// Wyczyść cache Hacker Lang (~/.hl/cache)
+    Clean,
+
+    /// Menedżer bibliotek HL
+    Lib {
+        #[command(subcommand)]
+        action: LibAction,
+    },
+
+    /// Informacje o wersji
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum LibAction {
+    /// Lista zainstalowanych bibliotek
+    List,
+    /// Zainstaluj bibliotekę (std/* lub owner/repo GitHub)
+    Install {
+        /// Nazwa biblioteki (np. owner/repo)
+        name: String,
+    },
+    /// Usuń zainstalowaną bibliotekę
+    Remove {
+        name: String,
+    },
+    /// Pokaż informacje o bibliotece
+    Info {
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Init tracing
     let filter = if cli.verbose {
         EnvFilter::new("debug")
     } else {
         EnvFilter::new("warn")
     };
-    fmt().with_env_filter(filter).without_time().init();
+    fmt().with_env_filter(filter).without_time().compact().init();
 
     match cli.command {
-        Some(Commands::Shell) => {
+        // ── hl repl ──────────────────────────────────────────────────────────
+        Some(Commands::Repl) => {
             let mut env = Env::new();
             run_interactive(&mut env)?;
         }
 
+        // ── hl shell ─────────────────────────────────────────────────────────
+        Some(Commands::Shell { config, command }) => {
+            let mut env = Env::new();
+            if let Some(cmd) = command {
+                // -c mode: wykonaj jedną komendę i wyjdź
+                let code = run_source_with_diag("<shell -c>", &cmd, &mut env);
+                std::process::exit(code);
+            }
+            run_as_shell(config.as_deref(), &mut env)?;
+        }
+
+        // ── hl run <plik> ────────────────────────────────────────────────────
+        Some(Commands::Run { file, args }) => {
+            let mut env = Env::new();
+            inject_args(&mut env, &args);
+            let code = run_file_with_diag(&file, &mut env);
+            std::process::exit(code);
+        }
+
+        // ── hl check <plik> ──────────────────────────────────────────────────
         Some(Commands::Check { file }) => {
             let source = std::fs::read_to_string(&file)?;
-            let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("<unknown>");
-            let renderer = DiagRenderer::new(filename, &source);
+            let fname  = file.file_name().and_then(|n| n.to_str()).unwrap_or("<unknown>");
+            let renderer = DiagRenderer::new(fname, &source);
             let mut exit_code = 0i32;
 
-            // Lint pass
             let lint_diags = lint_source(&source);
             if !lint_diags.is_empty() {
                 renderer.emit_all(&lint_diags);
-                let summary = DiagSummary::from_diags(&lint_diags);
-                summary.print();
-                if summary.has_errors() {
-                    exit_code = 2;
-                }
+                let sum = DiagSummary::from_diags(&lint_diags);
+                sum.print();
+                if sum.has_errors() { exit_code = 2; }
             }
 
             if exit_code == 0 {
-                // Parse pass
                 match check_source(&source) {
                     Ok(nodes) => {
                         println!(
-                            "{} {} ({} węzłów AST, {} ostrzeżeń)",
+                            "{} {} ({} węzłów, {} ostrzeżeń)",
                                  "✓".green().bold(),
                                  file.display().to_string().bright_white(),
                                  nodes.len(),
@@ -116,71 +167,64 @@ fn main() -> Result<()> {
                         );
                     }
                     Err(e) => {
-                        let diag = parse_error_to_diag(&e);
-                        renderer.emit(&diag);
+                        renderer.emit(&parse_error_to_diag(&e));
                         exit_code = 1;
                     }
                 }
             }
-
             std::process::exit(exit_code);
         }
 
+        // ── hl ast <plik> ────────────────────────────────────────────────────
         Some(Commands::Ast { file }) => {
             let source = std::fs::read_to_string(&file)?;
             match check_source(&source) {
-                Ok(nodes) => {
-                    println!("{}", serde_json::to_string_pretty(&nodes)?);
-                }
+                Ok(nodes) => println!("{}", serde_json::to_string_pretty(&nodes)?),
                 Err(e) => {
-                    eprintln!("{} {}: {}", "✗".red().bold(), file.display(), e);
+                    let fname = file.file_name().and_then(|n| n.to_str()).unwrap_or("<unknown>");
+                    let renderer = DiagRenderer::new(fname, &source);
+                    renderer.emit(&parse_error_to_diag(&e));
                     std::process::exit(1);
                 }
             }
         }
 
-        Some(Commands::Version) => {
-            print_version();
+        // ── hl clean ─────────────────────────────────────────────────────────
+        Some(Commands::Clean) => {
+            cmd_clean_cache();
         }
 
+        // ── hl lib ───────────────────────────────────────────────────────────
+        Some(Commands::Lib { action }) => match action {
+            LibAction::List => cmd_lib_list(),
+            LibAction::Install { name } => cmd_lib_install(&name),
+            LibAction::Remove  { name } => cmd_lib_remove(&name),
+            LibAction::Info    { name } => {
+                eprintln!("{} Informacje o '{}' — niedostępne w tej wersji.", "!".yellow(), name);
+            }
+        },
+
+        // ── hl version ───────────────────────────────────────────────────────
+        Some(Commands::Version) => print_version(),
+
+        // ── hl [plik] lub hl -c "kod" ────────────────────────────────────────
         None => {
-            // No subcommand given
             if let Some(code) = cli.inline_code {
-                // -c "code" mode
                 let mut env = Env::new();
                 inject_args(&mut env, &cli.script_args);
-                match run_source(&code, &mut env) {
-                    Ok(result) => std::process::exit(result.exit_code),
-                    Err(e) => {
-                        eprintln!("{} {}", "[hl]".red().bold(), e);
-                        std::process::exit(1);
-                    }
-                }
+                let c = run_source_with_diag("<inline>", &code, &mut env);
+                std::process::exit(c);
             } else if let Some(file) = cli.file {
-                // Run a .hl script file
                 if !file.exists() {
-                    eprintln!("{} File not found: {}", "✗".red().bold(), file.display());
+                    eprintln!("{} Plik nie istnieje: {}", "✗".red().bold(), file.display());
                     std::process::exit(1);
                 }
-                let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext != "hl" {
-                    eprintln!(
-                        "{} Warning: '{}' does not have .hl extension",
-                        "!".yellow().bold(),
-                              file.display()
-                    );
-                }
                 let mut env = Env::new();
                 inject_args(&mut env, &cli.script_args);
-                // Inject script path
-                env.set_var(
-                    "HL_SCRIPT",
-                    hl_core::Value::String(file.display().to_string()),
-                );
-                let code = run_file(&file, &mut env)?;
-                std::process::exit(code);
+                let c = run_file_with_diag(&file, &mut env);
+                std::process::exit(c);
             } else {
-                // No file, no command → launch interactive shell
+                // Brak argumentów — uruchom REPL
                 let mut env = Env::new();
                 run_interactive(&mut env)?;
             }
@@ -190,27 +234,58 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Inject script arguments as @arg0, @arg1, ... and @argc
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn run_file_with_diag(file: &PathBuf, env: &mut Env) -> i32 {
+    if !file.exists() {
+        eprintln!("{} Plik nie istnieje: {}", "✗".red().bold(), file.display());
+        return 1;
+    }
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "hl" {
+        eprintln!("{} Ostrzeżenie: plik '{}' nie ma rozszerzenia .hl",
+                  "!".yellow().bold(), file.display());
+    }
+    env.set_var("HL_SCRIPT", hl_core::Value::String(file.display().to_string()));
+    match hl_shell::run_file(file, env) {
+        Ok(code) => code,
+        Err(e) => { eprintln!("{} {}", "✗".red().bold(), e); 1 }
+    }
+}
+
+fn run_source_with_diag(fname: &str, source: &str, env: &mut Env) -> i32 {
+    let renderer = DiagRenderer::new(fname, source);
+    let lint_diags = lint_source(source);
+    if !lint_diags.is_empty() {
+        renderer.emit_all(&lint_diags);
+        let sum = DiagSummary::from_diags(&lint_diags);
+        sum.print();
+        if sum.has_errors() { return 2; }
+    }
+    match check_source(source) {
+        Err(e) => { renderer.emit(&parse_error_to_diag(&e)); return 2; }
+        Ok(_) => {}
+    }
+    match run_source(source, env) {
+        Ok(r) => r.exit_code,
+        Err(e) => {
+            let d = hl_core::Diag::error(e.to_string());
+            renderer.emit(&d);
+            1
+        }
+    }
+}
+
 fn inject_args(env: &mut Env, args: &[String]) {
-    env.set_var(
-        "argc",
-        hl_core::Value::Number(args.len() as f64),
-    );
+    env.set_var("argc", hl_core::Value::Number(args.len() as f64));
     for (i, arg) in args.iter().enumerate() {
-        env.set_var(
-            &format!("arg{}", i),
-                    hl_core::Value::String(arg.clone()),
-        );
+        env.set_var(&format!("arg{}", i), hl_core::Value::String(arg.clone()));
     }
 }
 
 fn print_version() {
-    println!(
-        "{} {}",
-        "Hacker Lang".bright_cyan().bold(),
-             "v0.1.0".bright_white()
-    );
-    println!("{} {}", "Shell:".bright_black(), "hl-shell v0.0.2");
-    println!("{} {}", "Core: ".bright_black(), "hl-core v0.0.1");
-    println!("{} {}", "OS:   ".bright_black(), "HackerOS (Debian-based)");
+    println!("{} {}", "Hacker Lang".bright_cyan().bold(), "v0.3".bright_white());
+    println!("{} {}", "Shell: ".bright_black(), "hl-shell v0.3");
+    println!("{} {}", "Core:  ".bright_black(), "hl-core  v0.3");
+    println!("{} {}", "OS:    ".bright_black(), "HackerOS (Debian-based)");
 }
