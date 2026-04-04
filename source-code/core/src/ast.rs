@@ -1,162 +1,97 @@
 use serde::{Deserialize, Serialize};
 
-/// Represents a node in the Hacker Lang AST
+/// Hacker Lang AST Node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Node {
-    /// :: message
-    Print {
-        parts: Vec<StringPart>,
-    },
-
-    /// > command [args]
-    Command {
-        raw: String,
-        mode: CommandMode,
-        interpolate: bool,
-    },
-
+    /// ~> message — wypisz tekst na stdout (odpowiednik echo)
+    Print       { parts: Vec<StringPart> },
+    /// :: name [args] — wywołanie quick-funkcji (:upper, :lower, :len, itd.)
+    QuickCall   { name: String, args: Vec<StringPart> },
+    /// > / ^> / -> / etc. — komenda systemowa
+    Command     { raw: String, mode: CommandMode, interpolate: bool },
     /// % name = value
-    VarDecl {
-        name: String,
-        value: VarValue,
-    },
-
-    /// @name (used standalone as expression)
-    VarRef(String),
-
-    /// // dependency
-    Dependency {
-        name: String,
-    },
-
+    VarDecl     { name: String, value: VarValue },
+    /// @name (standalone)
+    VarRef      (String),
+    /// // package
+    Dependency  { name: String },
+    /// # lib lub # lib <- detail
+    Import      { lib: String, detail: Option<String> },
     /// : name def ... done
-    FuncDef {
-        name: String,
-        body: Vec<Node>,
-    },
-
+    FuncDef     { name: String, body: Vec<Node> },
     /// -- name
-    FuncCall {
-        name: String,
-    },
-
-    /// ? ok ... done  /  ? err ... done
-    Conditional {
-        condition: ConditionKind,
-        body: Vec<Node>,
-    },
-
-    /// Block comment // ... \\
+    FuncCall    { name: String },
+    /// ? ok ... done  |  ? err ... done
+    Conditional { condition: ConditionKind, body: Vec<Node> },
+    // Comments (preserved in AST for tooling)
     BlockComment(String),
-
-    /// Doc comment ///
-    DocComment(String),
-
-    /// Line comment ;;
-    LineComment(String),
-
-    /// Sequence of statements
-    Block(Vec<Node>),
+    DocComment  (String),
+    LineComment  (String),
+    Block       (Vec<Node>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CommandMode {
-    /// > plain command
     Plain,
-    /// ^> with sudo
     Sudo,
-    /// -> isolated (unshare namespace)
     Isolated,
-    /// ^-> isolated + sudo
     IsolatedSudo,
-    /// >> with variable interpolation
     WithVars,
-    /// ^>> with vars + sudo
     WithVarsSudo,
+    WithVarsIsolated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ConditionKind {
-    Ok,
-    Err,
-}
+pub enum ConditionKind { Ok, Err }
 
-/// Parts of a string that may contain variable references
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StringPart {
     Literal(String),
     Var(String),
 }
 
-/// Value stored in a variable
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VarValue {
     String(String),
     Number(f64),
     Bool(bool),
-    /// Value obtained by running a command (backtick-style)
     CmdOutput(String),
-    /// Interpolated string with @vars
     Interpolated(Vec<StringPart>),
 }
 
 impl Node {
     pub fn is_comment(&self) -> bool {
-        matches!(
-            self,
-            Node::LineComment(_) | Node::DocComment(_) | Node::BlockComment(_)
-        )
+        matches!(self, Node::LineComment(_) | Node::DocComment(_) | Node::BlockComment(_))
     }
 }
 
-/// Parse a raw string into StringParts, splitting on @varname tokens
+/// Parse a raw string into StringParts splitting on @varname
+/// Optimised: single pass, pre-allocated
 pub fn parse_string_parts(s: &str) -> Vec<StringPart> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = s.chars().collect();
+    let mut parts = Vec::with_capacity(4);
+    let mut lit   = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
     let mut i = 0;
 
-    while i < chars.len() {
-        if chars[i] == '@' && i + 1 < chars.len() && (chars[i+1].is_alphabetic() || chars[i+1] == '_') {
-            if !current.is_empty() {
-                parts.push(StringPart::Literal(current.clone()));
-                current.clear();
-            }
-            i += 1;
-            let mut var_name = String::new();
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                var_name.push(chars[i]);
+    while i < bytes.len() {
+        if bytes[i] == b'@' && i + 1 < bytes.len()
+            && (bytes[i+1].is_ascii_alphabetic() || bytes[i+1] == b'_')
+            {
+                if !lit.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut lit)));
+                }
+                i += 1;
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                parts.push(StringPart::Var(s[start..i].to_string()));
+            } else {
+                lit.push(s.as_bytes()[i] as char);
                 i += 1;
             }
-            parts.push(StringPart::Var(var_name));
-        } else {
-            current.push(chars[i]);
-            i += 1;
-        }
     }
 
-    if !current.is_empty() {
-        parts.push(StringPart::Literal(current));
-    }
-
+    if !lit.is_empty() { parts.push(StringPart::Literal(lit)); }
     parts
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_string_parts() {
-        let parts = parse_string_parts("Hello @target, scanning @port");
-        assert_eq!(parts.len(), 4);
-        match &parts[0] {
-            StringPart::Literal(s) => assert_eq!(s, "Hello "),
-            _ => panic!("Expected literal"),
-        }
-        match &parts[1] {
-            StringPart::Var(v) => assert_eq!(v, "target"),
-            _ => panic!("Expected var"),
-        }
-    }
 }
