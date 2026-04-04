@@ -20,23 +20,38 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
-    }
+    pub fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0 } }
 
-    fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
-    }
+    #[inline]
+    fn peek(&self) -> &Token { self.tokens.get(self.pos).unwrap_or(&Token::Eof) }
 
     fn advance(&mut self) -> Token {
-        let tok = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
+        let t = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
         self.pos += 1;
-        tok
+        t
     }
 
     fn skip_newlines(&mut self) {
-        while matches!(self.peek(), Token::Newline | Token::Indent(_)) {
-            self.advance();
+        while matches!(self.peek(), Token::Newline | Token::Indent(_)) { self.advance(); }
+    }
+
+    fn parse_var_value(value: String) -> VarValue {
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            let inner = &value[1..value.len()-1];
+            let parts = parse_string_parts(inner);
+            if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
+                return VarValue::Interpolated(parts);
+            }
+            return VarValue::String(inner.to_string());
+        }
+        if let Ok(n) = value.parse::<f64>() { return VarValue::Number(n); }
+        if value == "true"  { return VarValue::Bool(true); }
+        if value == "false" { return VarValue::Bool(false); }
+        let parts = parse_string_parts(&value);
+        if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
+            VarValue::Interpolated(parts)
+        } else {
+            VarValue::String(value)
         }
     }
 
@@ -44,119 +59,72 @@ impl Parser {
         self.skip_newlines();
 
         match self.peek().clone() {
-            Token::Eof => Ok(None),
+            Token::Eof | Token::Done => Ok(None),
+            Token::Newline | Token::Indent(_) => { self.advance(); Ok(None) }
 
-            Token::LineComment(text) => {
-                self.advance();
-                Ok(Some(Node::LineComment(text)))
-            }
+            Token::LineComment(t)  => { self.advance(); Ok(Some(Node::LineComment(t))) }
+            Token::DocComment(t)   => { self.advance(); Ok(Some(Node::DocComment(t))) }
+            Token::BlockComment(t) => { self.advance(); Ok(Some(Node::BlockComment(t))) }
 
-            Token::DocComment(text) => {
-                self.advance();
-                Ok(Some(Node::DocComment(text)))
-            }
-
-            Token::BlockComment(text) => {
-                self.advance();
-                Ok(Some(Node::BlockComment(text)))
-            }
-
+            // ~> print
             Token::Print(msg) => {
                 self.advance();
-                let parts = parse_string_parts(&msg);
-                Ok(Some(Node::Print { parts }))
+                Ok(Some(Node::Print { parts: parse_string_parts(&msg) }))
+            }
+
+            // :: quick-call
+            Token::QuickCall { name, args } => {
+                self.advance();
+                Ok(Some(Node::QuickCall {
+                    name,
+                    args: parse_string_parts(&args),
+                }))
             }
 
             Token::Cmd(raw) => {
                 self.advance();
-                Ok(Some(Node::Command {
-                    raw,
-                    mode: CommandMode::Plain,
-                    interpolate: false,
-                }))
+                Ok(Some(Node::Command { raw, mode: CommandMode::Plain, interpolate: false }))
             }
-
             Token::CmdSudo(raw) => {
                 self.advance();
-                Ok(Some(Node::Command {
-                    raw,
-                    mode: CommandMode::Sudo,
-                    interpolate: false,
-                }))
+                Ok(Some(Node::Command { raw, mode: CommandMode::Sudo, interpolate: false }))
             }
-
             Token::CmdIsolated(raw) => {
                 self.advance();
-                Ok(Some(Node::Command {
-                    raw,
-                    mode: CommandMode::Isolated,
-                    interpolate: false,
-                }))
+                Ok(Some(Node::Command { raw, mode: CommandMode::Isolated, interpolate: false }))
             }
-
             Token::CmdIsolatedSudo(raw) => {
                 self.advance();
-                Ok(Some(Node::Command {
-                    raw,
-                    mode: CommandMode::IsolatedSudo,
-                    interpolate: false,
-                }))
+                Ok(Some(Node::Command { raw, mode: CommandMode::IsolatedSudo, interpolate: false }))
             }
-
             Token::CmdWithVars(raw) => {
                 self.advance();
-                Ok(Some(Node::Command {
-                    raw,
-                    mode: CommandMode::WithVars,
-                    interpolate: true,
-                }))
+                Ok(Some(Node::Command { raw, mode: CommandMode::WithVars, interpolate: true }))
             }
-
             Token::CmdWithVarsSudo(raw) => {
                 self.advance();
-                Ok(Some(Node::Command {
-                    raw,
-                    mode: CommandMode::WithVarsSudo,
-                    interpolate: true,
-                }))
+                Ok(Some(Node::Command { raw, mode: CommandMode::WithVarsSudo, interpolate: true }))
+            }
+            Token::CmdWithVarsIsolated(raw) => {
+                self.advance();
+                Ok(Some(Node::Command { raw, mode: CommandMode::WithVarsIsolated, interpolate: true }))
             }
 
             Token::VarDecl { name, value } => {
                 self.advance();
-                let var_value = if value.starts_with('"') && value.ends_with('"') {
-                    let inner = &value[1..value.len()-1];
-                    let parts = parse_string_parts(inner);
-                    if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
-                        VarValue::Interpolated(parts)
-                    } else {
-                        VarValue::String(inner.to_string())
-                    }
-                } else if let Ok(n) = value.parse::<f64>() {
-                    VarValue::Number(n)
-                } else if value == "true" {
-                    VarValue::Bool(true)
-                } else if value == "false" {
-                    VarValue::Bool(false)
-                } else {
-                    // Check for @vars in unquoted strings
-                    let parts = parse_string_parts(&value);
-                    if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
-                        VarValue::Interpolated(parts)
-                    } else {
-                        VarValue::String(value)
-                    }
-                };
-                Ok(Some(Node::VarDecl { name, value: var_value }))
+                Ok(Some(Node::VarDecl { name, value: Self::parse_var_value(value) }))
             }
 
-            Token::VarRef(name) => {
-                self.advance();
-                Ok(Some(Node::VarRef(name)))
-            }
+            Token::VarRef(name) => { self.advance(); Ok(Some(Node::VarRef(name))) }
 
             Token::Dependency(dep) => {
                 self.advance();
                 Ok(Some(Node::Dependency { name: dep }))
+            }
+
+            Token::Import { lib, detail } => {
+                self.advance();
+                Ok(Some(Node::Import { lib, detail }))
             }
 
             Token::FuncDef(name) => {
@@ -173,30 +141,13 @@ impl Parser {
             Token::IfOk => {
                 self.advance();
                 let body = self.parse_block()?;
-                Ok(Some(Node::Conditional {
-                    condition: ConditionKind::Ok,
-                    body,
-                }))
+                Ok(Some(Node::Conditional { condition: ConditionKind::Ok, body }))
             }
 
             Token::IfErr => {
                 self.advance();
                 let body = self.parse_block()?;
-                Ok(Some(Node::Conditional {
-                    condition: ConditionKind::Err,
-                    body,
-                }))
-            }
-
-            Token::Done => {
-                // Done is consumed by parse_block, hitting it here is unexpected in top-level
-                // but we return None to signal block end
-                Ok(None)
-            }
-
-            Token::Newline | Token::Indent(_) => {
-                self.advance();
-                Ok(None)
+                Ok(Some(Node::Conditional { condition: ConditionKind::Err, body }))
             }
 
             tok => {
@@ -207,45 +158,30 @@ impl Parser {
         }
     }
 
-    /// Parse a block of statements terminated by `done` or EOF
     fn parse_block(&mut self) -> Result<Vec<Node>, ParseError> {
-        let mut nodes = Vec::new();
+        let mut nodes = Vec::with_capacity(8);
         loop {
             self.skip_newlines();
             match self.peek() {
-                Token::Done => {
-                    self.advance(); // consume 'done'
-                    break;
-                }
-                Token::Eof => {
-                    return Err(ParseError::MissingDone);
-                }
-                _ => {
-                    if let Some(node) = self.parse_node()? {
-                        nodes.push(node);
-                    }
-                }
+                Token::Done => { self.advance(); break; }
+                Token::Eof  => return Err(ParseError::MissingDone),
+                _ => { if let Some(n) = self.parse_node()? { nodes.push(n); } }
             }
         }
         Ok(nodes)
     }
 
     pub fn parse(&mut self) -> Result<Vec<Node>, ParseError> {
-        let mut nodes = Vec::new();
+        let mut nodes = Vec::with_capacity(32);
         loop {
             self.skip_newlines();
-            if matches!(self.peek(), Token::Eof) {
-                break;
-            }
-            if let Some(node) = self.parse_node()? {
-                nodes.push(node);
-            }
+            if matches!(self.peek(), Token::Eof) { break; }
+            if let Some(n) = self.parse_node()? { nodes.push(n); }
         }
         Ok(nodes)
     }
 }
 
-/// Convenience function: lex + parse source string
 pub fn parse_source(source: &str) -> Result<Vec<Node>, ParseError> {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize()?;
