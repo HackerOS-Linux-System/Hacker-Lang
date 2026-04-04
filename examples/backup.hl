@@ -1,0 +1,99 @@
+/// Backup narzedzie dla HackerOS
+/// Uzycie: hl backup.hl
+/// Tworzy archiwum tar.gz wybranego katalogu
+
+// tar
+// gzip
+
+# std/sys
+# std/fs
+
+% source_dir = @FS_HOME
+% backup_dir = /tmp/hl_backups
+% timestamp  = backup
+
+:: hr 50
+:: bold   HL Backup Tool
+:: hr 50
+
+~> Zrodlo:  @source_dir
+~> Cel:     @backup_dir
+~> System:  @SYS_OS
+
+: sprawdz_srodowisko def
+    :: isdir @source_dir
+
+    ? ok
+        :: green Katalog zrodlowy istnieje: @source_dir
+    done
+
+    ? err
+        :: red   Katalog zrodlowy nie istnieje: @source_dir
+    done
+
+    :: which tar
+
+    ? ok
+        :: green tar dostepny
+    done
+
+    ? err
+        :: red   tar niedostepny — instaluj przez: // tar
+    done
+done
+
+: przygotuj_katalog def
+    ~> Przygotowuje katalog backupow...
+    > mkdir -p @backup_dir
+
+    ? ok
+        :: green Katalog @backup_dir gotowy.
+    done
+
+    ? err
+        :: red   Nie mozna utworzyc @backup_dir
+    done
+done
+
+: wykonaj_backup def
+    % plik_backup = @backup_dir/@timestamp.tar.gz
+
+    ~> Tworze backup @source_dir...
+    ~> Plik: @plik_backup
+    >> tar -czf @plik_backup @source_dir
+
+    ? ok
+        :: green Backup zakonczony!
+        ~> Plik: @plik_backup
+        >> ls -lh @plik_backup
+    done
+
+    ? err
+        :: red   Blad podczas tworzenia backupu.
+    done
+done
+
+: weryfikuj_backup def
+    % plik_backup = @backup_dir/@timestamp.tar.gz
+    :: isfile @plik_backup
+
+    ? ok
+        :: green Weryfikacja OK — plik istnieje.
+        >> tar -tzf @plik_backup
+    done
+
+    ? err
+        :: red   Plik backupu nie istnieje!
+    done
+done
+
+:: nl
+-- sprawdz_srodowisko
+-- przygotuj_katalog
+-- wykonaj_backup
+-- weryfikuj_backup
+
+:: nl
+:: hr 50
+:: green Backup zakonczony!
+:: hr 50
