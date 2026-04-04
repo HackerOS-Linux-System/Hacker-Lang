@@ -1,0 +1,76 @@
+/// Prosty skaner portow TCP
+/// Uzycie: hl port_scanner.hl
+/// Wymaga: nmap
+
+// nmap
+
+# std/net <- ports
+# std/sys
+
+% target   = 127.0.0.1
+% ports    = 22,80,443,3306,5432,8080,8443
+% out_file = /tmp/hl_scan.txt
+
+:: hr 50
+:: bold   HL Port Scanner
+:: hr 50
+
+~> Target:   @target
+~> Porty:    @ports
+~> Output:   @out_file
+~> System:   @SYS_OS
+
+:: nl
+
+: szybki_ping def
+    ~> Sprawdzam czy host odpowiada...
+    >> ping -c 1 -W 2 @target
+
+    ? ok
+        :: green @target jest osiagalny
+    done
+
+    ? err
+        :: yellow @target nie odpowiada na ping (kontynuuje skan)
+    done
+done
+
+: pelny_skan def
+    ~> Skanuję porty @ports...
+    >> nmap -sV -p @ports @target
+
+    ? ok
+        :: green Skan zakonczony.
+    done
+
+    ? err
+        :: red   Blad skanowania — sprawdz uprawnienia.
+    done
+done
+
+: szybki_skan def
+    ~> Szybki skan (top 100)...
+    >> nmap -F @target
+
+    ? ok
+        :: green Szybki skan OK.
+    done
+done
+
+: sprawdz_ssh def
+    ~> SSH (port @PORT_SSH)...
+    >> nmap -p @PORT_SSH @target
+
+    ? ok
+        :: green SSH sprawdzony.
+    done
+done
+
+-- szybki_ping
+-- pelny_skan
+-- sprawdz_ssh
+
+:: nl
+:: hr 50
+:: green Skanowanie zakonczone.
+:: hr 50
