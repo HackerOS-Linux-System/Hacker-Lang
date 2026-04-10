@@ -5,28 +5,24 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
 
-/// HL shell keywords for completion
 const HL_KEYWORDS: &[&str] = &[
-    "::",   // print
-">",    // command
-"^>",   // sudo command
-"->",   // isolated command
-"^->",  // isolated + sudo
-">>",   // command with vars
-"^>>",  // command with vars + sudo
-"%",    // var decl
-"@",    // var ref
-"//",   // dependency
-";;",   // line comment
-"///",  // doc comment
-":",    // function def
-"--",   // function call
-"? ok", // if ok
-"? err",// if err
-"done", // end block
-"def",
-"true",
-"false",
+    "~>",
+"::",
+"::upper",  "::lower",  "::len",    "::trim",   "::rev",
+"::split",  "::lines",  "::words",  "::replace","::contains",
+"::startswith", "::endswith", "::repeat",
+"::abs",    "::ceil",   "::floor",  "::round",  "::max",    "::min",    "::rand",
+"::env",    "::date",   "::time",   "::pid",    "::which",
+"::exists", "::isdir",  "::isfile", "::basename","::dirname","::read",
+"::set",    "::get",    "::type",   "::unset",
+"::nl",     "::hr",     "::bold",   "::red",    "::green",  "::yellow", "::cyan",
+">",    "^>",   "->",   "^->",  ">>",   "^>>",  "->>",
+"%",    "@",
+"//",   "#",
+";;",   "///",
+":",    "--",
+"? ok", "? err", "done", "def",
+"true", "false",
 ];
 
 pub struct HlCompleter {
@@ -35,16 +31,12 @@ pub struct HlCompleter {
 
 impl HlCompleter {
     pub fn new() -> Self {
-        Self {
-            file_completer: FilenameCompleter::new(),
-        }
+        Self { file_completer: FilenameCompleter::new() }
     }
 }
 
 impl Default for HlCompleter {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Completer for HlCompleter {
@@ -56,7 +48,6 @@ impl Completer for HlCompleter {
         pos: usize,
         ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Try HL keywords first
         let word_start = line[..pos]
         .rfind(|c: char| c.is_whitespace())
         .map(|i| i + 1)
@@ -67,7 +58,7 @@ impl Completer for HlCompleter {
         .iter()
         .filter(|kw| kw.starts_with(current_word))
         .map(|kw| Pair {
-            display: kw.to_string(),
+            display:     kw.to_string(),
              replacement: kw.to_string(),
         })
         .collect();
@@ -76,32 +67,28 @@ impl Completer for HlCompleter {
             return Ok((word_start, kw_matches));
         }
 
-        // Fall back to file completion
         self.file_completer.complete(line, pos, ctx)
     }
 }
 
 impl Highlighter for HlCompleter {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-        // Simple syntax highlighting for the prompt line
         let mut result = String::new();
-        let line = line;
 
-        // Highlight operators
-        if line.starts_with("::") {
+        if line.starts_with("~>") {
             result.push_str("\x1b[32m");
             result.push_str(line);
             result.push_str("\x1b[0m");
             return Cow::Owned(result);
         }
-        if line.starts_with(";;") {
-            result.push_str("\x1b[90m");
+        if line.starts_with("::") {
+            result.push_str("\x1b[35m");
             result.push_str(line);
             result.push_str("\x1b[0m");
             return Cow::Owned(result);
         }
-        if line.starts_with("///") {
-            result.push_str("\x1b[36m");
+        if line.starts_with(";;") || line.starts_with("///") {
+            result.push_str("\x1b[90m");
             result.push_str(line);
             result.push_str("\x1b[0m");
             return Cow::Owned(result);
@@ -128,7 +115,8 @@ impl Highlighter for HlCompleter {
         Cow::Borrowed(line)
     }
 
-    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
+    /// rustyline 12 — 3 params total (no `_forced`)
+    fn highlight_char(&self, _line: &str, _pos: usize) -> bool {
         true
     }
 }
@@ -137,19 +125,19 @@ impl Hinter for HlCompleter {
     type Hint = String;
 
     fn hint(&self, line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        // Show hints for common operators
         match line.trim() {
-            "::" => Some(" <message>  – print to stdout".to_string()),
-            ">" => Some(" <command>  – run command".to_string()),
-            "%" => Some(" <name> = <value>  – declare variable".to_string()),
-            "//" => Some(" <package>  – require dependency".to_string()),
-            ":" => Some(" <name> def  – define function".to_string()),
-            "--" => Some(" <name>  – call function".to_string()),
+            "~>"  => Some(" <message>  -- wypisz tekst".to_string()),
+            "::"  => Some(" <fn> [args]  -- quick-function".to_string()),
+            ">"   => Some(" <cmd>  -- uruchom komende".to_string()),
+            "%"   => Some(" <n>=<v>  -- deklaruj zmienna".to_string()),
+            "//"  => Some(" <pkg>  -- zaleznosc".to_string()),
+            "#"   => Some(" <lib>  -- importuj biblioteke".to_string()),
+            ":"   => Some(" <n> def  -- zdefiniuj funkcje".to_string()),
+            "--"  => Some(" <n>  -- wywolaj funkcje".to_string()),
             _ => None,
         }
     }
 }
 
 impl Validator for HlCompleter {}
-
 impl Helper for HlCompleter {}
