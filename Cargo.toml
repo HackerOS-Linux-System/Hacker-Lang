@@ -2,29 +2,36 @@
 members = [
     "source-code/core",
     "source-code/shell",
+    "source-code/compiler",
     "source-code/cli",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
 edition = "2021"
+version = "0.4.0"
 authors = ["HackerOS Team <hackeros068@gmail.com>"]
-license = "GPL-3.0"
 
 [workspace.dependencies]
-anyhow = "1.0"
-thiserror = "1.0"
-tracing = "0.1"
+anyhow        = "1"
+colored       = "2"
+dirs          = "5"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+tracing       = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+clap          = { version = "4", features = ["derive"] }
+rustyline     = "12"
+rustc-hash    = "1"
+smallvec      = "1"
+which         = "6"
+nix           = { version = "0.27", features = ["user"] }
+thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-clap = { version = "4.0", features = ["derive", "color"] }
-colored = "2.0"
-rustyline = "14.0"
-nix = { version = "0.27", features = ["process", "signal", "user"] }
-which = "6.0"
-dirs = "5.0"
-rustc-hash = "1.1"
-smallvec = { version = "1.11", features = ["const_generics"] }
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = true
+panic         = "abort"
+opt-level     = 3
