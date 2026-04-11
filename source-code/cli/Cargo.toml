@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 hl-core = { path = "../core" }
 hl-shell = { path = "../shell" }
+hl-compiler = { path = "../compiler" }
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
