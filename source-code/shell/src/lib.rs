@@ -9,7 +9,7 @@ use hl_core::env::Env;
 use hl_core::{check_source, run_source};
 use rustyline::error::ReadlineError;
 use rustyline::{CompletionType, Config, EditMode, Editor};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{debug, warn};
 
 use builtins::{try_builtin, BuiltinResult};
@@ -17,7 +17,7 @@ use completion::HlCompleter;
 use prompt::Prompt;
 
 const HISTORY_FILE: &str = ".hl_history";
-const HLRC_FILE: &str = ".hlrc";
+const HLRC_FILE:    &str = ".hlrc";
 
 // ── REPL (hl repl) ────────────────────────────────────────────────────────────
 
@@ -27,10 +27,8 @@ pub fn run_interactive(env: &mut Env) -> Result<()> {
 }
 
 // ── Shell (hl shell) ──────────────────────────────────────────────────────────
-// Używany jako zamiennik dla bash/zsh — ładuje ~/.hlrc i startuje pętlę powłoki.
 
 pub fn run_as_shell(config: Option<&Path>, env: &mut Env) -> Result<()> {
-    // Załaduj konfigurację
     let rc_path = config
     .map(|p| p.to_path_buf())
     .unwrap_or_else(|| {
@@ -43,7 +41,6 @@ pub fn run_as_shell(config: Option<&Path>, env: &mut Env) -> Result<()> {
         execute_source(&rc_src, &fname, env);
     }
 
-    // Ustaw zmienną SHELL na hl
     if let Ok(exe) = std::env::current_exe() {
         env.set_var("SHELL", hl_core::Value::String(exe.display().to_string()));
     }
@@ -152,7 +149,7 @@ pub fn execute_source(source: &str, filename: &str, env: &mut Env) {
 
     match try_builtin(trimmed, env) {
         BuiltinResult::Handled(code) => { env.last_exit = code; return; }
-        BuiltinResult::NotBuiltin => {}
+        BuiltinResult::NotBuiltin    => {}
     }
 
     let renderer = DiagRenderer::new(filename, source);
@@ -180,7 +177,7 @@ pub fn execute_source(source: &str, filename: &str, env: &mut Env) {
 
     debug!("exec: {}", trimmed);
     match run_source(source, env) {
-        Ok(r) => env.last_exit = r.exit_code,
+        Ok(r)  => env.last_exit = r.exit_code,
         Err(e) => {
             let d = hl_core::Diag::error(e.to_string())
             .with_note("błąd runtime");
@@ -211,7 +208,7 @@ pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
     }
 
     match run_source(&source, env) {
-        Ok(r) => Ok(r.exit_code),
+        Ok(r)  => Ok(r.exit_code),
         Err(e) => {
             let d = hl_core::Diag::error(e.to_string())
             .with_note(format!("błąd runtime w '{}'", filename));
@@ -239,7 +236,7 @@ fn print_banner() {
         ██╔══██║██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
         ██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
         ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-        L A N G  v0.4 — REPL
+        L A N G  v0.3 — REPL
         "#
         .bright_cyan()
         .bold()
