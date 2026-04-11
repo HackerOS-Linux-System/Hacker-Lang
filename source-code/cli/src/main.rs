@@ -4,7 +4,7 @@ use colored::Colorize;
 use hl_core::diagnostics::{parse_error_to_diag, DiagRenderer, DiagSummary, lint_source};
 use hl_core::env::Env;
 use hl_core::{check_source, run_source, cmd_lib_list, cmd_lib_install, cmd_lib_remove, cmd_clean_cache};
-use hl_shell::{run_file, run_interactive, run_as_shell};
+use hl_shell::{run_interactive, run_as_shell};
 use hl_compiler::{compile, CompileOptions, CompileMode};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, fmt};
