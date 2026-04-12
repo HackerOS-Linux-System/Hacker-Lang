@@ -14,16 +14,42 @@ pub struct ExecResult {
 }
 
 impl ExecResult {
-    #[inline] pub fn ok()        -> Self { Self { exit_code: 0, stdout: None } }
-    #[inline] pub fn err(n: i32) -> Self { Self { exit_code: n, stdout: None } }
-    #[inline] pub fn is_ok(&self)-> bool { self.exit_code == 0 }
+    #[inline] pub fn ok()         -> Self { Self { exit_code: 0, stdout: None } }
+    #[inline] pub fn err(n: i32)  -> Self { Self { exit_code: n, stdout: None } }
+    #[inline] pub fn is_ok(&self) -> bool { self.exit_code == 0 }
 }
 
-/// Shell-split string — SmallVec avoids heap alloc for typical short commands
+// ── Wykryj czy komenda wymaga powłoki ────────────────────────────────────────
+
+/// Zwraca true jeśli komenda zawiera operatory wymagające powłoki:
+///   &&  ||  |  ;  >  >>  <  `...`  $(...)  {  }  *  ?  ~  $VAR
+#[inline]
+fn needs_shell(cmd: &str) -> bool {
+    cmd.contains("&&")
+        || cmd.contains("||")
+        || cmd.contains(" | ")
+        || cmd.starts_with("| ")
+        || cmd.ends_with(" |")
+        || cmd.contains(';')
+        || cmd.contains(" > ")
+        || cmd.contains(" >> ")
+        || cmd.contains(" < ")
+        || cmd.contains('`')
+        || cmd.contains("$(")
+        || cmd.contains('*')
+        || cmd.contains('?')
+        || cmd.contains("$HOME")
+        || cmd.contains("$USER")
+        || cmd.contains("$PATH")
+        || cmd.contains("${")
+}
+
+// ── Shell-split dla prostych komend (bez operatorów) ─────────────────────────
+
 #[inline]
 fn shell_words(s: &str) -> SmallVec<[String; 8]> {
     let mut words: SmallVec<[String; 8]> = SmallVec::new();
-    let mut cur = String::with_capacity(32);
+    let mut cur  = String::with_capacity(32);
     let mut in_s = false;
     let mut in_d = false;
 
@@ -44,58 +70,111 @@ fn shell_words(s: &str) -> SmallVec<[String; 8]> {
     words
 }
 
+// ── Uruchom komendę ───────────────────────────────────────────────────────────
+
 fn run_command(
-    raw: &str,
-    sudo: bool,
+    raw:      &str,
+    sudo:     bool,
     isolated: bool,
-    env: &mut Env,
-    capture: bool,
+    env:      &mut Env,
+    capture:  bool,
 ) -> Result<ExecResult> {
     let expanded = env.interpolate(raw);
     let trimmed  = expanded.trim();
     debug!("run: {}", trimmed);
 
+    // Jeśli komenda zawiera operatory powłoki — użyj sh -c
+    if needs_shell(trimmed) {
+        return run_via_shell(trimmed, sudo, isolated, env, capture);
+    }
+
+    // Prosta komenda — exec bezpośrednio
     let parts = shell_words(trimmed);
     if parts.is_empty() { return Ok(ExecResult::ok()); }
 
-    let (program, args): (String, Vec<String>) = if isolated {
+    build_and_run(parts, sudo, isolated, capture)
+}
+
+/// Uruchom przez `sh -c "..."` (lub `sudo sh -c "..."` / `unshare ... sh -c "..."`)
+fn run_via_shell(
+    cmd:      &str,
+    sudo:     bool,
+    isolated: bool,
+    _env:     &mut Env,
+    capture:  bool,
+) -> Result<ExecResult> {
+    let (prog, args): (String, Vec<String>) = if isolated {
+        let sh_args = vec![
+            "--mount".into(), "--pid".into(),
+            "--net".into(), "--fork".into(), "--".into(),
+            "sh".into(), "-c".into(), cmd.to_string(),
+        ];
+        if sudo {
+            ("sudo".into(), {
+                let mut a = vec!["unshare".into()];
+                a.extend(sh_args);
+                a
+            })
+        } else {
+            ("unshare".into(), sh_args)
+        }
+    } else if sudo {
+        ("sudo".into(), vec!["sh".into(), "-c".into(), cmd.to_string()])
+    } else {
+        ("sh".into(), vec!["-c".into(), cmd.to_string()])
+    };
+
+    let mut cmd_builder = Command::new(&prog);
+    cmd_builder.args(&args).stdin(Stdio::inherit());
+
+    if capture {
+        cmd_builder.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out  = cmd_builder.output()?;
+        let code = out.status.code().unwrap_or(1);
+        return Ok(ExecResult {
+            exit_code: code,
+            stdout:    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+        });
+    }
+
+    cmd_builder.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    let code = cmd_builder.status()?.code().unwrap_or(1);
+    Ok(ExecResult { exit_code: code, stdout: None })
+}
+
+/// Uruchom prostą komendę bezpośrednio przez execv
+fn build_and_run(
+    parts:    SmallVec<[String; 8]>,
+    sudo:     bool,
+    isolated: bool,
+    capture:  bool,
+) -> Result<ExecResult> {
+    let (prog, args): (String, Vec<String>) = if isolated {
         let mut iso: Vec<String> = vec![
             "--mount".into(), "--pid".into(),
             "--net".into(), "--fork".into(), "--".into(),
         ];
         if sudo {
-            iso.insert(0, "unshare".into());
-            let mut a = vec!["sudo".to_string()];
-            a.extend(iso);
-            a.extend(parts.into_iter());
-            ("sudo".into(), a[1..].to_vec())
+            iso.extend(parts.into_iter());
+            ("sudo".into(), {
+                let mut a = vec!["unshare".into()];
+                a.extend(iso);
+                a
+            })
         } else {
             iso.extend(parts.into_iter());
             ("unshare".into(), iso)
         }
     } else if sudo {
-        let mut a: Vec<String> = parts.into_iter().collect();
-        a.insert(0, "sudo".into());
-        // Actually sudo is the program, rest are args
-        let prog = a.remove(0);
-        (prog, a) // sudo + original args
+        let all: Vec<String> = parts.into_iter().collect();
+        ("sudo".into(), all)
     } else {
         let mut it = parts.into_iter();
         let bin = it.next().unwrap();
         (bin, it.collect())
     };
 
-    // Fix: sudo case should be ("sudo", [original_cmd, args...])
-    let (program, args) = if sudo && !isolated {
-        let all: Vec<String> = std::iter::once(expanded.trim().to_string())
-        .flat_map(|s| shell_words(&s).into_iter())
-        .collect();
-        ("sudo".into(), all)
-    } else {
-        (program, args)
-    };
-
-    let mut cmd = Command::new(&program);
+    let mut cmd = Command::new(&prog);
     cmd.args(&args).stdin(Stdio::inherit());
 
     if capture {
@@ -104,7 +183,7 @@ fn run_command(
         let code = out.status.code().unwrap_or(1);
         return Ok(ExecResult {
             exit_code: code,
-            stdout: Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+            stdout:    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
         });
     }
 
@@ -112,6 +191,8 @@ fn run_command(
     let code = cmd.status()?.code().unwrap_or(1);
     Ok(ExecResult { exit_code: code, stdout: None })
 }
+
+// ── AST executor ─────────────────────────────────────────────────────────────
 
 pub fn exec_nodes(nodes: &[Node], env: &mut Env) -> Result<ExecResult> {
     let mut last = ExecResult::ok();
@@ -145,12 +226,14 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         // ── Commands ─────────────────────────────────────────────────────────
         Node::Command { raw, mode, .. } => {
             let trimmed = raw.trim();
+
+            // echo jest zawsze zakazane
             if trimmed.starts_with("echo ") || trimmed == "echo" {
                 bail!(
                     "Operator 'echo' jest zabroniony w Hacker Lang.\n\
-Użyj '~> {}' zamiast '> echo {}'",
-trimmed.trim_start_matches("echo").trim(),
-                      trimmed.trim_start_matches("echo").trim()
+                     Użyj '~> {}' zamiast '> echo {}'",
+                    trimmed.trim_start_matches("echo").trim(),
+                    trimmed.trim_start_matches("echo").trim()
                 );
             }
 
@@ -170,11 +253,11 @@ trimmed.trim_start_matches("echo").trim(),
         // ── Variable declaration ─────────────────────────────────────────────
         Node::VarDecl { name, value } => {
             let val = match value {
-                VarValue::String(s)       => Value::String(s.clone()),
-                VarValue::Number(n)       => Value::Number(*n),
-                VarValue::Bool(b)         => Value::Bool(*b),
-                VarValue::Interpolated(p) => Value::String(env.resolve_string_parts(p)),
-                VarValue::CmdOutput(cmd)  => {
+                VarValue::String(s)        => Value::String(s.clone()),
+                VarValue::Number(n)        => Value::Number(*n),
+                VarValue::Bool(b)          => Value::Bool(*b),
+                VarValue::Interpolated(p)  => Value::String(env.resolve_string_parts(p)),
+                VarValue::CmdOutput(cmd)   => {
                     let r = run_command(cmd, false, false, env, true)?;
                     Value::String(r.stdout.unwrap_or_default().trim().to_string())
                 }
@@ -209,15 +292,11 @@ trimmed.trim_start_matches("echo").trim(),
             Ok(ExecResult::ok())
         }
 
-        // ── Function call — Arc: no body clone ──────────────────────────────
+        // ── Function call ────────────────────────────────────────────────────
         Node::FuncCall { name } => {
             match env.get_function(name) {
-                // Arc clone is O(1), not O(n) like Vec clone
-                Some(body) => {
-                    let body_ref = body; // Arc<Vec<Node>>
-                    exec_nodes(&body_ref, env)
-                }
-                None => bail!("Niezdefiniowana funkcja: '{}'", name),
+                Some(body) => exec_nodes(&body, env),
+                None       => bail!("Niezdefiniowana funkcja: '{}'", name),
             }
         }
 
