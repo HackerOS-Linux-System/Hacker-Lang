@@ -1,4 +1,5 @@
 use thiserror::Error;
+use crate::import_spec::parse_import_line;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -8,9 +9,9 @@ pub enum Token {
     BlockComment(String),
 
     // ── Wyjście ──────────────────────────────────────────────────────────────
-    /// ~> message  — główny operator print (zastępuje echo)
+    /// ~> message  — główny operator print
     Print(String),
-    /// :: name [args]  — wywołanie quick-funkcji (:upper, :lower, :len, ...)
+    /// :: name [args]  — wywołanie quick-funkcji
     QuickCall { name: String, args: String },
 
     // ── Komendy systemowe (longest prefix first) ─────────────────────────────
@@ -70,7 +71,6 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
-        // Pre-allocate chars vec from str — faster than indexing UTF-8 repeatedly
         Self {
             source: source.chars().collect(),
             pos: 0, line: 1, col: 1,
@@ -102,7 +102,6 @@ impl Lexer {
         while matches!(self.peek(), Some(' ') | Some('\t')) { self.advance(); }
     }
 
-    /// Optimised: collect chars until newline using extend, then trim in-place
     fn read_line(&mut self) -> String {
         let start = self.pos;
         let mut end = self.pos;
@@ -110,11 +109,8 @@ impl Lexer {
             end += 1;
         }
         let s: String = self.source[start..end].iter().collect();
-        // advance pos
         for _ in start..end { self.advance(); }
-        // trim_end without re-allocation
         let trimmed = s.trim_end().to_string();
-        // also trim_start without re-allocation
         let trim_len = trimmed.trim_start().len();
         if trim_len < trimmed.len() {
             trimmed[trimmed.len()-trim_len..].to_string()
@@ -161,7 +157,6 @@ impl Lexer {
             if c.is_alphanumeric() || c == '_' || c == '-' { s.push(c); self.advance(); }
             else { break; }
         }
-        // strip trailing hyphens (avoid swallowing -> etc.)
         while s.ends_with('-') { s.pop(); }
         s
     }
@@ -182,7 +177,6 @@ impl Lexer {
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
-        // Pre-allocate with generous capacity to avoid resizes
         let mut tokens = Vec::with_capacity(self.source.len() / 8 + 16);
 
         while self.pos < self.source.len() {
@@ -192,7 +186,7 @@ impl Lexer {
                 '\n' => { tokens.push(Token::Newline); self.advance(); }
                 ' ' | '\t' | '\r' => { self.advance(); }
 
-                // ── ~> print (główny operator output) ────────────────────────
+                // ── ~> print ─────────────────────────────────────────────────
                 '~' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2);
                     self.skip_ws();
@@ -332,19 +326,26 @@ impl Lexer {
                     }
                 }
 
-                // ── # lib or # lib <- detail ─────────────────────────────────
+                // ── # import — nowa i stara składnia ─────────────────────────
+                // Nowa: # <std/net> | <detail>
+                //       # <std/net:1.2>
+                //       # <virus/hashlib:2.0>
+                //       # <community/github.com/owner/repo>
+                // Stara (kompatybilność):
+                //       # std/net <- ports
+                //       # owner/repo
                 '#' => {
                     self.advance();
                     self.skip_ws();
                     let rest = self.read_line();
-                    if let Some(pos) = rest.find("<-") {
-                        let lib    = rest[..pos].trim().to_string();
-                        let detail = rest[pos+2..].trim().to_string();
+
+                    if let Some(decl) = parse_import_line(&rest) {
                         tokens.push(Token::Import {
-                            lib,
-                            detail: if detail.is_empty() { None } else { Some(detail) },
+                            lib:    decl.spec,
+                            detail: decl.detail,
                         });
                     } else {
+                        // Fallback: traktuj jako surowy import
                         tokens.push(Token::Import { lib: rest, detail: None });
                     }
                 }
