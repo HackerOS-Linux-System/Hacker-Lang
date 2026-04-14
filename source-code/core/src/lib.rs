@@ -3,6 +3,7 @@ pub mod deps;
 pub mod diagnostics;
 pub mod env;
 pub mod executor;
+pub mod import_spec;
 pub mod lexer;
 pub mod libs;
 pub mod parser;
