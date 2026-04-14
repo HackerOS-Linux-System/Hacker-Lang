@@ -70,7 +70,7 @@ fn parse_legacy(line: &str) -> Option<ImportDecl> {
             // Opakuj jako community
             Some(ImportDecl {
                 spec:   format!("community/{}", lib),
-                detail: None,
+                 detail: None,
             })
         } else {
             Some(ImportDecl { spec: lib.to_string(), detail: None })
@@ -127,11 +127,11 @@ mod inner {
             }
             "community" => Some(ImportSource::Community {
                 path:    rest.to_string(),
-                version,
+                                version,
             }),
             "virus" => Some(ImportSource::Virus {
                 name:    rest.to_string(),
-                version,
+                            version,
             }),
             _ => None,
         }
@@ -204,7 +204,7 @@ mod tests {
         let d = parse_import_line("<std/net> | <ports>").unwrap();
         let src = inner::resolve_spec(&d).unwrap();
         assert!(matches!(src, inner::ImportSource::Std { lib, detail: Some(det), .. }
-            if lib == "net" && det == "ports"));
+        if lib == "net" && det == "ports"));
     }
 
     #[test]
@@ -212,6 +212,6 @@ mod tests {
         let d = parse_import_line("<virus/hashlib:2.0>").unwrap();
         let src = inner::resolve_spec(&d).unwrap();
         assert!(matches!(src, inner::ImportSource::Virus { name, version: Some(v) }
-            if name == "hashlib" && v == "2.0"));
+        if name == "hashlib" && v == "2.0"));
     }
 }
