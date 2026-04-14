@@ -21,30 +21,37 @@ impl ExecResult {
 
 // ── Wykryj czy komenda wymaga powłoki ────────────────────────────────────────
 
-/// Zwraca true jeśli komenda zawiera operatory wymagające powłoki:
-///   &&  ||  |  ;  >  >>  <  `...`  $(...)  {  }  *  ?  ~  $VAR
+/// Zwraca true jeśli komenda zawiera operatory które muszą być obsłużone przez sh:
+///   &&  ||  |  ;  redirecty  podstawienia  globy  zmienne środowiskowe
 #[inline]
 fn needs_shell(cmd: &str) -> bool {
+    // Operatory logiczne i potoki
     cmd.contains("&&")
-        || cmd.contains("||")
-        || cmd.contains(" | ")
-        || cmd.starts_with("| ")
-        || cmd.ends_with(" |")
-        || cmd.contains(';')
-        || cmd.contains(" > ")
-        || cmd.contains(" >> ")
-        || cmd.contains(" < ")
-        || cmd.contains('`')
-        || cmd.contains("$(")
-        || cmd.contains('*')
-        || cmd.contains('?')
-        || cmd.contains("$HOME")
-        || cmd.contains("$USER")
-        || cmd.contains("$PATH")
-        || cmd.contains("${")
+    || cmd.contains("||")
+    // Potok — spacja|spacja żeby nie łapać /dev/null| itp.
+    || cmd.contains(" | ")
+    || cmd.starts_with("| ")
+    // Separator komend
+    || cmd.contains(';')
+    // Przekierowania (nie łap -> operatora HL)
+    || cmd.contains(" > ")
+    || cmd.contains(" >> ")
+    || cmd.contains(" < ")
+    // Podstawienia
+    || cmd.contains('`')
+    || cmd.contains("$(")
+    // Zmienne środowiskowe powłoki (nie @zmienne HL)
+    || cmd.contains("$HOME")
+    || cmd.contains("$USER")
+    || cmd.contains("$PATH")
+    || cmd.contains("$1")
+    || cmd.contains("$2")
+    || cmd.contains("${")
+    // Globy
+    || (cmd.contains('*') && !cmd.contains("://"))
 }
 
-// ── Shell-split dla prostych komend (bez operatorów) ─────────────────────────
+// ── Shell-split dla prostych komend ──────────────────────────────────────────
 
 #[inline]
 fn shell_words(s: &str) -> SmallVec<[String; 8]> {
@@ -70,7 +77,7 @@ fn shell_words(s: &str) -> SmallVec<[String; 8]> {
     words
 }
 
-// ── Uruchom komendę ───────────────────────────────────────────────────────────
+// ── Główna funkcja uruchamiania ───────────────────────────────────────────────
 
 fn run_command(
     raw:      &str,
@@ -85,7 +92,7 @@ fn run_command(
 
     // Jeśli komenda zawiera operatory powłoki — użyj sh -c
     if needs_shell(trimmed) {
-        return run_via_shell(trimmed, sudo, isolated, env, capture);
+        return run_via_shell(trimmed, sudo, isolated, capture);
     }
 
     // Prosta komenda — exec bezpośrednio
@@ -95,85 +102,86 @@ fn run_command(
     build_and_run(parts, sudo, isolated, capture)
 }
 
-/// Uruchom przez `sh -c "..."` (lub `sudo sh -c "..."` / `unshare ... sh -c "..."`)
+// ── sh -c dla komend z operatorami ───────────────────────────────────────────
+
+/// Uruchom przez `sh -c "cmd"`.
+/// Tryby:
+///   plain:    sh -c "cmd"
+///   sudo:     sudo sh -c "cmd"
+///   isolated: unshare --mount --pid --net --fork -- sh -c "cmd"
+///   iso+sudo: sudo unshare --mount --pid --net --fork -- sh -c "cmd"
 fn run_via_shell(
     cmd:      &str,
     sudo:     bool,
     isolated: bool,
-    _env:     &mut Env,
     capture:  bool,
 ) -> Result<ExecResult> {
-    let (prog, args): (String, Vec<String>) = if isolated {
-        let sh_args = vec![
-            "--mount".into(), "--pid".into(),
-            "--net".into(), "--fork".into(), "--".into(),
-            "sh".into(), "-c".into(), cmd.to_string(),
-        ];
-        if sudo {
-            ("sudo".into(), {
-                let mut a = vec!["unshare".into()];
-                a.extend(sh_args);
-                a
-            })
-        } else {
-            ("unshare".into(), sh_args)
-        }
-    } else if sudo {
-        ("sudo".into(), vec!["sh".into(), "-c".into(), cmd.to_string()])
-    } else {
-        ("sh".into(), vec!["-c".into(), cmd.to_string()])
+    let sh_args  = vec!["-c".to_string(), cmd.to_string()];
+    let iso_args = vec![
+        "--mount".to_string(), "--pid".into(),
+        "--net".into(), "--fork".into(), "--".into(),
+        "sh".into(), "-c".into(), cmd.to_string(),
+    ];
+
+    let (prog, args): (String, Vec<String>) = match (sudo, isolated) {
+        (false, false) => ("sh".into(), sh_args),
+        (true,  false) => ("sudo".into(), {
+            let mut a = vec!["sh".into(), "-c".into()];
+            a.push(cmd.to_string());
+            a
+        }),
+        (false, true)  => ("unshare".into(), iso_args),
+        (true,  true)  => ("sudo".into(), {
+            let mut a = vec!["unshare".into()];
+            a.extend(iso_args);
+            a
+        }),
     };
 
-    let mut cmd_builder = Command::new(&prog);
-    cmd_builder.args(&args).stdin(Stdio::inherit());
-
-    if capture {
-        cmd_builder.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let out  = cmd_builder.output()?;
-        let code = out.status.code().unwrap_or(1);
-        return Ok(ExecResult {
-            exit_code: code,
-            stdout:    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
-        });
-    }
-
-    cmd_builder.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    let code = cmd_builder.status()?.code().unwrap_or(1);
-    Ok(ExecResult { exit_code: code, stdout: None })
+    exec_process(prog, args, capture)
 }
 
-/// Uruchom prostą komendę bezpośrednio przez execv
+// ── Bezpośrednie execv dla prostych komend ────────────────────────────────────
+
 fn build_and_run(
     parts:    SmallVec<[String; 8]>,
     sudo:     bool,
     isolated: bool,
     capture:  bool,
 ) -> Result<ExecResult> {
-    let (prog, args): (String, Vec<String>) = if isolated {
-        let mut iso: Vec<String> = vec![
-            "--mount".into(), "--pid".into(),
-            "--net".into(), "--fork".into(), "--".into(),
-        ];
-        if sudo {
-            iso.extend(parts.into_iter());
-            ("sudo".into(), {
-                let mut a = vec!["unshare".into()];
-                a.extend(iso);
-                a
-            })
-        } else {
-            iso.extend(parts.into_iter());
-            ("unshare".into(), iso)
+    let (prog, args): (String, Vec<String>) = match (sudo, isolated) {
+        (false, false) => {
+            let mut it = parts.into_iter();
+            let p = it.next().unwrap();
+            (p, it.collect())
         }
-    } else if sudo {
-        let all: Vec<String> = parts.into_iter().collect();
-        ("sudo".into(), all)
-    } else {
-        let mut it = parts.into_iter();
-        let bin = it.next().unwrap();
-        (bin, it.collect())
+        (true, false) => {
+            ("sudo".into(), parts.into_iter().collect())
+        }
+        (false, true) => {
+            let mut a = vec![
+                "--mount".into(), "--pid".into(),
+                "--net".into(), "--fork".into(), "--".into(),
+            ];
+            a.extend(parts.into_iter());
+            ("unshare".into(), a)
+        }
+        (true, true) => {
+            let mut iso = vec![
+                "--mount".into(), "--pid".into(),
+                "--net".into(), "--fork".into(), "--".into(),
+            ];
+            iso.extend(parts.into_iter());
+            let mut a = vec!["unshare".into()];
+            a.extend(iso);
+            ("sudo".into(), a)
+        }
     };
 
+    exec_process(prog, args, capture)
+}
+
+fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecResult> {
     let mut cmd = Command::new(&prog);
     cmd.args(&args).stdin(Stdio::inherit());
 
@@ -206,34 +214,29 @@ pub fn exec_nodes(nodes: &[Node], env: &mut Env) -> Result<ExecResult> {
 
 pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
     match node {
-        // ── Comments: no-op ──────────────────────────────────────────────────
         Node::LineComment(_) | Node::DocComment(_) | Node::BlockComment(_) => {
             Ok(ExecResult::ok())
         }
 
-        // ── ~> print ─────────────────────────────────────────────────────────
         Node::Print { parts } => {
             let msg = env.resolve_string_parts(parts);
             println!("{}", msg);
             Ok(ExecResult::ok())
         }
 
-        // ── :: quick-call ────────────────────────────────────────────────────
         Node::QuickCall { name, args } => {
             exec_quick(name, args, env)
         }
 
-        // ── Commands ─────────────────────────────────────────────────────────
         Node::Command { raw, mode, .. } => {
             let trimmed = raw.trim();
 
-            // echo jest zawsze zakazane
             if trimmed.starts_with("echo ") || trimmed == "echo" {
                 bail!(
                     "Operator 'echo' jest zabroniony w Hacker Lang.\n\
-                     Użyj '~> {}' zamiast '> echo {}'",
-                    trimmed.trim_start_matches("echo").trim(),
-                    trimmed.trim_start_matches("echo").trim()
+Użyj '~> {}' zamiast '> echo {}'",
+trimmed.trim_start_matches("echo").trim(),
+                      trimmed.trim_start_matches("echo").trim()
                 );
             }
 
@@ -250,14 +253,13 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             run_command(raw, sudo, isolated, env, false)
         }
 
-        // ── Variable declaration ─────────────────────────────────────────────
         Node::VarDecl { name, value } => {
             let val = match value {
-                VarValue::String(s)        => Value::String(s.clone()),
-                VarValue::Number(n)        => Value::Number(*n),
-                VarValue::Bool(b)          => Value::Bool(*b),
-                VarValue::Interpolated(p)  => Value::String(env.resolve_string_parts(p)),
-                VarValue::CmdOutput(cmd)   => {
+                VarValue::String(s)       => Value::String(s.clone()),
+                VarValue::Number(n)       => Value::Number(*n),
+                VarValue::Bool(b)         => Value::Bool(*b),
+                VarValue::Interpolated(p) => Value::String(env.resolve_string_parts(p)),
+                VarValue::CmdOutput(cmd)  => {
                     let r = run_command(cmd, false, false, env, true)?;
                     Value::String(r.stdout.unwrap_or_default().trim().to_string())
                 }
@@ -272,7 +274,6 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             Ok(ExecResult::ok())
         }
 
-        // ── Dependencies ─────────────────────────────────────────────────────
         Node::Dependency { name } => {
             match resolve_dependency(name) {
                 Ok(r)  => Ok(if r.is_available() { ExecResult::ok() } else { ExecResult::err(1) }),
@@ -280,19 +281,16 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             }
         }
 
-        // ── Imports ──────────────────────────────────────────────────────────
         Node::Import { lib, detail } => {
             resolve_import(lib, detail.as_deref(), env)?;
             Ok(ExecResult::ok())
         }
 
-        // ── Function definition ──────────────────────────────────────────────
         Node::FuncDef { name, body } => {
             env.define_function(name.clone(), body.clone());
             Ok(ExecResult::ok())
         }
 
-        // ── Function call ────────────────────────────────────────────────────
         Node::FuncCall { name } => {
             match env.get_function(name) {
                 Some(body) => exec_nodes(&body, env),
@@ -300,7 +298,6 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             }
         }
 
-        // ── Conditional ──────────────────────────────────────────────────────
         Node::Conditional { condition, body } => {
             let run = match condition {
                 ConditionKind::Ok  => env.last_exit == 0,
