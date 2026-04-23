@@ -6,18 +6,18 @@ authors.workspace = true
 
 [lib]
 name = "hl_core"
-crate-type = ["staticlib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
-anyhow.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-serde.workspace = true
+hl-parser       = { path = "../parser" }
+anyhow.workspace     = true
+thiserror.workspace  = true
+tracing.workspace    = true
+serde.workspace      = true
 serde_json.workspace = true
-tokio.workspace = true
-nix.workspace = true
-which.workspace = true
-colored.workspace = true
-dirs.workspace = true
+which.workspace      = true
+colored.workspace    = true
+dirs.workspace       = true
 rustc-hash.workspace = true
-smallvec.workspace = true
+smallvec.workspace   = true
+nix.workspace        = true
