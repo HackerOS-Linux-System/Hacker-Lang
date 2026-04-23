@@ -1,3 +1,5 @@
 // cargo
+// golang
 
 > cargo build --release
+> cd source-code/docs && go get hl-docs && go build
