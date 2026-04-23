@@ -1,10 +1,26 @@
 [package]
-name    = "hl-compiler"
-version = "0.3.0"
-edition = "2021"
+name = "hl-compiler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "hl_compiler"
+crate-type = ["rlib"]
 
 [dependencies]
-hl-core  = { path = "../core" }
-anyhow   = "1"
-colored  = "2"
-serde_json = "1"
+hl-parser         = { path = "../parser" }
+hl-core           = { path = "../core" }
+anyhow.workspace        = true
+thiserror.workspace     = true
+colored.workspace       = true
+serde_json.workspace    = true
+cranelift-codegen.workspace  = true
+cranelift-frontend.workspace = true
+cranelift-module.workspace   = true
+cranelift-object.workspace   = true
+object.workspace            = true
+target-lexicon.workspace     = true
+cc.workspace                 = true
+tempfile.workspace           = true
+which.workspace           = true
