@@ -1,0 +1,16 @@
+[package]
+name = "hl-parser"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "hl_parser"
+crate-type = ["rlib"]
+
+[dependencies]
+anyhow.workspace    = true
+thiserror.workspace = true
+serde.workspace     = true
+serde_json.workspace = true
+colored.workspace   = true
