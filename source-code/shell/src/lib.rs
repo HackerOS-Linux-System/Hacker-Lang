@@ -118,7 +118,6 @@ pub fn execute_source(source: &str, filename: &str, env: &mut Env) {
     }
 
     let renderer = DiagRenderer::new(filename, source);
-    // Polacz lint skladni z lint genow
     let mut lint_diags = lint_source(source);
     lint_diags.extend(hl_core::lint_gen(source));
     if !lint_diags.is_empty() {
@@ -171,7 +170,8 @@ pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
 }
 
 fn is_block_start(line: &str) -> bool {
-    (line.starts_with(':') && !line.starts_with("::") && line.ends_with("def"))
+    (line.starts_with(':') && !line.starts_with("::") && !line.starts_with(":*") && line.ends_with("def"))
+    || line.starts_with(":*") // goroutine
     || line.starts_with("? ok")
     || line.starts_with("? err")
 }
@@ -184,5 +184,5 @@ fn print_banner() {
   ██╔══██║██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
   ██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-  L A N G  v0.4  --  REPL"#.bright_cyan().bold());
+  L A N G  gen 1  --  REPL"#.bright_cyan().bold());
 }
