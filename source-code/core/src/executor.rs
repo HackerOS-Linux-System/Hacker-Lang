@@ -143,6 +143,116 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             run_command(raw, sudo, isolated, env, false)
         }
 
+        // *> komenda — uruchom przez hsh -c "komenda"
+        Node::HshCommand { raw } => {
+            let cmd = raw.trim();
+            debug!("hsh: {}", cmd);
+            let status = Command::new("hsh")
+                .args(["-c", cmd])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map_err(|e| anyhow::anyhow!("Nie mozna uruchomic hsh: {}\nUpewnij sie ze hsh jest zainstalowany na HackerOS.", e))?;
+            let code = status.code().unwrap_or(1);
+            Ok(ExecResult { exit_code: code, stdout: None })
+        }
+
+        // & komenda — uruchom w tle (nie czekaj na zakonczenie)
+        Node::Background { raw } => {
+            let expanded = env.interpolate(raw);
+            let trimmed  = expanded.trim().to_string();
+            debug!("background: {}", trimmed);
+
+            // Zawsze przez sh -c aby obsluc przekierowania i potoki
+            let child = Command::new("sh")
+                .args(["-c", &trimmed])
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("Nie mozna uruchomic w tle: {}", e))?;
+
+            // Zapisz PID do zmiennej _bg_pid (dostepne przez @_bg_pid)
+            env.set_var("_bg_pid", Value::Number(child.id() as f64));
+            eprintln!("\x1b[90m[hl &] PID={}\x1b[0m", child.id());
+
+            // Nie czekamy — proces dziala w tle
+            // Zapobiegamy zombie przez detach (w pelnej impl. uzyj prctl/double-fork)
+            std::mem::forget(child);
+            Ok(ExecResult::ok())
+        }
+
+        // _N > cmd — powtorz N razy
+        Node::RepeatN { count, body } => {
+            let mut last = ExecResult::ok();
+            for _ in 0..*count {
+                last = exec_nodes(body, env)?;
+                env.last_exit = last.exit_code;
+            }
+            Ok(last)
+        }
+
+        // << plik.hl — import zewnetrznego pliku .hl
+        Node::FileImport { path, detail } => {
+            let expanded_path = env.interpolate(path);
+            let file_path = std::path::Path::new(&expanded_path);
+            if !file_path.exists() {
+                bail!("Plik do importu nie istnieje: '{}'", expanded_path);
+            }
+            let src = std::fs::read_to_string(file_path)?;
+            let nodes = hl_parser::parse_source(&src)?;
+
+            // Jezeli sa szczegoly — ustaw jako zmienna przed wykonaniem
+            if let Some(d) = detail {
+                env.set_var("_import_detail", Value::String(d.clone()));
+            }
+            exec_nodes(&nodes, env)
+        }
+
+        // :* blok done — goroutine (uproszczone: wykonaj w osobnym watku)
+        Node::Goroutine { body } => {
+            // Klonuj body do watku
+            // W pelnej implementacji nalezy uzyc kanalów do komunikacji
+            // Tutaj: uruchom asynchronicznie w osobnym watku
+            let body_clone = body.clone();
+            let mut thread_env = Env::new();
+            // Skopiuj zmienne do watku
+            for (k, v) in &env.vars {
+                thread_env.vars.insert(k.clone(), v.clone());
+            }
+
+            std::thread::spawn(move || {
+                let _ = exec_nodes(&body_clone, &mut thread_env);
+            });
+
+            eprintln!("\x1b[35m[hl :*]\x1b[0m Goroutine uruchomiona");
+            Ok(ExecResult::ok())
+        }
+
+        // :** nazwa — zadeklaruj kanal (uproszczone: zmienna kolejkowa)
+        Node::Channel { name } => {
+            let chan_var = format!("__chan_{}", name);
+            env.set_var(&chan_var, Value::String(String::new()));
+            eprintln!("\x1b[35m[hl :**]\x1b[0m Kanal '{}' zadeklarowany", name);
+            Ok(ExecResult::ok())
+        }
+
+        // *-- nazwa — operacja na kanale
+        Node::ChannelOp { name, value } => {
+            let chan_var = format!("__chan_{}", name);
+            if let Some(parts) = value {
+                // Wyslij wartosc do kanalu
+                let val = env.resolve_string_parts(parts);
+                env.set_var(&chan_var, Value::String(val));
+            } else {
+                // Odbierz wartosc z kanalu (wypisz)
+                let val = env.get_var(&chan_var).to_string_val();
+                println!("{}", val);
+            }
+            Ok(ExecResult::ok())
+        }
+
         Node::VarDecl { name, value } => {
             let val = match value {
                 VarValue::String(s)       => Value::String(s.clone()),
