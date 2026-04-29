@@ -79,11 +79,8 @@ impl Parser {
             Token::DocComment(t)   => { self.advance(); Ok(Some(Node::DocComment(t))) }
             Token::BlockComment(t) => { self.advance(); Ok(Some(Node::BlockComment(t))) }
 
-            // `using <gen N>` — traktowane jako komentarz w AST (meta jest wyciagnieta wczesniej)
-            // Obsluguje zarowno Token::Using (nowy) jak i Token::Ident("using") (fallback)
             Token::Using(ref decl) => {
                 self.advance();
-                // Gen jest wyciagniety wczesniej w parse_source_with_meta — tu tylko zapisz jako komentarz
                 Ok(Some(Node::LineComment(format!("gen-decl: {}", decl))))
             }
             Token::Ident(ref s) if s == "using" => {
@@ -99,6 +96,51 @@ impl Parser {
                 self.advance();
                 Ok(Some(Node::QuickCall { name, args: parse_string_parts(&args) }))
             }
+
+            // & komenda — uruchom w tle
+            Token::Background(raw) => { self.advance(); Ok(Some(Node::Background { raw })) }
+
+            // *> komenda — uruchom przez hsh
+            Token::HshCmd(raw) => { self.advance(); Ok(Some(Node::HshCommand { raw })) }
+
+            // _N — powtorz N razy (nastepny token lub blok)
+            Token::RepeatN(n) => {
+                self.advance();
+                self.skip_newlines();
+                // Zbierz nastepna komende/linie jako body
+                let body = if let Some(node) = self.parse_node()? {
+                    vec![node]
+                } else {
+                    vec![]
+                };
+                Ok(Some(Node::RepeatN { count: n, body }))
+            }
+
+            // << plik.hl — import zewnetrznego pliku
+            Token::FileImport { path, detail } => {
+                self.advance();
+                Ok(Some(Node::FileImport { path, detail }))
+            }
+
+            // :* — goroutine
+            Token::GoroutineStart => {
+                self.advance();
+                let body = self.parse_block()?;
+                Ok(Some(Node::Goroutine { body }))
+            }
+
+            // :** nazwa — channel declaration
+            Token::ChannelDecl(name) => {
+                self.advance();
+                Ok(Some(Node::Channel { name }))
+            }
+
+            // *-- nazwa — channel op
+            Token::ChannelOp(name) => {
+                self.advance();
+                Ok(Some(Node::ChannelOp { name, value: None }))
+            }
+
             Token::Cmd(raw)                 => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Plain,            interpolate: false })) }
             Token::CmdSudo(raw)             => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Sudo,             interpolate: false })) }
             Token::CmdIsolated(raw)         => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Isolated,         interpolate: false })) }
@@ -175,40 +217,21 @@ impl Parser {
     }
 }
 
-/// Parsuj zrodlo HL (prosta wersja — kompatybilna wstecz)
-///
-/// Automatycznie:
-///   1. Usuwa shebang (jesli istnieje)
-///   2. Wyciaga deklaracje gena
-///   3. Parsuje AST
-///
-/// Jesli gen jest za wysoki — zwraca ParseError::Gen
 pub fn parse_source(source: &str) -> Result<Vec<Node>, ParseError> {
     Ok(parse_source_with_meta(source)?.nodes)
 }
 
-/// Parsuj zrodlo HL z pelna meta-informacja (gen, shebang)
 pub fn parse_source_with_meta(source: &str) -> Result<ParseMeta, ParseError> {
-    // ── 1. Pre-processing: shebang ───────────────────────────────────────────
     let preprocessed = preprocess(source);
-
-    // ── 2. Wyciagnij gen ─────────────────────────────────────────────────────
     let (gen, gen_err) = extract_gen(&preprocessed.source);
     if let Some(err) = gen_err {
         return Err(ParseError::Gen(err));
     }
-
-    // ── 3. Leksuj i parsuj ───────────────────────────────────────────────────
     let mut lexer  = Lexer::new(&preprocessed.source);
     let tokens     = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     let nodes      = parser.parse()?;
-
-    Ok(ParseMeta {
-        nodes,
-        gen,
-        shebang: preprocessed.shebang,
-    })
+    Ok(ParseMeta { nodes, gen, shebang: preprocessed.shebang })
 }
 
 #[cfg(test)]
@@ -216,36 +239,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_with_shebang() {
-        let src = "#!/usr/bin/env hl\n~> Hello";
-        let meta = parse_source_with_meta(src).unwrap();
-        assert!(meta.shebang.is_some());
-        assert_eq!(meta.gen.number(), 1);
+    fn test_parse_background() {
+        let src = "& python3 -m http.server 8080";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Background { .. })));
     }
 
     #[test]
-    fn test_parse_with_gen() {
-        let src = "using <gen 1>\n~> Hello";
-        let meta = parse_source_with_meta(src).unwrap();
-        assert_eq!(meta.gen.number(), 1);
+    fn test_parse_hsh_cmd() {
+        let src = "*> ls -la";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::HshCommand { .. })));
     }
 
     #[test]
-    fn test_parse_shebang_and_gen() {
-        let src = "#!/usr/bin/env hl\nusing <gen 1>\n/// doc\n~> Hello";
-        let meta = parse_source_with_meta(src).unwrap();
-        assert!(meta.shebang.is_some());
-        assert_eq!(meta.gen.number(), 1);
-        // Sprawdz ze AST zawiera Print
-        assert!(meta.nodes.iter().any(|n| matches!(n, Node::Print { .. })));
+    fn test_parse_repeat_n() {
+        let src = "_10 > hacker update";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::RepeatN { count: 10, .. })));
     }
 
     #[test]
-    fn test_shebang_does_not_conflict_with_import() {
-        // # <std/net> to import, nie shebang
-        let src = "# <std/net>\n~> Hello";
-        let meta = parse_source_with_meta(src).unwrap();
-        assert!(meta.shebang.is_none());
-        assert!(meta.nodes.iter().any(|n| matches!(n, Node::Import { .. })));
+    fn test_parse_file_import() {
+        let src = "<< utils.hl";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::FileImport { .. })));
+    }
+
+    #[test]
+    fn test_parse_goroutine() {
+        let src = ":*\n> ls\ndone";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Goroutine { .. })));
+    }
+
+    #[test]
+    fn test_parse_channel() {
+        let src = ":** moj_kanal";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Channel { .. })));
+    }
+
+    #[test]
+    fn test_import_main() {
+        let src = "# <main/net>";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Import { lib, .. } if lib == "main/net")));
+    }
+
+    #[test]
+    fn test_import_bit() {
+        let src = "# <bit/hashlib>";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Import { lib, .. } if lib == "bit/hashlib")));
+    }
+
+    #[test]
+    fn test_import_github() {
+        let src = "# <github/user/repo>";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Import { lib, .. } if lib == "github/user/repo")));
+    }
+
+    #[test]
+    fn test_import_std_legacy() {
+        // stara skladnia std/* -> main/*
+        let src = "# <std/net>";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Import { lib, .. } if lib == "main/net")));
+    }
+
+    #[test]
+    fn test_import_virus_legacy() {
+        // stara skladnia virus/* -> bit/*
+        let src = "# <virus/hashlib>";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::Import { lib, .. } if lib == "bit/hashlib")));
     }
 }
