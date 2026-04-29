@@ -1,10 +1,7 @@
 #[derive(Debug, Clone)]
 pub struct HlProgram {
-    /// Lista funkcji (pierwsza to `__hl_main`)
     pub functions: Vec<HlFunction>,
-    /// Stringi statyczne (interned)
     pub string_pool: Vec<String>,
-    /// Nazwy zaleznosci (// dep)
     pub deps: Vec<String>,
 }
 
@@ -14,56 +11,28 @@ pub struct HlFunction {
     pub instrs: Vec<HlInstr>,
 }
 
-/// Instrukcje HlIR — celowo na wysokim poziomie.
-/// Cranelift emituje wywolania do runtime C dla kazdej z nich.
 #[derive(Debug, Clone)]
 pub enum HlInstr {
-    /// Wypisz string ze string pool pod indeksem `idx`
-    Print { idx: u32 },
-
-    /// Wypisz string ze string pool + interpolacja zmiennych
+    Print       { idx: u32 },
     PrintInterp { idx: u32 },
-
-    /// Uruchom komende powloki
-    RunCmd {
-        cmd_idx: u32,
-        mode:    CmdMode,
-    },
-
-    /// Ustaw zmienna lokalna (string pool idx)
-    SetVar { name_idx: u32, val_idx: u32 },
-
-    /// Ustaw zmienna z interpolacja
+    RunCmd      { cmd_idx: u32, mode: CmdMode },
+    /// & komenda — uruchom w tle
+    RunBackground { cmd_idx: u32 },
+    /// *> komenda — uruchom przez hsh
+    RunHsh      { cmd_idx: u32 },
+    /// _N instrukcje — powtorz N razy
+    RepeatN     { count: u64, body: Vec<HlInstr> },
+    SetVar      { name_idx: u32, val_idx: u32 },
     SetVarInterp { name_idx: u32, val_idx: u32 },
-
-    /// Export do srodowiska
-    ExportVar { name_idx: u32, val_idx: u32 },
-
-    /// Export ze zmiennymi @var (interpolacja w runtime)
+    ExportVar   { name_idx: u32, val_idx: u32 },
     ExportVarInterp { name_idx: u32, val_idx: u32 },
-
-    /// Export lista (elementy oddzielone ':')
-    ExportList { name_idx: u32, items: Vec<u32> },
-
-    /// Wywolaj quick-funkcje
-    QuickCall { name_idx: u32, args_idx: u32 },
-
-    /// Wywolaj funkcje HL (zdefiniowana w tym programie)
-    CallFunc { func_idx: u32 },
-
-    /// Sprawdz ostatni exit code — jesli != 0 skocz do `else_pc`
-    CondOk  { body: Vec<HlInstr> },
-
-    /// Sprawdz ostatni exit code — jesli == 0 skocz do `else_pc`
-    CondErr { body: Vec<HlInstr> },
-
-    /// Deklaracja zaleznosci (// narzedzie)
-    Dep { name_idx: u32 },
-
-    /// Zakonczenie programu z kodem
-    Exit { code: i32 },
-
-    /// NOP (komentarze)
+    ExportList  { name_idx: u32, items: Vec<u32> },
+    QuickCall   { name_idx: u32, args_idx: u32 },
+    CallFunc    { func_idx: u32 },
+    CondOk      { body: Vec<HlInstr> },
+    CondErr     { body: Vec<HlInstr> },
+    Dep         { name_idx: u32 },
+    Exit        { code: i32 },
     Nop,
 }
 
@@ -76,6 +45,8 @@ pub enum CmdMode {
     WithVars     = 4,
     WithVarsSudo = 5,
     WithVarsIso  = 6,
+    /// *> — hsh mode
+    Hsh          = 10,
 }
 
 impl HlProgram {
@@ -87,7 +58,6 @@ impl HlProgram {
         }
     }
 
-    /// Intern string — zwraca indeks w string pool
     pub fn intern(&mut self, s: &str) -> u32 {
         if let Some(pos) = self.string_pool.iter().position(|x| x == s) {
             return pos as u32;
