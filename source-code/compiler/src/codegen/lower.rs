@@ -2,11 +2,9 @@ use anyhow::{Result, bail};
 use hl_parser::ast::*;
 use super::ir::*;
 
-/// Opuszcz cale AST do HlProgram
 pub fn lower_ast(nodes: &[Node]) -> Result<HlProgram> {
     let mut prog = HlProgram::new();
 
-    // Zbierz definicje funkcji najpierw
     let mut func_defs: Vec<(String, Vec<Node>)> = Vec::new();
     let mut toplevel:  Vec<&Node>               = Vec::new();
 
@@ -17,13 +15,11 @@ pub fn lower_ast(nodes: &[Node]) -> Result<HlProgram> {
         }
     }
 
-    // Lowering funkcji uzytkownika
     for (name, body) in &func_defs {
         let instrs = lower_nodes(body, &mut prog)?;
         prog.functions.push(HlFunction { name: name.clone(), instrs });
     }
 
-    // Lowering kodu glownego jako __hl_main
     let main_instrs = lower_nodes_slice(&toplevel, &mut prog)?;
     prog.functions.insert(0, HlFunction { name: "__hl_main".into(), instrs: main_instrs });
 
@@ -64,7 +60,6 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
             let args_s   = parts_to_string(args);
             let name_idx = prog.intern(&name_s);
             let args_idx = prog.intern(&args_s);
-            // args zawsze moga miec @zmienne — zawsze przez interp path
             out.push(HlInstr::QuickCall { name_idx, args_idx });
         }
 
@@ -75,11 +70,7 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
             }
 
             let cmd_idx = prog.intern(trimmed);
-
-            // Sprawdz czy komenda zawiera @zmienne (nawet jesli interpolate=false w AST)
-            // Jesli tak, ZAWSZE uzyj trybu z interpolacja — inaczej zmienna nie zostanie
-            // rozwiazana w skompilowanej binarce i pojawi sie literalne "@VAR"
-            let has_at = trimmed.contains('@');
+            let has_at  = trimmed.contains('@');
 
             let cmd_mode = match mode {
                 CommandMode::Plain => {
@@ -97,16 +88,59 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
                 CommandMode::WithVarsIsolated => CmdMode::WithVarsIso,
             };
 
-            let _ = interpolate; // juz obsluzone powyzej przez has_at
-
+            let _ = interpolate;
             out.push(HlInstr::RunCmd { cmd_idx, mode: cmd_mode });
+        }
+
+        // *> komenda — uruchom przez hsh
+        Node::HshCommand { raw } => {
+            let cmd_idx = prog.intern(raw.trim());
+            out.push(HlInstr::RunHsh { cmd_idx });
+        }
+
+        // & komenda — uruchom w tle
+        Node::Background { raw } => {
+            let cmd_idx = prog.intern(raw.trim());
+            out.push(HlInstr::RunBackground { cmd_idx });
+        }
+
+        // _N body — powtorz N razy
+        Node::RepeatN { count, body } => {
+            let body_instrs = lower_nodes(body, prog)?;
+            out.push(HlInstr::RepeatN { count: *count, body: body_instrs });
+        }
+
+        // << plik.hl — pomijamy w kompilacji (wymaga runtime)
+        Node::FileImport { path, .. } => {
+            let msg = format!("[hl-bc] FileImport '{}' — pomijane w trybie kompilacji", path);
+            let idx = prog.intern(&msg);
+            out.push(HlInstr::Print { idx });
+        }
+
+        // :* goroutine — pomijamy w kompilacji (wymaga watki)
+        Node::Goroutine { .. } => {
+            let msg = "[hl-bc] Goroutine — pomijane w trybie kompilacji (wymaga interpretera)";
+            let idx = prog.intern(msg);
+            out.push(HlInstr::Print { idx });
+        }
+
+        // :** channel — pomijamy
+        Node::Channel { name } => {
+            let msg = format!("[hl-bc] Channel '{}' — pomijane w trybie kompilacji", name);
+            let idx = prog.intern(&msg);
+            out.push(HlInstr::Print { idx });
+        }
+
+        Node::ChannelOp { name, .. } => {
+            let msg = format!("[hl-bc] ChannelOp '{}' — pomijane w trybie kompilacji", name);
+            let idx = prog.intern(&msg);
+            out.push(HlInstr::Print { idx });
         }
 
         Node::VarDecl { name, value } => {
             let name_idx = prog.intern(name);
             let (val_s, interp) = varvalue_to_string(value);
             let val_idx = prog.intern(&val_s);
-            // Sprawdz tez czy wartosc zawiera @zmienne
             let has_at = val_s.contains('@');
             if interp || has_at {
                 out.push(HlInstr::SetVarInterp { name_idx, val_idx });
@@ -121,7 +155,6 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
                 ExportValue::Single(parts) => {
                     let val_s   = parts_to_string(parts);
                     let val_idx = prog.intern(&val_s);
-                    // Export tez moze miec @zmienne
                     if has_vars(parts) || val_s.contains('@') {
                         out.push(HlInstr::ExportVarInterp { name_idx, val_idx });
                     } else {
@@ -138,7 +171,6 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
         }
 
         Node::VarRef(name) => {
-            // @name standalone — wypisz wartosc zmiennej przez interp
             let template = format!("@{}", name);
             let idx = prog.intern(&template);
             out.push(HlInstr::PrintInterp { idx });
@@ -151,12 +183,10 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
         }
 
         Node::Import { .. } => {
-            // Importy pomijane w trybie kompilacji (stdlib embedded w runtime C)
             out.push(HlInstr::Nop);
         }
 
         Node::FuncDef { .. } => {
-            // Zebrane wczesniej w lower_ast
             out.push(HlInstr::Nop);
         }
 
@@ -179,8 +209,6 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
     }
     Ok(())
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn parts_to_string(parts: &[StringPart]) -> String {
     parts.iter().map(|p| match p {
