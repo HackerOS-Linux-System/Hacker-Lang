@@ -42,7 +42,7 @@ impl Default for Env {
 impl Env {
     pub fn new() -> Self {
         let mut vars: FxHashMap<String, Value> = FxHashMap::default();
-        vars.insert("HL_VERSION".into(), Value::String("0.4.0".into()));
+        vars.insert("HL_VERSION".into(), Value::String("gen 1".into()));
         vars.insert("HL_OS".into(),      Value::String("HackerOS/Debian".into()));
         Self { vars, functions: FxHashMap::default(), last_exit: 0, interp_buf: String::with_capacity(256) }
     }
