@@ -5,14 +5,28 @@ pub enum Node {
     Print       { parts: Vec<StringPart> },
     QuickCall   { name: String, args: Vec<StringPart> },
     Command     { raw: String, mode: CommandMode, interpolate: bool },
+    /// *> komenda — uruchom przez hsh -c "komenda"
+    HshCommand  { raw: String },
+    /// & komenda — uruchom w tle
+    Background  { raw: String },
+    /// _N > komenda lub _N ;; blok — powtorz N razy
+    RepeatN     { count: u64, body: Vec<Node> },
     VarDecl     { name: String, value: VarValue },
     Export      { name: String, value: ExportValue },
     VarRef      (String),
     Dependency  { name: String },
     Import      { lib: String, detail: Option<String> },
+    /// << plik.hl — import zewnetrznego pliku .hl
+    FileImport  { path: String, detail: Option<String> },
     FuncDef     { name: String, body: Vec<Node> },
     FuncCall    { name: String },
     Conditional { condition: ConditionKind, body: Vec<Node> },
+    /// :* blok done — goroutine
+    Goroutine   { body: Vec<Node> },
+    /// :** nazwa — channel
+    Channel     { name: String },
+    /// *-- nazwa — wyslij/odbierz przez channel
+    ChannelOp   { name: String, value: Option<Vec<StringPart>> },
     BlockComment(String),
     DocComment  (String),
     LineComment  (String),
