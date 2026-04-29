@@ -15,6 +15,10 @@ pub enum Token {
     CmdIsolated(String),
     CmdWithVars(String),
     Cmd(String),
+    /// *> komenda — uruchom przez hsh -c
+    HshCmd(String),
+    /// & komenda — uruchom w tle
+    Background(String),
     VarDecl { name: String, value: String },
     VarRef(String),
     ExportSingle { name: String, value: String },
@@ -23,13 +27,23 @@ pub enum Token {
     ExportListEnd,
     Dependency(String),
     Import { lib: String, detail: Option<String> },
+    /// << plik.hl | szczegoly — import zewnetrznego pliku .hl
+    FileImport { path: String, detail: Option<String> },
     FuncDef(String),
     FuncCall(String),
     IfOk,
     IfErr,
     Done,
-    /// using <gen N> — deklaracja gena
+    /// using <gen N>
     Using(String),
+    /// :* — goroutine start
+    GoroutineStart,
+    /// :** nazwa — channel declaration
+    ChannelDecl(String),
+    /// *-- nazwa — channel send/receive
+    ChannelOp(String),
+    /// _N — repeat N times (next token/block)
+    RepeatN(u64),
     Ident(String),
     StringLit(String),
     Number(f64),
@@ -183,6 +197,19 @@ impl Lexer {
                     tokens.push(Token::Print(self.read_line()));
                 }
 
+                ':' if self.matches(&[':', '*', '*']) => {
+                    // :** nazwa — channel declaration
+                    self.skip_n(3); self.skip_ws();
+                    tokens.push(Token::ChannelDecl(self.read_ident_full()));
+                    self.read_line();
+                }
+
+                ':' if self.matches(&[':', '*']) => {
+                    // :* — goroutine start
+                    self.skip_n(2); self.read_line();
+                    tokens.push(Token::GoroutineStart);
+                }
+
                 ':' if self.peek_at(1) == Some(':') => {
                     self.skip_n(2); self.skip_ws();
                     let name = self.read_ident(); self.skip_ws();
@@ -222,6 +249,22 @@ impl Lexer {
                     }
                 }
 
+                // << plik.hl | szczegoly — import zewnetrznego pliku
+                '<' if self.peek_at(1) == Some('<') => {
+                    self.skip_n(2); self.skip_ws();
+                    let rest = self.read_line();
+                    if let Some(pipe_pos) = rest.find('|') {
+                        let path   = rest[..pipe_pos].trim().to_string();
+                        let detail = rest[pipe_pos+1..].trim().to_string();
+                        tokens.push(Token::FileImport {
+                            path,
+                            detail: if detail.is_empty() { None } else { Some(detail) },
+                        });
+                    } else {
+                        tokens.push(Token::FileImport { path: rest.trim().to_string(), detail: None });
+                    }
+                }
+
                 '-' if self.matches(&['-', '-']) => {
                     self.skip_n(2); self.skip_ws();
                     tokens.push(Token::FuncCall(self.read_ident_full()));
@@ -255,6 +298,41 @@ impl Lexer {
 
                 '>' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdWithVars(self.read_cmd())); }
                 '>' => { self.advance(); tokens.push(Token::Cmd(self.read_cmd())); }
+
+                // & komenda — uruchom w tle
+                '&' => { self.advance(); self.skip_ws(); tokens.push(Token::Background(self.read_line())); }
+
+                // *-- nazwa — channel op
+                '*' if self.matches(&['*', '-', '-']) => {
+                    self.skip_n(3); self.skip_ws();
+                    tokens.push(Token::ChannelOp(self.read_ident_full()));
+                    self.read_line();
+                }
+
+                // *> komenda — hsh shell
+                '*' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2); self.skip_ws();
+                    tokens.push(Token::HshCmd(self.read_line()));
+                }
+
+                // _N > komenda lub _N ;; linia — powtorz N razy
+                '_' => {
+                    self.advance();
+                    // Czytaj cyfry
+                    let mut num_str = String::new();
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_digit() { num_str.push(c); self.advance(); } else { break; }
+                    }
+                    if !num_str.is_empty() {
+                        let n: u64 = num_str.parse().unwrap_or(1);
+                        tokens.push(Token::RepeatN(n));
+                    } else {
+                        // identyfikator zaczynajacy sie od _
+                        let mut id = String::from("_");
+                        id.push_str(&self.read_ident_full());
+                        tokens.push(Token::Ident(id));
+                    }
+                }
 
                 '%' => {
                     self.advance(); self.skip_ws();
