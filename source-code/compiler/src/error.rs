@@ -6,7 +6,7 @@ pub type CompileResult<T> = Result<T, CompileError>;
 pub enum CompileError {
     #[error("Plik nie istnieje: {0}")]
     InputNotFound(String),
-    #[error("Plik musi miec rozszerzenie .hl")]
+    #[error("Plik musi miec rozszerzenie .hl lub .bc")]
     InvalidExtension,
     #[error("Nieprawidlowe wejscie: {0}")]
     InvalidInput(String),
