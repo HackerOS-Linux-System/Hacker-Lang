@@ -1,1 +1,225 @@
+#!/usr/bin/hl
+/// bit — manager pakietow dla ekosystemu Hacker Lang
+/// Uzycie: bit install <nazwa>, bit remove <nazwa>, bit list, bit update
+/// Lista paczek: https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
+using <gen 1>
 
+// curl
+// git
+// jq
+
+# <main/colors>
+# <main/json>
+
+;; ── Konfiguracja ─────────────────────────────────────────────────────────────
+
+% BIT_REPO_URL  = https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
+% BIT_RAW_URL   = https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json
+% BIT_HOME      = /usr/lib/HackerOS/Hacker-Lang/bit
+% BIT_CACHE     = /tmp/.bit-cache
+% BIT_REPO_FILE = /tmp/.bit-cache/repo-list.json
+
+;; ── Funkcje pomocnicze ────────────────────────────────────────────────────────
+
+: bit_header def
+    ::hr 60
+    ::bold bit — Hacker Lang Package Manager
+    ~> gen 1 | https://github.com/bit-io/repository
+    ::hr 60
+    ::nl
+done
+
+: bit_ensure_cache def
+    ::exists @BIT_CACHE
+    ? err
+        > mkdir -p @BIT_CACHE
+    done
+done
+
+: bit_fetch_repo def
+    ~> Pobieranie listy pakietow...
+    >> curl -fsSL -o @BIT_REPO_FILE @BIT_RAW_URL
+    ? ok
+        ::green Lista pakietow pobrana.
+    done
+    ? err
+        ::red Blad pobierania listy pakietow z @BIT_RAW_URL
+        > exit 1
+    done
+done
+
+: bit_ensure_repo def
+    ::exists @BIT_REPO_FILE
+    ? err
+        -- bit_fetch_repo
+    done
+done
+
+;; ── bit install <nazwa> ────────────────────────────────────────────────────────
+
+: bit_install def
+    ;; @_bit_pkg musi byc ustawiony przed wywolaniem
+
+    -- bit_ensure_repo
+
+    ~> Instalowanie pakietu: @_bit_pkg
+
+    ;; Odczytaj typ i url z repo-list.json przez jq
+    % _pkg_type_tmp = /tmp/.bit-cache/_pkg_type.tmp
+    % _pkg_url_tmp  = /tmp/.bit-cache/_pkg_url.tmp
+    % _pkg_fam_tmp  = /tmp/.bit-cache/_pkg_family.tmp
+
+    >> jq -r ".\"@_bit_pkg\".type // empty" @BIT_REPO_FILE > @_pkg_type_tmp
+    >> jq -r ".\"@_bit_pkg\".url  // empty" @BIT_REPO_FILE > @_pkg_url_tmp
+    >> jq -r ".\"@_bit_pkg\".family // empty" @BIT_REPO_FILE > @_pkg_fam_tmp
+
+    % _pkg_type   = ""
+    % _pkg_url    = ""
+    % _pkg_family = ""
+
+    ;; Wczytaj wartosci
+    >> bash -c "BIT_TYPE=$(cat @_pkg_type_tmp); echo $BIT_TYPE"
+    ? err
+        ::red Pakiet '@_bit_pkg' nie znaleziony w repozytorium bit.
+        ~> Sprawdz liste: bit list
+        > exit 1
+    done
+
+    ;; Katalog docelowy
+    % _bit_dest = @BIT_HOME/@_bit_pkg
+
+    >> mkdir -p @_bit_dest
+
+    ;; Instaluj w zaleznosci od typu
+    ;; Typ: git
+    >> bash -c "TYPE=$(cat @_pkg_type_tmp 2>/dev/null); FAM=$(cat @_pkg_fam_tmp 2>/dev/null); URL=$(cat @_pkg_url_tmp 2>/dev/null); if [ \"$TYPE\" = 'git' ]; then if [ \"$FAM\" = 'github' ]; then FULL_URL=\"https://github.com/$URL\"; elif [ \"$FAM\" = 'gitlab' ]; then FULL_URL=\"https://gitlab.com/$URL\"; else FULL_URL=\"$URL\"; fi; git clone --depth=1 \"$FULL_URL\" \"@_bit_dest\" 2>&1; elif [ \"$TYPE\" = 'tar' ]; then curl -fsSL -o /tmp/.bit-cache/_pkg.tar.gz \"$URL\" && tar -xzf /tmp/.bit-cache/_pkg.tar.gz -C \"@_bit_dest\" --strip-components=1 2>&1; elif [ \"$TYPE\" = 'link' ]; then curl -fsSL -o \"@_bit_dest/$(basename $URL)\" \"$URL\" && chmod +x \"@_bit_dest/$(basename $URL)\" 2>&1; else echo 'Nieznany typ pakietu: '\"$TYPE\"; exit 1; fi"
+
+    ? ok
+        ::green Pakiet '@_bit_pkg' zainstalowany w @_bit_dest
+    done
+    ? err
+        ::red Blad instalacji pakietu '@_bit_pkg'
+    done
+
+    ;; Sprzatanie
+    >> rm -f @_pkg_type_tmp @_pkg_url_tmp @_pkg_fam_tmp
+done
+
+;; ── bit remove <nazwa> ────────────────────────────────────────────────────────
+
+: bit_remove def
+    % _bit_dest = @BIT_HOME/@_bit_pkg
+
+    ::exists @_bit_dest
+    ? err
+        ::red Pakiet '@_bit_pkg' nie jest zainstalowany.
+        > exit 1
+    done
+
+    >> rm -rf @_bit_dest
+    ? ok
+        ::green Pakiet '@_bit_pkg' usunieto.
+    done
+done
+
+;; ── bit list ────────────────────────────────────────────────────────────────
+
+: bit_list def
+    -- bit_ensure_repo
+
+    ~> Dostepne pakiety w repozytorium bit:
+    ::hr 60
+    >> jq -r 'keys[]' @BIT_REPO_FILE
+    ::hr 60
+    ~> Szczegoly: @BIT_REPO_URL
+done
+
+;; ── bit update ────────────────────────────────────────────────────────────────
+
+: bit_update def
+    ~> Aktualizacja listy pakietow...
+    >> rm -f @BIT_REPO_FILE
+    -- bit_fetch_repo
+    ::green Lista pakietow zaktualizowana.
+done
+
+;; ── bit info <nazwa> ──────────────────────────────────────────────────────────
+
+: bit_info def
+    -- bit_ensure_repo
+    ~> Informacje o pakiecie: @_bit_pkg
+    ::hr 40
+    >> jq ".\"@_bit_pkg\"" @BIT_REPO_FILE
+    ::hr 40
+done
+
+;; ── bit (bez argumentow) ─────────────────────────────────────────────────────
+
+: bit_help def
+    -- bit_header
+    ~> Uzycie:
+    ~>   bit install <nazwa>   -- zainstaluj pakiet
+    ~>   bit remove <nazwa>    -- usun pakiet
+    ~>   bit list              -- pokaz dostepne pakiety
+    ~>   bit update            -- zaktualizuj liste pakietow
+    ~>   bit info <nazwa>      -- informacje o pakiecie
+    ::nl
+    ~> Importy w plikach .hl:
+    ~>   # <bit/nazwa>         -- zaladuj biblioteke bit
+    ::nl
+    ~> Repozytorium: @BIT_REPO_URL
+done
+
+;; ── MAIN ─────────────────────────────────────────────────────────────────────
+
+-- bit_ensure_cache
+
+;; Parsuj argumenty
+% _bit_cmd  = @arg0
+% _bit_pkg  = @arg1
+
+? ok
+    ;; sprawdz czy podano komende
+    ::len @_bit_cmd
+    ? err
+        -- bit_help
+        > exit 0
+    done
+done
+
+;; Dispatch
+>> bash -c "case '@_bit_cmd' in install) exit 0;; remove) exit 1;; list) exit 2;; update) exit 3;; info) exit 4;; *) exit 99;; esac"
+
+? ok
+    -- bit_install
+done
+
+> test "@_bit_cmd" = "remove"
+? ok
+    -- bit_remove
+done
+
+> test "@_bit_cmd" = "list"
+? ok
+    -- bit_list
+done
+
+> test "@_bit_cmd" = "update"
+? ok
+    -- bit_update
+done
+
+> test "@_bit_cmd" = "info"
+? ok
+    -- bit_info
+done
+
+> test "@_bit_cmd" = "help"
+? ok
+    -- bit_help
+done
+
+;; Nieznana komenda
+::red Nieznana komenda: @_bit_cmd
+-- bit_help
+> exit 1
