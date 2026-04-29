@@ -1,10 +1,3 @@
-/*
- * hl_runtime.c — Hacker Lang Runtime (C)
- *
- * Kompilowany i linkowany do kazdej binarki/biblioteki skompilowanej przez hl-compiler.
- * Uzytkownik nigdy nie widzi tego pliku — jest on automatycznie dolaczany przez kompilator.
- */
-
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,7 +37,7 @@ void hl_runtime_init(void) {
     g_last_exit = 0;
 
     /* Wbudowane zmienne srodowiskowe */
-    hl_set_var("HL_VERSION", "0.4.0");
+    hl_set_var("HL_VERSION", "gen 1");
     hl_set_var("HL_OS",      "HackerOS");
 
     /* Przekaz zmienne srodowiskowe do HL */
@@ -98,7 +91,6 @@ static const char *hl_get_var(const char *name) {
     if (!name) return "";
     HlVar *v = hl_find_var(name);
     if (v) return v->value;
-    /* Sprawdz srodowisko */
     const char *env = getenv(name);
     return env ? env : "";
 }
@@ -113,7 +105,6 @@ static void hl_interpolate(const char *tmpl, char *out, size_t out_sz) {
         if (tmpl[ti] == '@' && ti + 1 < tlen
             && (isalpha((unsigned char)tmpl[ti+1]) || tmpl[ti+1] == '_'))
         {
-            /* Parsuj nazwe zmiennej */
             ti++;
             char varname[HL_VAR_NAME_SZ] = {0};
             size_t vi = 0;
@@ -152,22 +143,11 @@ void hl_print_interp(const char *tmpl) {
 
 /* ── Uruchamianie komend ─────────────────────────────────────────────────── */
 
-/*
- * Tryby:
- *   0 = plain
- *   1 = sudo
- *   2 = isolated (unshare)
- *   3 = isolated + sudo
- *   4 = z interpolacja @vars (plain)
- *   5 = z interpolacja + sudo
- *   6 = z interpolacja + isolated
- */
 int hl_run_cmd(const char *cmd, int mode) {
     if (!cmd) return 1;
 
     char expanded[HL_CMD_SZ];
 
-    /* Interpolacja dla trybów >= 4 */
     if (mode >= 4) {
         hl_interpolate(cmd, expanded, sizeof(expanded));
     } else {
@@ -177,10 +157,14 @@ int hl_run_cmd(const char *cmd, int mode) {
 
     int sudo     = (mode == 1 || mode == 3 || mode == 5);
     int isolated = (mode == 2 || mode == 3 || mode == 6);
+    int hsh_mode = (mode == 10); /* *> komenda — przez hsh */
 
-    /* Buduj ostateczna komende */
     char full_cmd[HL_CMD_SZ * 2];
-    if (isolated && sudo) {
+
+    if (hsh_mode) {
+        /* *> — uruchom przez hsh -c */
+        snprintf(full_cmd, sizeof(full_cmd), "hsh -c '%s'", expanded);
+    } else if (isolated && sudo) {
         snprintf(full_cmd, sizeof(full_cmd),
                  "sudo unshare --mount --pid --net --fork -- sh -c %s", expanded);
     } else if (isolated) {
@@ -205,6 +189,33 @@ int hl_run_cmd(const char *cmd, int mode) {
     }
 
     return g_last_exit;
+}
+
+/* ── Uruchamianie w tle (& komenda) ─────────────────────────────────────── */
+
+int hl_run_background(const char *cmd) {
+    if (!cmd) return 1;
+
+    char expanded[HL_CMD_SZ];
+    hl_interpolate(cmd, expanded, sizeof(expanded));
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[hl &] fork failed: %s\n", strerror(errno));
+        return 1;
+    }
+    if (pid == 0) {
+        /* Dziecko: odlacz od terminala */
+        setsid();
+        execl("/bin/sh", "sh", "-c", expanded, NULL);
+        _exit(127);
+    }
+    /* Rodzic: zapisz PID i wróc natychmiast */
+    char pid_str[32];
+    snprintf(pid_str, sizeof(pid_str), "%d", (int)pid);
+    hl_set_var("_bg_pid", pid_str);
+    fprintf(stderr, "\033[90m[hl &] PID=%d\033[0m\n", (int)pid);
+    return 0;
 }
 
 /* ── Export ──────────────────────────────────────────────────────────────── */
@@ -240,7 +251,6 @@ void hl_export_list(const char *name, const char **items, int count) {
         }
     }
     joined[off] = '\0';
-
     hl_export_var(name, joined);
 }
 
@@ -256,14 +266,12 @@ void hl_set_var_interp(const char *name, const char *tmpl) {
 int hl_dep_check(const char *name) {
     if (!name) return 1;
 
-    /* Sprawdz czy narzedzie jest w PATH */
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "command -v '%s' >/dev/null 2>&1", name);
     int ret = system(cmd);
 
     if (ret == 0) return 0;
 
-    /* Proba instalacji */
     fprintf(stderr, "\033[33m[hl dep]\033[0m '%s' nie znalezione. Instaluje...\n", name);
 
     snprintf(cmd, sizeof(cmd), "sudo apt-get install -y '%s' >/dev/null 2>&1", name);
@@ -284,7 +292,6 @@ int hl_quick(const char *name, const char *args) {
 
     const char *a = args ? args : "";
 
-    /* Kolory i formatowanie */
     if (strcmp(name, "red")    == 0) { printf("\033[31m%s\033[0m\n", a); return 0; }
     if (strcmp(name, "green")  == 0) { printf("\033[32m%s\033[0m\n", a); return 0; }
     if (strcmp(name, "yellow") == 0) { printf("\033[33m%s\033[0m\n", a); return 0; }
@@ -300,7 +307,6 @@ int hl_quick(const char *name, const char *args) {
         return 0;
     }
 
-    /* String operations */
     if (strcmp(name, "upper") == 0) {
         for (size_t i = 0; a[i]; i++) putchar(toupper((unsigned char)a[i]));
         putchar('\n'); return 0;
@@ -322,7 +328,6 @@ int hl_quick(const char *name, const char *args) {
         putchar('\n'); return 0;
     }
 
-    /* Filesystem */
     if (strcmp(name, "exists") == 0) { return (access(a, F_OK) == 0) ? 0 : 1; }
     if (strcmp(name, "isdir")  == 0) {
         struct stat st;
@@ -340,7 +345,6 @@ int hl_quick(const char *name, const char *args) {
         fclose(f); return 0;
     }
 
-    /* System */
     if (strcmp(name, "pid") == 0) { printf("%d\n", (int)getpid()); return 0; }
     if (strcmp(name, "env") == 0) {
         const char *v = getenv(a);
@@ -354,9 +358,7 @@ int hl_quick(const char *name, const char *args) {
         return WIFEXITED(r) ? WEXITSTATUS(r) : 1;
     }
 
-    /* Interp set/get */
     if (strcmp(name, "set") == 0) {
-        /* "name value" */
         char nm[HL_VAR_NAME_SZ]; const char *sp = strchr(a, ' ');
         if (!sp) { hl_set_var(a, ""); return 0; }
         size_t nlen = (size_t)(sp - a);
@@ -366,7 +368,6 @@ int hl_quick(const char *name, const char *args) {
     }
     if (strcmp(name, "get") == 0) { puts(hl_get_var(a)); return 0; }
 
-    /* Math */
     if (strcmp(name, "abs")   == 0) { double n = atof(a); printf("%.10g\n", n < 0 ? -n : n); return 0; }
     if (strcmp(name, "ceil")  == 0) { double n = atof(a); printf("%lld\n",  (long long)((n == (long long)n) ? (long long)n : (long long)n + (n > 0 ? 1 : 0))); return 0; }
     if (strcmp(name, "floor") == 0) { double n = atof(a); printf("%lld\n",  (long long)n); return 0; }
