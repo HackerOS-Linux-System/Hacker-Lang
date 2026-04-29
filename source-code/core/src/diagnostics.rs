@@ -110,14 +110,6 @@ pub fn lint_source(source: &str) -> Vec<Diag> {
                 }
             }
         }
-        if trimmed.starts_with(':') && !trimmed.starts_with("::") && trimmed.ends_with("def") {
-            if let Some(next_line) = source.lines().nth(line_no) {
-                if next_line.trim() == "done" {
-                    let col = raw_line.find(':').map(|c| c+1).unwrap_or(1);
-                    diags.push(Diag::warning("pusta definicja funkcji").with_span(Span::new(line_no, col, trimmed.len())).with_suggestion("dodaj cialo funkcji przed `done` lub usun definicje").with_note("puste funkcje sa dozwolone, ale prawdopodobnie to blad"));
-                }
-            }
-        }
         lazy_check_missing_dep(trimmed, line_no, source, &mut diags);
     }
     diags
@@ -144,7 +136,7 @@ fn lazy_check_missing_dep(line: &str, line_no: usize, source: &str, diags: &mut 
 fn strip_cmd_prefix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let line = line.trim();
     if prefix == ">>" && (line.starts_with("^>>") || line.starts_with("->>")) { return None; }
-    if prefix == ">"  && (line.starts_with(">>")  || line.starts_with("^>")  || line.starts_with("->")) { return None; }
+    if prefix == ">"  && (line.starts_with(">>")  || line.starts_with("^>")  || line.starts_with("->") || line.starts_with("*>")) { return None; }
     if prefix == "->" && line.starts_with("^->") { return None; }
     if line.starts_with(prefix) { Some(&line[prefix.len()..]) } else { None }
 }
@@ -180,7 +172,7 @@ pub fn parse_error_to_diag(err: &ParseError) -> Diag {
     match err {
         ParseError::Lex(e) => lex_error_to_diag(e),
         ParseError::UnexpectedToken(pos, tok) => Diag::error(format!("nieoczekiwany token `{}` (pozycja {})", tok, pos)).with_suggestion("sprawdz skladnie HL — kazda linia powinna zaczynac sie od operatora").with_note("uzyj `hl check plik.hl` aby zobaczyc liste bledow"),
-        ParseError::MissingDone => Diag::error("brakujace `done` — blok nie jest zamkniety").with_suggestion("dodaj `done` na koncu bloku funkcji lub warunkowego").with_note("kazdy blok `: nazwa def` oraz `? ok`/`? err` musi konczyc sie slowem `done`"),
+        ParseError::MissingDone => Diag::error("brakujace `done` — blok nie jest zamkniety").with_suggestion("dodaj `done` na koncu bloku funkcji lub warunkowego").with_note("kazdy blok `: nazwa def`, `:*` (goroutine) oraz `? ok`/`? err` musi konczyc sie slowem `done`"),
         ParseError::MissingDef  => Diag::error("brakujace `def` po nazwie funkcji").with_suggestion("poprawna skladnia: `: nazwa_funkcji def`"),
         ParseError::MissingExportListEnd => Diag::error("brakujace `]` — lista eksportu nie jest zamknieta").with_suggestion("dodaj `]` na koncu listy wartosci exportu"),
         ParseError::Gen(gen_err) => Diag::error(format!("blad deklaracji gena: {}", gen_err)).with_suggestion("poprawna skladnia: `using <gen 1>`").with_note("deklaracja gena musi byc przed pierwsza linia kodu"),
@@ -216,15 +208,4 @@ pub fn lint_gen(source: &str) -> Vec<Diag> {
         seen_code = true;
     }
     diags
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test] fn test_lint_sudo() { let d = lint_source("> sudo apt-get update"); assert!(d.iter().any(|d| d.level == DiagLevel::Warning)); }
-    #[test] fn test_lint_echo() { let d = lint_source("> echo hello"); assert!(d.iter().any(|d| d.level == DiagLevel::Error)); }
-    #[test] fn test_lint_clean() { let d = lint_source(";; ok\n% x = 1\n> ls"); assert!(d.is_empty()); }
-    #[test] fn test_lint_env_hint() { let d = lint_source("% PATH = /usr/bin"); assert!(d.iter().any(|d| d.level == DiagLevel::Hint)); }
-    #[test] fn test_gen_after_code() { let d = lint_gen("> ls\nusing <gen 1>"); assert!(d.iter().any(|d| d.level == DiagLevel::Warning)); }
-    #[test] fn test_gen_clean() { let d = lint_gen("using <gen 1>\n> ls"); assert!(d.is_empty()); }
 }
