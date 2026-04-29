@@ -21,3 +21,4 @@ clap.workspace            = true
 colored.workspace         = true
 dirs.workspace            = true
 serde_json.workspace      = true
+tempfile.workspace        = true
