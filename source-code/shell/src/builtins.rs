@@ -46,7 +46,7 @@ pub fn try_builtin(line: &str, env: &mut Env) -> BuiltinResult {
 
 fn print_help() {
     println!("{}", r#"
-  Hacker Lang v0.4 — Referencia skladni
+  Hacker Lang gen 1 — Referencia skladni
 
   PRINT:   ~> tekst          -- wypisz tekst (interpolacja @var)
   CMD:     >  komenda         -- uruchom komende
@@ -55,6 +55,8 @@ fn print_help() {
   ISO+SU:  ^-> komenda        -- sudo + izolacja
   VARS:    >> komenda         -- komenda z interpolacja @zmiennych
   VAR+SU:  ^>> komenda        -- vars + sudo
+  HSH:     *> komenda         -- uruchom przez hsh -c
+  BG:      & komenda          -- uruchom w tle (nie czekaj)
 
   ZMIENNA: % nazwa = wartosc  -- zmienna lokalna
   REF:     @nazwa             -- odwolanie do zmiennej
@@ -64,10 +66,25 @@ fn print_help() {
            | val2
            ]
 
+  PETLA:   _N > komenda       -- powtorz N razy (np. _10 > ls)
+           _N ;; cokolwiek    -- powtorz N razy
+
   FUNKCJA: : nazwa def        -- definicja funkcji
            ...
            done
   CALL:    -- nazwa           -- wywolanie funkcji
+
+  GOROUTINE: :*               -- goroutine (wg. Go channels)
+             ...
+             done
+  CHANNEL: :** nazwa          -- zadeklaruj kanal
+  CHAN-OP: *-- nazwa          -- wyslij/odbierz przez kanal
+
+  IMPORT:  # <main/nazwa>     -- standardowa biblioteka (.hl)
+           # <bit/nazwa>      -- biblioteka bit (.so)
+           # <github/u/repo>  -- GitHub
+           << plik.hl         -- import zewnetrznego pliku .hl
+           << plik.hl | szcz  -- import z detalami
 
   WARUNEK: ? ok               -- jesli exit 0
            ? err              -- jesli exit != 0
@@ -77,7 +94,7 @@ fn print_help() {
              /// tekst        -- dokumentacyjny
 
   DEP:     // narzedzie       -- deklaracja zaleznosci
-  IMPORT:  # <std/net>        -- import biblioteki
+  GEN:     using <gen 1>      -- deklaracja gena
 
   BUILTINS: cd, vars, funcs, help, clear, exit
 "#.bright_white());
