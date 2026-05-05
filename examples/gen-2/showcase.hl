@@ -1,4 +1,4 @@
-#!/usr/bin/env hl
+#!/usr/bin/hl
 /// showcase.hl — Pelny showcase Hacker Lang gen 2
 /// Uruchom: hl run showcase.hl
 using <gen 2>
