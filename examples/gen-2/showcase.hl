@@ -1,1 +1,441 @@
+#!/usr/bin/env hl
+/// showcase.hl — Pelny showcase Hacker Lang gen 2
+/// Uruchom: hl run showcase.hl
+using <gen 2>
 
+// curl
+// git
+
+# <main/colors>
+# <main/progress-bar>
+# <main/cli>
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 0. NAGLOWEK
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::hr 60
+~> @COLOR_MAGENTA@COLOR_BOLD Hacker Lang gen 2 — Showcase @COLOR_RESET
+::hr 60
+::nl
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 1. ZMIENNE (gen 1 + gen 2 typowane)
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 1. ZMIENNE
+::hr 40
+
+;; Gen 1 — bez typu
+% name   = Hacker Lang
+% flag   = true
+% value  = 99
+
+;; Gen 2 — z typem
+% count:  int   = 42
+% score:  float = 3.14
+% active: bool  = true
+% label:  str   = hello world
+
+~> string: @name
+~> int:    @count
+~> float:  @score
+~> bool:   @active
+~> str:    @label
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 2. ARYTMETYKA NATYWNA — $( expr )
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 2. ARYTMETYKA $( )
+::hr 40
+
+$( 2 + 2 )             -> @res_add
+$( 10 * @count )       -> @res_mul
+$( @count - 8 )        -> @res_sub
+$( 100 / 4 )           -> @res_div
+$( @count % 7 )        -> @res_mod
+$( (2 + 3) * 4 )       -> @res_paren
+
+~> 2 + 2            = @res_add
+~> 10 * @count      = @res_mul
+~> @count - 8       = @res_sub
+~> 100 / 4          = @res_div
+~> @count % 7       = @res_mod
+~> (2+3) * 4        = @res_paren
+
+;; Arytmetyka jako wartosc zmiennej
+% computed: int = $(  @count * 2  )
+~> computed (int): @computed
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 3. PIPE DO ZMIENNEJ — > cmd |> @var
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 3. PIPE DO ZMIENNEJ |>
+::hr 40
+
+> hostname           |> @my_host
+> uname -s           |> @my_os
+> uname -r           |> @my_kernel
+> date +%Y-%m-%d     |> @today
+> id -un             |> @my_user
+> pwd                |> @my_cwd
+
+~> host:    @my_host
+~> os:      @my_os
+~> kernel:  @my_kernel
+~> date:    @today
+~> user:    @my_user
+~> cwd:     @my_cwd
+
+;; Sudo pipe
+;; ^> id -u  |> @my_uid
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 4. FOR IN — @ item in lista
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 4. FOR IN — @ item in lista
+::hr 40
+
+~> Iteracja po slach:
+@ dir in /tmp /etc /usr /var
+    ~>   → @dir
+done
+
+~> Iteracja po komendach systemowych:
+@ cmd in ls pwd date
+    ::which @cmd
+    ? ok
+        ~>   @COLOR_GREEN✓@COLOR_RESET @cmd dostepny
+    done
+    ? err
+        ~>   @COLOR_RED✗@COLOR_RESET @cmd niedostepny
+    done
+done
+
+;; For ze zmiennej
+% dirs = /bin /sbin /usr/bin
+@ d in @dirs
+    ~>   katalog: @d
+done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 5. WHILE — ?~ warunek
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 5. WHILE — ?~ warunek
+::hr 40
+
+% counter: int = 0
+
+?~ @counter < 5
+    $( @counter + 1 ) -> @counter
+    ~>   iteracja: @counter
+done
+
+~> Petla while zakonczona po @counter iteracjach
+
+;; While z warunkiem stringowym
+% status = running
+% iters: int = 0
+
+?~ @status == running
+    $( @iters + 1 ) -> @iters
+    ?~ @iters >= 3
+        % status = stopped
+    done
+done
+
+~> Status po while: @status (iteracje: @iters)
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 6. SWITCH — ? switch
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 6. SWITCH — ? switch
+::hr 40
+
+% os = linux
+
+? switch @os
+| linux
+    ::green System: Linux
+| windows
+    ::yellow System: Windows
+| macos
+    ::cyan System: macOS
+| *
+    ::red System: nieznany (@os)
+done
+
+;; Switch z dynamiczna wartoscia
+> uname -s |> @detected_os
+
+? switch @detected_os
+| Linux
+    ::green Wykryto: Linux
+| Darwin
+    ::cyan Wykryto: macOS
+| *
+    ~> Wykryto: @detected_os
+done
+
+;; Switch po liczbie
+% level: int = 2
+
+? switch @level
+| 1
+    ~> Poziom: @COLOR_GREEN podstawowy@COLOR_RESET
+| 2
+    ~> Poziom: @COLOR_YELLOW sredni@COLOR_RESET
+| 3
+    ~> Poziom: @COLOR_RED zaawansowany@COLOR_RESET
+| *
+    ~> Poziom: @COLOR_DIM nieznany@COLOR_RESET
+done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 7. GOROUTINES (poprawiona skladnia gen 2: :* nazwa def)
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 7. GOROUTINES — :* nazwa def
+::hr 40
+
+;; Gen 1 (nadal dziala)
+:*
+    > bash -c "sleep 0.1 && printf 'goroutine anonimowa\n' > /tmp/hl_gr_anon.txt"
+done
+
+;; Gen 2 — goroutine z nazwa
+:* scanner def
+    > bash -c "printf 'scanner done\n' > /tmp/hl_gr_scan.txt"
+done
+
+:* writer def
+    > bash -c "printf 'writer done\n' > /tmp/hl_gr_write.txt"
+done
+
+;; Channel
+:** wyniki
+
+:* worker def
+    > bash -c "printf 'worker result\n' > /tmp/hl_gr_work.txt"
+    *-- wyniki
+done
+
+;; Daj czas na wykonanie
+> sleep 0.5
+
+@ tmpfile in /tmp/hl_gr_anon.txt /tmp/hl_gr_scan.txt /tmp/hl_gr_write.txt /tmp/hl_gr_work.txt
+    ::exists @tmpfile
+    ? ok
+        ::green   ✓ @tmpfile
+        ::read @tmpfile
+    done
+done
+
+*-- wyniki
+> rm -f /tmp/hl_gr_anon.txt /tmp/hl_gr_scan.txt /tmp/hl_gr_write.txt /tmp/hl_gr_work.txt
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 8. TLO & + PETLA _N
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 8. TLO & i PETLA _N
+::hr 40
+
+& bash -c "sleep 0.3 && printf 'bg job done\n' > /tmp/hl_bg_demo.txt"
+~> Uruchomiono w tle, PID: @_bg_pid
+
+_3 ~> powtorzenie!
+_5 ::green OK
+
+> sleep 0.4
+::exists /tmp/hl_bg_demo.txt
+? ok
+    ::green Tlo zakonczylo sie: 
+    ::read  /tmp/hl_bg_demo.txt
+done
+> rm -f /tmp/hl_bg_demo.txt
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 9. HSH *> i IMPORT PLIKU <<
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 9. HSH *> i IMPORT <<
+::hr 40
+
+*> uname -m
+*> pwd
+
+;; Tworzenie i import tymczasowego pliku
+> bash -c "printf '% _imported = tak\n~> Zaimportowany!\n' > /tmp/hl_import_demo.hl"
+<< /tmp/hl_import_demo.hl
+~> Wynik importu: @_imported
+> rm -f /tmp/hl_import_demo.hl
+
+;; Import z detalami
+> bash -c "printf '~> Szczegol: @_import_detail\n' > /tmp/hl_import_detail.hl"
+<< /tmp/hl_import_detail.hl | testowy_detail
+> rm -f /tmp/hl_import_detail.hl
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 10. HACKEROS API — || narzedzie
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 10. HACKEROS API — || narzedzie
+::hr 40
+
+~> @COLOR_DIM Przyklad wywolania (wymaga HackerOS):@COLOR_RESET
+~>   || hacker update
+~>   || hpkg install nmap
+~>   || lpm list
+~>   || hsh -c "ls /tmp"
+~>   || H# --version
+~>   || hco status
+~>   || hedit --help
+~>   || hnm scan
+
+;; Wywolaj hacker jesli dostepny
+::which hacker
+? ok
+    || hacker --version
+done
+? err
+    ~> @COLOR_DIM hacker niedostepny (uruchom na HackerOS)@COLOR_RESET
+done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 11. QUICK FUNCTIONS :: (przeglad)
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 11. QUICK FUNCTIONS ::
+::hr 40
+
+% qs = Hello Hacker Lang gen 2
+
+::upper @qs
+::lower @qs
+::len   @qs
+::rev   hacker
+::contains @qs Hacker
+? ok
+    ::green zawiera Hacker
+done
+
+::exists /etc/hostname
+? ok
+    ::green /etc/hostname istnieje
+done
+::isdir /tmp
+? ok
+    ::cyan  /tmp jest katalogiem
+done
+
+$( 10 * 10 ) -> @math_result
+~> 10 * 10 = @math_result
+
+::date
+::time
+::pid
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 12. PROGRESS BAR (main/progress-bar)
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 12. PROGRESS BAR
+::hr 40
+
+~> Symulacja pobierania:
+@ pct in 0 10 25 50 75 90 100
+    % _pb_pct = @pct
+    -- pb_draw
+    > sleep 0.1
+done
+-- pb_done
+::green Pobrano!
+
+~> Z etykieta:
+@ pct in 0 30 60 100
+    % _pb_pct    = @pct
+    % _pb_label  = Kompilacja
+    -- pb_label
+    > sleep 0.1
+done
+-- pb_done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 13. FUNKCJE gen 2
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 13. FUNKCJE
+::hr 40
+
+: check_tool def
+    ::which @_tool
+    ? ok
+        ~>   @COLOR_GREEN✓@COLOR_RESET @_tool
+    done
+    ? err
+        ~>   @COLOR_RED✗@COLOR_RESET @_tool
+    done
+done
+
+: system_report def
+    ~> @COLOR_BOLD System Report:@COLOR_RESET
+    > hostname     |> @_rep_host
+    > uname -r     |> @_rep_kernel
+    > id -un       |> @_rep_user
+    ~>   Hostname: @_rep_host
+    ~>   Kernel:   @_rep_kernel
+    ~>   User:     @_rep_user
+done
+
+@ tool in curl git python3 jq
+    % _tool = @tool
+    -- check_tool
+done
+
+-- system_report
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; 14. EXPORT + ZMIENNE SYSTEMOWE
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::bold 14. EXPORT i ZMIENNE SYSTEMOWE
+::hr 40
+
+=> HL_SHOWCASE = gen2
+=> HL_TEST_PATH [
+| /usr/local/bin
+| /usr/bin
+| /tmp/test
+]
+
+~> @HL_VERSION
+~> @HL_OS
+~> @HL_GEN
+~> @HL_SCRIPT
+~> HL_SHOWCASE = @HL_SHOWCASE
+~> argc        = @argc
+
+;; Ze stdlib main/colors
+~> @COLOR_GREEN kolor dziala @COLOR_RESET
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; PODSUMOWANIE
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+::nl
+::hr 60
+~> @COLOR_MAGENTA@COLOR_BOLD Hacker Lang gen 2 — Showcase zakonczony@COLOR_RESET
+::hr 60
+::nl
+::green   gen 1: ~> > ^> -> & *> _N << :* :** *--
+::cyan    gen 2: %:typ $() |> @ in ?~ ? switch || 
+::yellow  bit:   install remove list update info (auto build/run)
+::nl
+~> @COLOR_DIM Hacker Lang gen 2 — HackerOS@COLOR_RESET
+::hr 60
