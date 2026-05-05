@@ -1,49 +1,89 @@
 #!/usr/bin/hl
-/// bit — manager pakietow dla ekosystemu Hacker Lang
-/// Uzycie: bit install <nazwa>, bit remove <nazwa>, bit list, bit update
-/// Lista paczek: https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
-using <gen 1>
+/// bit — manager pakietow Hacker Lang (gen 2)
+/// Uzycie: bit [install|remove|list|update|info|help]
+/// lub: bit (w katalogu projektu — automatycznie build/run)
+using <gen 2>
 
 // curl
 // git
 // jq
 
-# <main/colors>
+# <main/progress-bar>
 # <main/json>
+# <main/colors>
 
-;; ── Konfiguracja ─────────────────────────────────────────────────────────────
+;; ── Konfiguracja ──────────────────────────────────────────────────────────────
+% BIT_RAW_URL    = https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json
+% BIT_REPO_URL   = https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
+% BIT_HOME       = /usr/lib/HackerOS/Hacker-Lang/bit
+% BIT_CACHE_DIR  = .cache
+% BIT_REPO_FILE  = .cache/repo-list.json
+% BIT_CMD        = @arg0
+% BIT_PKG        = @arg1
 
-% BIT_REPO_URL  = https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
-% BIT_RAW_URL   = https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json
-% BIT_HOME      = /usr/lib/HackerOS/Hacker-Lang/bit
-% BIT_CACHE     = /tmp/.bit-cache
-% BIT_REPO_FILE = /tmp/.bit-cache/repo-list.json
+;; ── Progress bar ───────────────────────────────────────────────────────────────
+;; Format: [--->............] [10%]
+;; WIDTH = 20 znakow
+
+: pb_draw def
+    ;; @_pb_pct = 0..100
+    $(( @_pb_pct * 20 / 100 )) -> @_pb_fill
+    $(( 20 - @_pb_fill ))      -> @_pb_empty
+    $(( @_pb_fill - 1 ))       -> @_pb_dashes
+
+    ;; Zbuduj lancuch kresek i strzalke
+    >> bash -c "
+        FILL=@_pb_fill
+        EMPTY=@_pb_empty
+        DASHES=\$(( FILL > 0 ? FILL - 1 : 0 ))
+        BAR='['
+        i=0
+        while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$((\$i+1)); done
+        if [ \$FILL -gt 0 ]; then BAR=\"\${BAR}>\"; fi
+        i=0
+        while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$((\$i+1)); done
+        BAR=\"\${BAR}]\"
+        printf '\r\033[36m%s\033[0m \033[33m[%d%%]\033[0m' \"\$BAR\" @_pb_pct
+    "
+done
+
+: pb_done def
+    ~>
+done
 
 ;; ── Funkcje pomocnicze ────────────────────────────────────────────────────────
 
 : bit_header def
-    ::hr 60
-    ::bold bit — Hacker Lang Package Manager
-    ~> gen 1 | https://github.com/bit-io/repository
-    ::hr 60
+    ::hr 50
+    ~> @COLOR_MAGENTA bit @COLOR_RESET — Hacker Lang Package Manager @COLOR_DIM(gen 2)@COLOR_RESET
+    ::hr 50
     ::nl
 done
 
 : bit_ensure_cache def
-    ::exists @BIT_CACHE
+    ::exists @BIT_CACHE_DIR
     ? err
-        > mkdir -p @BIT_CACHE
+        > mkdir -p @BIT_CACHE_DIR
     done
 done
 
 : bit_fetch_repo def
-    ~> Pobieranie listy pakietow...
+    ~> @COLOR_CYAN Pobieranie listy pakietow...@COLOR_RESET
+    % _pb_pct = 0
+    -- pb_draw
+    % _pb_pct = 20
+    -- pb_draw
     >> curl -fsSL -o @BIT_REPO_FILE @BIT_RAW_URL
     ? ok
+        % _pb_pct = 100
+        -- pb_draw
+        -- pb_done
         ::green Lista pakietow pobrana.
     done
     ? err
-        ::red Blad pobierania listy pakietow z @BIT_RAW_URL
+        -- pb_done
+        ::red Blad pobierania listy pakietow!
+        ~> URL: @BIT_RAW_URL
         > exit 1
     done
 done
@@ -55,171 +95,324 @@ done
     done
 done
 
-;; ── bit install <nazwa> ────────────────────────────────────────────────────────
+;; ── bit install ───────────────────────────────────────────────────────────────
 
 : bit_install def
-    ;; @_bit_pkg musi byc ustawiony przed wywolaniem
-
+    -- bit_ensure_cache
     -- bit_ensure_repo
 
-    ~> Instalowanie pakietu: @_bit_pkg
+    ~> @COLOR_CYAN Instalowanie:@COLOR_RESET @BIT_PKG
 
-    ;; Odczytaj typ i url z repo-list.json przez jq
-    % _pkg_type_tmp = /tmp/.bit-cache/_pkg_type.tmp
-    % _pkg_url_tmp  = /tmp/.bit-cache/_pkg_url.tmp
-    % _pkg_fam_tmp  = /tmp/.bit-cache/_pkg_family.tmp
+    % _pb_pct = 5
+    -- pb_draw
 
-    >> jq -r ".\"@_bit_pkg\".type // empty" @BIT_REPO_FILE > @_pkg_type_tmp
-    >> jq -r ".\"@_bit_pkg\".url  // empty" @BIT_REPO_FILE > @_pkg_url_tmp
-    >> jq -r ".\"@_bit_pkg\".family // empty" @BIT_REPO_FILE > @_pkg_fam_tmp
+    ;; Pobierz metadane z repo-list.json
+    > jq -r ".\"@BIT_PKG\".type   // empty" @BIT_REPO_FILE > .cache/_pkg_type.tmp
+    > jq -r ".\"@BIT_PKG\".url    // empty" @BIT_REPO_FILE > .cache/_pkg_url.tmp
+    > jq -r ".\"@BIT_PKG\".family // empty" @BIT_REPO_FILE > .cache/_pkg_family.tmp
 
-    % _pkg_type   = ""
-    % _pkg_url    = ""
-    % _pkg_family = ""
+    % _pb_pct = 15
+    -- pb_draw
 
-    ;; Wczytaj wartosci
-    >> bash -c "BIT_TYPE=$(cat @_pkg_type_tmp); echo $BIT_TYPE"
+    ;; Sprawdz czy pakiet istnieje
+    > test -s .cache/_pkg_type.tmp
     ? err
-        ::red Pakiet '@_bit_pkg' nie znaleziony w repozytorium bit.
-        ~> Sprawdz liste: bit list
+        -- pb_done
+        ::red Pakiet '@BIT_PKG' nie znaleziony w repozytorium bit.
+        ~> Sprawdz liste: @COLOR_CYAN bit list@COLOR_RESET
+        > rm -f .cache/_pkg_type.tmp .cache/_pkg_url.tmp .cache/_pkg_family.tmp
         > exit 1
     done
 
-    ;; Katalog docelowy
-    % _bit_dest = @BIT_HOME/@_bit_pkg
-
+    % _bit_dest = @BIT_HOME/@BIT_PKG
     >> mkdir -p @_bit_dest
 
+    % _pb_pct = 30
+    -- pb_draw
+
     ;; Instaluj w zaleznosci od typu
-    ;; Typ: git
-    >> bash -c "TYPE=$(cat @_pkg_type_tmp 2>/dev/null); FAM=$(cat @_pkg_fam_tmp 2>/dev/null); URL=$(cat @_pkg_url_tmp 2>/dev/null); if [ \"$TYPE\" = 'git' ]; then if [ \"$FAM\" = 'github' ]; then FULL_URL=\"https://github.com/$URL\"; elif [ \"$FAM\" = 'gitlab' ]; then FULL_URL=\"https://gitlab.com/$URL\"; else FULL_URL=\"$URL\"; fi; git clone --depth=1 \"$FULL_URL\" \"@_bit_dest\" 2>&1; elif [ \"$TYPE\" = 'tar' ]; then curl -fsSL -o /tmp/.bit-cache/_pkg.tar.gz \"$URL\" && tar -xzf /tmp/.bit-cache/_pkg.tar.gz -C \"@_bit_dest\" --strip-components=1 2>&1; elif [ \"$TYPE\" = 'link' ]; then curl -fsSL -o \"@_bit_dest/$(basename $URL)\" \"$URL\" && chmod +x \"@_bit_dest/$(basename $URL)\" 2>&1; else echo 'Nieznany typ pakietu: '\"$TYPE\"; exit 1; fi"
+    >> bash -c "
+        TYPE=\$(cat .cache/_pkg_type.tmp 2>/dev/null | tr -d '[:space:]')
+        FAM=\$(cat  .cache/_pkg_family.tmp 2>/dev/null | tr -d '[:space:]')
+        URL=\$(cat  .cache/_pkg_url.tmp 2>/dev/null | tr -d '[:space:]')
+        DEST='@_bit_dest'
+
+        case \"\$TYPE\" in
+            git)
+                case \"\$FAM\" in
+                    github) FULL_URL=\"https://github.com/\$URL\" ;;
+                    gitlab) FULL_URL=\"https://gitlab.com/\$URL\" ;;
+                    *)      FULL_URL=\"\$URL\" ;;
+                esac
+                git clone --depth=1 \"\$FULL_URL\" \"\$DEST\" 2>&1
+                ;;
+            tar)
+                TMP='/tmp/bit_pkg_@BIT_PKG.tar.gz'
+                curl -fsSL -o \"\$TMP\" \"\$URL\" && \
+                tar -xzf \"\$TMP\" -C \"\$DEST\" --strip-components=1 && \
+                rm -f \"\$TMP\"
+                ;;
+            link)
+                FNAME=\$(basename \"\$URL\")
+                curl -fsSL -o \"\$DEST/\$FNAME\" \"\$URL\" && \
+                chmod +x \"\$DEST/\$FNAME\"
+                ;;
+            *)
+                printf 'Nieznany typ pakietu: %s\n' \"\$TYPE\"
+                exit 1
+                ;;
+        esac
+    "
 
     ? ok
-        ::green Pakiet '@_bit_pkg' zainstalowany w @_bit_dest
+        % _pb_pct = 100
+        -- pb_draw
+        -- pb_done
+        ::green Pakiet '@BIT_PKG' zainstalowany pomyslnie!
+        ~> Lokalizacja: @COLOR_DIM@_bit_dest@COLOR_RESET
     done
     ? err
-        ::red Blad instalacji pakietu '@_bit_pkg'
+        -- pb_done
+        ::red Blad instalacji pakietu '@BIT_PKG'!
     done
 
-    ;; Sprzatanie
-    >> rm -f @_pkg_type_tmp @_pkg_url_tmp @_pkg_fam_tmp
+    > rm -f .cache/_pkg_type.tmp .cache/_pkg_url.tmp .cache/_pkg_family.tmp
 done
 
-;; ── bit remove <nazwa> ────────────────────────────────────────────────────────
+;; ── bit remove ────────────────────────────────────────────────────────────────
 
 : bit_remove def
-    % _bit_dest = @BIT_HOME/@_bit_pkg
+    % _bit_dest = @BIT_HOME/@BIT_PKG
 
     ::exists @_bit_dest
     ? err
-        ::red Pakiet '@_bit_pkg' nie jest zainstalowany.
+        ::red Pakiet '@BIT_PKG' nie jest zainstalowany.
         > exit 1
     done
 
+    ~> @COLOR_YELLOW Usuwanie:@COLOR_RESET @BIT_PKG
+
+    % _pb_pct = 50
+    -- pb_draw
     >> rm -rf @_bit_dest
-    ? ok
-        ::green Pakiet '@_bit_pkg' usunieto.
-    done
+    % _pb_pct = 100
+    -- pb_draw
+    -- pb_done
+    ::green Pakiet '@BIT_PKG' usuniety.
 done
 
-;; ── bit list ────────────────────────────────────────────────────────────────
+;; ── bit list ──────────────────────────────────────────────────────────────────
 
 : bit_list def
     -- bit_ensure_repo
 
-    ~> Dostepne pakiety w repozytorium bit:
-    ::hr 60
-    >> jq -r 'keys[]' @BIT_REPO_FILE
-    ::hr 60
+    ::hr 50
+    ~> @COLOR_CYAN Dostepne pakiety bit:@COLOR_RESET
+    ::hr 50
+    > jq -r 'to_entries[] | "\(.key)\t\(.value.description // "")"' @BIT_REPO_FILE | \
+      awk -F'\t' '{printf "  \033[32m%-20s\033[0m %s\n", $1, $2}'
+    ::hr 50
     ~> Szczegoly: @BIT_REPO_URL
 done
 
 ;; ── bit update ────────────────────────────────────────────────────────────────
 
 : bit_update def
-    ~> Aktualizacja listy pakietow...
-    >> rm -f @BIT_REPO_FILE
+    ~> @COLOR_CYAN Aktualizacja listy pakietow...@COLOR_RESET
+    > rm -f @BIT_REPO_FILE
     -- bit_fetch_repo
-    ::green Lista pakietow zaktualizowana.
 done
 
-;; ── bit info <nazwa> ──────────────────────────────────────────────────────────
+;; ── bit info ──────────────────────────────────────────────────────────────────
 
 : bit_info def
     -- bit_ensure_repo
-    ~> Informacje o pakiecie: @_bit_pkg
     ::hr 40
-    >> jq ".\"@_bit_pkg\"" @BIT_REPO_FILE
+    ~> @COLOR_CYAN Pakiet:@COLOR_RESET @BIT_PKG
+    ::hr 40
+    >> jq ".\"@BIT_PKG\"" @BIT_REPO_FILE
     ::hr 40
 done
 
-;; ── bit (bez argumentow) ─────────────────────────────────────────────────────
+;; ── bit (bez argumentow) — projekt mode ───────────────────────────────────────
+;;
+;; Sprawdz strukture projektu i wykonaj odpowiednio:
+;;
+;; Wariant 1: run.hl + [kod.hl]
+;;   → uruchom interpretowalnie przez: hl run run.hl
+;;
+;; Wariant 2: build.hl + [kod.hl]
+;;   → kompiluj zgodnie z build.hl (bc/elf/so) + link bibliotek
+;;
+;; Wariant 3: source-code/ + build.hl
+;;   → kompiluj z source-code/ zgodnie z build.hl
+
+: bit_project_run def
+    ;; Wariant 1: run.hl
+    ::exists run.hl
+    ? ok
+        ~> @COLOR_GREEN [bit] run.hl@COLOR_RESET — tryb interpretowany
+        -- bit_setup_cache
+        > hl run run.hl
+        -- bit_cleanup_cache
+        > exit 0
+    done
+
+    ;; Wariant 2/3: build.hl
+    ::exists build.hl
+    ? ok
+        ~> @COLOR_GREEN [bit] build.hl@COLOR_RESET — tryb kompilacji
+        -- bit_setup_cache
+        -- bit_do_build
+        -- bit_cleanup_cache
+        > exit 0
+    done
+
+    ;; Nic nie znaleziono
+    ::red Nie znaleziono run.hl ani build.hl w biezacym katalogu.
+    ::nl
+    ~> Struktura projektu bit:
+    ~>   @COLOR_CYAN run.hl@COLOR_RESET   + kod.hl   → interpretowany
+    ~>   @COLOR_CYAN build.hl@COLOR_RESET + kod.hl   → kompilowany
+    ~>   @COLOR_CYAN build.hl@COLOR_RESET + source-code/ → kompilowany (rust-like)
+    > exit 1
+done
+
+: bit_setup_cache def
+    > mkdir -p @BIT_CACHE_DIR
+    ;; Pobierz i zainstaluj biblioteki zadeklarowane w projekcie
+    ;; (future: parsuj # <bit/...> z pliku i instaluj)
+    ~> @COLOR_DIM[bit] Srodowisko izolowane: .cache/@COLOR_RESET
+done
+
+: bit_cleanup_cache def
+    ;; Cache usuwamy po zakonczeniu prac (izolowane srodowisko)
+    ~> @COLOR_DIM[bit] Czyszczenie .cache...@COLOR_RESET
+    > rm -rf @BIT_CACHE_DIR
+done
+
+: bit_do_build def
+    ;; Wczytaj build.hl i wykonaj — to on decyduje co kompilujemy
+    ;; build.hl ustawia zmienne:
+    ;;   BIT_BUILD_TARGET = bc|elf|so
+    ;;   BIT_BUILD_INPUT  = sciezka do glownego pliku .hl
+    ;;   BIT_BUILD_OUTPUT = nazwa wyjsciowa (opcjonalne)
+
+    % BIT_BUILD_TARGET = bc
+    % BIT_BUILD_INPUT  = main.hl
+    % BIT_BUILD_OUTPUT =
+
+    ;; Wykonaj build.hl — moze nadpisac powyzsze zmienne
+    ::exists build.hl
+    ? ok
+        << build.hl
+    done
+
+    ;; Sprawdz czy jest source-code/
+    ::isdir source-code
+    ? ok
+        ;; Skompiluj wszystkie .hl z source-code/
+        ~> @COLOR_CYAN[bit] Kompilacja source-code/ → .bc@COLOR_RESET
+        > find source-code -name "*.hl" -exec hl compile {} \;
+        % BIT_BUILD_INPUT = source-code/main.hl
+    done
+
+    ;; Kompiluj zgodnie z targetem
+    ~> @COLOR_CYAN[bit] Kompilacja: @BIT_BUILD_INPUT → @BIT_BUILD_TARGET@COLOR_RESET
+
+    % _pb_pct = 10
+    -- pb_draw
+
+    ? switch @BIT_BUILD_TARGET
+    | bc
+        >> hl compile @BIT_BUILD_INPUT
+        % _pb_pct = 100
+        -- pb_draw
+        -- pb_done
+        ::green Wygenerowano .bc
+    | elf
+        >> hl compile @BIT_BUILD_INPUT
+        % _pb_pct = 60
+        -- pb_draw
+        >> bash -c "BC=\$(basename @BIT_BUILD_INPUT .hl).bc; hl compile \$BC"
+        % _pb_pct = 100
+        -- pb_draw
+        -- pb_done
+        ::green Wygenerowano binarke ELF
+    | so
+        >> hl compile @BIT_BUILD_INPUT
+        % _pb_pct = 60
+        -- pb_draw
+        >> bash -c "BC=\$(basename @BIT_BUILD_INPUT .hl).bc; hl compile --shared \$BC"
+        % _pb_pct = 100
+        -- pb_draw
+        -- pb_done
+        ::green Wygenerowano .so
+    | *
+        -- pb_done
+        ::red Nieznany BIT_BUILD_TARGET: @BIT_BUILD_TARGET
+        ::yellow Ustaw w build.hl: % BIT_BUILD_TARGET = bc|elf|so
+        > exit 1
+    done
+done
+
+;; ── bit help ──────────────────────────────────────────────────────────────────
 
 : bit_help def
     -- bit_header
-    ~> Uzycie:
-    ~>   bit install <nazwa>   -- zainstaluj pakiet
-    ~>   bit remove <nazwa>    -- usun pakiet
-    ~>   bit list              -- pokaz dostepne pakiety
-    ~>   bit update            -- zaktualizuj liste pakietow
-    ~>   bit info <nazwa>      -- informacje o pakiecie
+    ~> @COLOR_BOLD Komendy:@COLOR_RESET
+    ~>   @COLOR_GREEN bit@COLOR_RESET                  — uruchom/skompiluj projekt (auto-detect)
+    ~>   @COLOR_GREEN bit install @COLOR_CYAN<nazwa>@COLOR_RESET    — zainstaluj pakiet
+    ~>   @COLOR_GREEN bit remove @COLOR_CYAN<nazwa>@COLOR_RESET     — usun pakiet
+    ~>   @COLOR_GREEN bit list@COLOR_RESET               — pokaz dostepne pakiety
+    ~>   @COLOR_GREEN bit update@COLOR_RESET              — zaktualizuj liste pakietow
+    ~>   @COLOR_GREEN bit info @COLOR_CYAN<nazwa>@COLOR_RESET       — info o pakiecie
+    ~>   @COLOR_GREEN bit help@COLOR_RESET                — ta pomoc
     ::nl
-    ~> Importy w plikach .hl:
-    ~>   # <bit/nazwa>         -- zaladuj biblioteke bit
+    ~> @COLOR_BOLD Struktury projektu:@COLOR_RESET
+    ~>   @COLOR_CYAN run.hl@COLOR_RESET + kod.hl         → bit (tryb run)
+    ~>   @COLOR_CYAN build.hl@COLOR_RESET + kod.hl       → bit (tryb build: bc/elf/so)
+    ~>   @COLOR_CYAN build.hl@COLOR_RESET + source-code/ → bit (tryb build, rust-like)
+    ::nl
+    ~>   .cache/ tworzony automatycznie, usuwany po zakonczeniu.
+    ::nl
+    ~> @COLOR_BOLD Importy bit w .hl:@COLOR_RESET
+    ~>   @COLOR_CYAN# <bit/hashlib>@COLOR_RESET
+    ~>   @COLOR_CYAN# <bit/obsidian>@COLOR_RESET
     ::nl
     ~> Repozytorium: @BIT_REPO_URL
 done
 
-;; ── MAIN ─────────────────────────────────────────────────────────────────────
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; MAIN DISPATCH
+;; ═══════════════════════════════════════════════════════════════════════════════
 
 -- bit_ensure_cache
 
-;; Parsuj argumenty
-% _bit_cmd  = @arg0
-% _bit_pkg  = @arg1
-
-? ok
-    ;; sprawdz czy podano komende
-    ::len @_bit_cmd
-    ? err
+? switch @BIT_CMD
+| install
+    -- bit_install
+| remove
+    -- bit_remove
+| list
+    -- bit_list
+| update
+    -- bit_update
+| info
+    -- bit_info
+| help
+    -- bit_help
+| *
+    ;; Puste wywolanie lub nieznana komenda — projekt mode
+    ::len @BIT_CMD
+    ? ok
+        ;; Mamy jakis argument — nieznana komenda
+        ::red Nieznana komenda: @BIT_CMD
         -- bit_help
-        > exit 0
+        > exit 1
+    done
+    ? err
+        ;; Brak argumentu — sprawdz strukture projektu
+        -- bit_project_run
     done
 done
-
-;; Dispatch
->> bash -c "case '@_bit_cmd' in install) exit 0;; remove) exit 1;; list) exit 2;; update) exit 3;; info) exit 4;; *) exit 99;; esac"
-
-? ok
-    -- bit_install
-done
-
-> test "@_bit_cmd" = "remove"
-? ok
-    -- bit_remove
-done
-
-> test "@_bit_cmd" = "list"
-? ok
-    -- bit_list
-done
-
-> test "@_bit_cmd" = "update"
-? ok
-    -- bit_update
-done
-
-> test "@_bit_cmd" = "info"
-? ok
-    -- bit_info
-done
-
-> test "@_bit_cmd" = "help"
-? ok
-    -- bit_help
-done
-
-;; Nieznana komenda
-::red Nieznana komenda: @_bit_cmd
--- bit_help
-> exit 1
