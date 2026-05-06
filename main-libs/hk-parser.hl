@@ -1,0 +1,61 @@
+;;; main/hk-parser.hl — Parser plikow .hk (HackerOS Configuration Format)
+;;; Instalacja: plik w /usr/lib/HackerOS/Hacker-Lang/main-libs/hk-parser.hl
+;;; Uzycie: # <main/hk-parser>
+;;; Format .hk oparty o implementacje Rust (hk-parser crate)
+using <gen 1>
+
+% HK_PARSER_LOADED  = true
+% HK_PARSER_VERSION = gen 1
+
+;; ── Format .hk ────────────────────────────────────────────────────────────────
+;; Struktura pliku .hk:
+;;
+;;   ! Komentarz
+;;
+;;   [sekcja]
+;;   -> klucz => wartosc
+;;   -> klucz => 42
+;;   -> klucz => true
+;;   -> klucz => [1, 2, "trzy"]
+;;   -> zagniezdzona
+;;   --> podklucz => wartosc
+;;
+;; Interpolacja: ${sekcja.klucz}  lub  ${env:ZMIENNA}
+;;
+;; Wersjonowanie: HK_PARSER_VERSION = gen 1
+
+;; Odczytaj wartosc z pliku .hk uzywajac hk-tool (jesli dostepny)
+;; lub przez grep/awk jako fallback
+: hk_get def
+    ;; Uzycie: % _hk_file = plik.hk, % _hk_section = sekcja, % _hk_key = klucz, -- hk_get
+    ::which hk-tool
+    ? ok
+        >> hk-tool get @_hk_file @_hk_section @_hk_key
+    done
+    ? err
+        ;; Fallback: grep
+        >> grep -A100 "\[@_hk_section\]" @_hk_file | grep "-> @_hk_key =>" | head -1 | sed 's/.*=> //'
+    done
+done
+
+;; Sprawdz czy sekcja istnieje
+: hk_has_section def
+    >> grep -q "\[@_hk_section\]" @_hk_file
+done
+
+;; Listuj sekcje
+: hk_sections def
+    >> grep -o '\[.*\]' @_hk_file | tr -d '[]'
+done
+
+;; Validacja pliku .hk (podstawowa)
+: hk_validate def
+    ::exists @_hk_file
+    ? ok
+        ::green Plik .hk istnieje: @_hk_file
+        -- hk_sections
+    done
+    ? err
+        ::red Plik .hk nie istnieje: @_hk_file
+    done
+done
