@@ -99,7 +99,7 @@ fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecRe
 fn resolve_export_value(val: &ExportValue, env: &mut Env) -> String {
     match val {
         ExportValue::Single(parts) => env.resolve_string_parts(parts),
-        ExportValue::List(items) => items.iter().map(|p| env.resolve_string_parts(p)).collect::<Vec<_>>().join(":"),
+        ExportValue::List(items)   => items.iter().map(|p| env.resolve_string_parts(p)).collect::<Vec<_>>().join(":"),
     }
 }
 
@@ -128,8 +128,7 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         Node::Command { raw, mode, .. } => {
             let trimmed = raw.trim();
             if trimmed.starts_with("echo ") || trimmed == "echo" {
-                bail!("Operator 'echo' jest zabroniony w Hacker Lang.\nUzyj '~> {}' zamiast '> echo {}'",
-                    trimmed.trim_start_matches("echo").trim(), trimmed.trim_start_matches("echo").trim());
+                bail!("'echo' jest zabroniony. Uzyj '~>'.");
             }
             let (sudo, isolated) = match mode {
                 CommandMode::Plain            => (false, false),
@@ -143,47 +142,29 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             run_command(raw, sudo, isolated, env, false)
         }
 
-        // *> komenda — uruchom przez hsh -c "komenda"
         Node::HshCommand { raw } => {
             let cmd = raw.trim();
-            debug!("hsh: {}", cmd);
             let status = Command::new("hsh")
                 .args(["-c", cmd])
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
                 .status()
-                .map_err(|e| anyhow::anyhow!("Nie mozna uruchomic hsh: {}\nUpewnij sie ze hsh jest zainstalowany na HackerOS.", e))?;
-            let code = status.code().unwrap_or(1);
-            Ok(ExecResult { exit_code: code, stdout: None })
+                .map_err(|e| anyhow::anyhow!("hsh nie znaleziony: {}", e))?;
+            Ok(ExecResult { exit_code: status.code().unwrap_or(1), stdout: None })
         }
 
-        // & komenda — uruchom w tle (nie czekaj na zakonczenie)
         Node::Background { raw } => {
             let expanded = env.interpolate(raw);
-            let trimmed  = expanded.trim().to_string();
-            debug!("background: {}", trimmed);
-
-            // Zawsze przez sh -c aby obsluc przekierowania i potoki
             let child = Command::new("sh")
-                .args(["-c", &trimmed])
-                .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .args(["-c", expanded.trim()])
+                .stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
                 .spawn()
-                .map_err(|e| anyhow::anyhow!("Nie mozna uruchomic w tle: {}", e))?;
-
-            // Zapisz PID do zmiennej _bg_pid (dostepne przez @_bg_pid)
+                .map_err(|e| anyhow::anyhow!("Blad tla: {}", e))?;
             env.set_var("_bg_pid", Value::Number(child.id() as f64));
             eprintln!("\x1b[90m[hl &] PID={}\x1b[0m", child.id());
-
-            // Nie czekamy — proces dziala w tle
-            // Zapobiegamy zombie przez detach (w pelnej impl. uzyj prctl/double-fork)
             std::mem::forget(child);
             Ok(ExecResult::ok())
         }
 
-        // _N > cmd — powtorz N razy
         Node::RepeatN { count, body } => {
             let mut last = ExecResult::ok();
             for _ in 0..*count {
@@ -193,69 +174,53 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             Ok(last)
         }
 
-        // << plik.hl — import zewnetrznego pliku .hl
         Node::FileImport { path, detail } => {
-            let expanded_path = env.interpolate(path);
-            let file_path = std::path::Path::new(&expanded_path);
-            if !file_path.exists() {
-                bail!("Plik do importu nie istnieje: '{}'", expanded_path);
+            let expanded = env.interpolate(path);
+            if !std::path::Path::new(&expanded).exists() {
+                bail!("Import: plik nie istnieje: '{}'", expanded);
             }
-            let src = std::fs::read_to_string(file_path)?;
-            let nodes = hl_parser::parse_source(&src)?;
-
-            // Jezeli sa szczegoly — ustaw jako zmienna przed wykonaniem
+            let src = std::fs::read_to_string(&expanded)?;
             if let Some(d) = detail {
                 env.set_var("_import_detail", Value::String(d.clone()));
             }
+            let nodes = hl_parser::parse_source(&src)?;
             exec_nodes(&nodes, env)
         }
 
-        // :* blok done — goroutine (uproszczone: wykonaj w osobnym watku)
-        Node::Goroutine { body } => {
-            // Klonuj body do watku
-            // W pelnej implementacji nalezy uzyc kanalów do komunikacji
-            // Tutaj: uruchom asynchronicznie w osobnym watku
+        Node::Goroutine { name, body } => {
             let body_clone = body.clone();
+            let name_str   = name.clone().unwrap_or_else(|| "<goroutine>".to_string());
             let mut thread_env = Env::new();
-            // Skopiuj zmienne do watku
-            for (k, v) in &env.vars {
-                thread_env.vars.insert(k.clone(), v.clone());
-            }
-
+            for (k, v) in &env.vars { thread_env.vars.insert(k.clone(), v.clone()); }
             std::thread::spawn(move || {
                 let _ = exec_nodes(&body_clone, &mut thread_env);
             });
-
-            eprintln!("\x1b[35m[hl :*]\x1b[0m Goroutine uruchomiona");
+            eprintln!("\x1b[35m[hl :*] goroutine '{}' uruchomiona\x1b[0m", name_str);
             Ok(ExecResult::ok())
         }
 
-        // :** nazwa — zadeklaruj kanal (uproszczone: zmienna kolejkowa)
         Node::Channel { name } => {
-            let chan_var = format!("__chan_{}", name);
-            env.set_var(&chan_var, Value::String(String::new()));
-            eprintln!("\x1b[35m[hl :**]\x1b[0m Kanal '{}' zadeklarowany", name);
+            env.set_var(&format!("__chan_{}", name), Value::String(String::new()));
             Ok(ExecResult::ok())
         }
 
-        // *-- nazwa — operacja na kanale
         Node::ChannelOp { name, value } => {
             let chan_var = format!("__chan_{}", name);
             if let Some(parts) = value {
-                // Wyslij wartosc do kanalu
                 let val = env.resolve_string_parts(parts);
                 env.set_var(&chan_var, Value::String(val));
             } else {
-                // Odbierz wartosc z kanalu (wypisz)
-                let val = env.get_var(&chan_var).to_string_val();
-                println!("{}", val);
+                println!("{}", env.get_var(&chan_var).to_string_val());
             }
             Ok(ExecResult::ok())
         }
 
-        Node::VarDecl { name, value } => {
+        // Gen 2 — typowane zmienne
+        Node::VarDecl { name, typ: _typ, value } => {
             let val = match value {
                 VarValue::String(s)       => Value::String(s.clone()),
+                VarValue::Int(n)          => Value::Number(*n as f64),
+                VarValue::Float(n)        => Value::Number(*n),
                 VarValue::Number(n)       => Value::Number(*n),
                 VarValue::Bool(b)         => Value::Bool(*b),
                 VarValue::Interpolated(p) => Value::String(env.resolve_string_parts(p)),
@@ -263,6 +228,23 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
                     let r = run_command(cmd, false, false, env, true)?;
                     Value::String(r.stdout.unwrap_or_default().trim().to_string())
                 }
+                VarValue::Arithmetic(expr) => {
+                    let expanded = env.interpolate(expr);
+                    let result   = eval_arithmetic(&expanded, env)?;
+                    Value::String(result)
+                }
+                VarValue::List(items) => {
+                    let parts: Vec<Value> = items.iter().map(|v| match v {
+                        VarValue::String(s)  => Value::String(s.clone()),
+                        VarValue::Int(n)     => Value::Number(*n as f64),
+                        VarValue::Float(n)   => Value::Number(*n),
+                        VarValue::Number(n)  => Value::Number(*n),
+                        VarValue::Bool(b)    => Value::Bool(*b),
+                        _                    => Value::Nil,
+                    }).collect();
+                    Value::List(parts)
+                }
+                VarValue::Map(_) => Value::String(String::new()),
             };
             env.set_var(name, val);
             Ok(ExecResult::ok())
@@ -312,6 +294,173 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             if run { exec_nodes(body, env) } else { Ok(ExecResult::ok()) }
         }
 
+        // Gen 2 — for @var in lista
+        Node::ForIn { var, iterable, body } => {
+            let iter_str = env.resolve_string_parts(iterable);
+            let items: Vec<&str> = iter_str.split_whitespace().collect();
+            let mut last = ExecResult::ok();
+            for item in items {
+                env.set_var(var, Value::String(item.to_string()));
+                last = exec_nodes(body, env)?;
+                env.last_exit = last.exit_code;
+            }
+            Ok(last)
+        }
+
+        // Gen 2 — ?~ warunek (while)
+        Node::WhileLoop { condition, body } => {
+            let mut iterations = 0usize;
+            const MAX_ITER: usize = 100_000;
+            loop {
+                if iterations >= MAX_ITER {
+                    bail!("Petla while: przekroczono limit {} iteracji", MAX_ITER);
+                }
+                iterations += 1;
+
+                let cond_str = env.resolve_string_parts(condition);
+                let cond_result = eval_condition(&cond_str, env)?;
+                if !cond_result { break; }
+
+                let r = exec_nodes(body, env)?;
+                env.last_exit = r.exit_code;
+            }
+            Ok(ExecResult::ok())
+        }
+
+        // Gen 2 — ? switch @var
+        Node::MatchExpr { subject, arms } => {
+            let subj = env.resolve_string_parts(subject);
+            let mut matched = false;
+            for arm in arms {
+                let pattern = arm.pattern.trim();
+                let matches = pattern == "*" || pattern == subj
+                    || env.interpolate(pattern) == subj;
+                if matches || (!matched && pattern == "*") {
+                    exec_nodes(&arm.body, env)?;
+                    matched = true;
+                    if pattern != "*" { break; }
+                }
+            }
+            Ok(ExecResult::ok())
+        }
+
+        // Gen 2 — $( expr ) -> @var
+        Node::Arithmetic { expr, assign_to } => {
+            let expanded = env.interpolate(expr);
+            let result   = eval_arithmetic(&expanded, env)?;
+            if let Some(var) = assign_to {
+                env.set_var(var, Value::String(result.clone()));
+            }
+            println!("{}", result);
+            Ok(ExecResult::ok())
+        }
+
+        // Gen 2 — > cmd |> @var
+        Node::PipeToVar { command, mode, var_name } => {
+            let sudo = matches!(mode, CommandMode::Sudo | CommandMode::IsolatedSudo | CommandMode::WithVarsSudo);
+            let r = run_command(command, sudo, false, env, true)?;
+            let output = r.stdout.unwrap_or_default().trim().to_string();
+            env.set_var(var_name, Value::String(output));
+            Ok(ExecResult { exit_code: r.exit_code, stdout: None })
+        }
+
+        // Gen 2 — || tool args (HackerOS API)
+        Node::HackerOsApi { tool, args } => {
+            let bin = tool.binary_name();
+            let args_str = env.resolve_string_parts(args);
+            let args_str = args_str.trim();
+
+            // Sprawdz czy narzedzie jest dostepne
+            if which::which(bin).is_err() {
+                eprintln!("\x1b[33m[hl ||]\x1b[0m Narzedzie '{}' nie jest zainstalowane.", bin);
+                eprintln!("        Zainstaluj przez: hpkg install {} lub lpm install {}", bin, bin);
+                return Ok(ExecResult::err(127));
+            }
+
+            debug!("hackeros-api: {} {}", bin, args_str);
+
+            let r = if args_str.is_empty() {
+                run_command(bin, false, false, env, false)
+            } else {
+                run_command(&format!("{} {}", bin, args_str), false, false, env, false)
+            }?;
+            Ok(r)
+        }
+
         Node::Block(nodes) => exec_nodes(nodes, env),
+    }
+}
+
+// ── Ewaluacja arytmetyki (gen 2) ─────────────────────────────────────────────
+// Uzywa sh -c "echo $(( expr ))" jako prosty backend
+fn eval_arithmetic(expr: &str, env: &mut Env) -> Result<String> {
+    let expanded = env.interpolate(expr);
+    // Zastap zmienne HL (@var) ich wartosciami
+    let expr_clean = expanded.trim();
+
+    // Uzyj powloki do obliczen
+    let sh_expr = format!("echo $(( {} ))", expr_clean);
+    let out = Command::new("sh")
+        .args(["-c", &sh_expr])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Arytmetyka: {}", e))?;
+
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        // Fallback: sprobuj jako float przez python3
+        let py_expr = format!("python3 -c \"print({})\"", expr_clean);
+        let out2 = Command::new("sh").args(["-c", &py_expr]).output();
+        match out2 {
+            Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+            _ => bail!("Nie mozna obliczyc wyrazenia: {}", expr_clean),
+        }
+    }
+}
+
+// ── Ewaluacja warunku while (gen 2) ──────────────────────────────────────────
+// Obsluguje: @var == val, @var != val, @var > val, @var < val,
+//            @var >= val, @var <= val, ::exists @path, exit 0, itp.
+fn eval_condition(cond: &str, env: &mut Env) -> Result<bool> {
+    let cond = env.interpolate(cond);
+    let cond = cond.trim();
+
+    // Pusty warunek = false
+    if cond.is_empty() { return Ok(false); }
+
+    // == / != / < / > / >= / <=
+    for op in &["==", "!=", ">=", "<=", ">", "<"] {
+        if let Some(pos) = cond.find(op) {
+            let left  = cond[..pos].trim();
+            let right = cond[pos+op.len()..].trim();
+            let lv = env.get_var(left.trim_start_matches('@')).to_string_val();
+            let rv = right.trim_matches('"').to_string();
+            return Ok(match *op {
+                "==" => lv == rv,
+                "!=" => lv != rv,
+                ">=" => lv.parse::<f64>().unwrap_or(0.0) >= rv.parse::<f64>().unwrap_or(0.0),
+                "<=" => lv.parse::<f64>().unwrap_or(0.0) <= rv.parse::<f64>().unwrap_or(0.0),
+                ">"  => lv.parse::<f64>().unwrap_or(0.0) >  rv.parse::<f64>().unwrap_or(0.0),
+                "<"  => lv.parse::<f64>().unwrap_or(0.0) <  rv.parse::<f64>().unwrap_or(0.0),
+                _    => false,
+            });
+        }
+    }
+
+    // true / false
+    if cond == "true"  { return Ok(true);  }
+    if cond == "false" { return Ok(false); }
+
+    // @var (truthy check: niepusty i != "false" i != "0")
+    if cond.starts_with('@') {
+        let val = env.get_var(&cond[1..]).to_string_val();
+        return Ok(!val.is_empty() && val != "false" && val != "0");
+    }
+
+    // Fallback: uruchom jako komende przez sh, sprawdz exit code
+    let out = Command::new("sh").args(["-c", cond]).status();
+    match out {
+        Ok(s) => Ok(s.success()),
+        Err(_) => Ok(false),
     }
 }
