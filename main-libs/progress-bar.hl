@@ -1,0 +1,60 @@
+#!/usr/bin/hl
+;;; main/progress-bar.hl — Pasek postepu (produkcyjny)
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/progress-bar.hl
+using <gen 2>
+
+% PROGRESS_BAR_WIDTH   = 20
+% PROGRESS_BAR_LOADED  = true
+
+;; Rysuj pasek postepu
+;; Uzycie: % _pb_pct = 0..100 && -- pb_draw
+;; Format: [--->............] [30%]
+: pb_draw def
+    >> bash -c "
+        PCT=@_pb_pct
+        FILL=\$(( PCT * @PROGRESS_BAR_WIDTH / 100 ))
+        EMPTY=\$(( @PROGRESS_BAR_WIDTH - FILL ))
+        DASHES=\$(( FILL > 0 ? FILL - 1 : 0 ))
+        BAR='['
+        i=0; while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$((\$i+1)); done
+        [ \$FILL -gt 0 ] && BAR=\"\${BAR}>\"
+        i=0; while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$((\$i+1)); done
+        BAR=\"\${BAR}]\"
+        printf '\r\033[36m%s\033[0m \033[33m[%d%%]\033[0m' \"\$BAR\" \$PCT
+    "
+done
+
+;; Zakonczenie paska (nowa linia)
+: pb_done def
+    ~> 
+done
+
+;; Pasek z etykieta
+;; Uzycie: % _pb_pct = 50 && % _pb_label = "Pobieranie" && -- pb_label
+: pb_label def
+    >> bash -c "
+        PCT=@_pb_pct
+        FILL=\$(( PCT * @PROGRESS_BAR_WIDTH / 100 ))
+        EMPTY=\$(( @PROGRESS_BAR_WIDTH - FILL ))
+        DASHES=\$(( FILL > 0 ? FILL - 1 : 0 ))
+        BAR='['
+        i=0; while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$((\$i+1)); done
+        [ \$FILL -gt 0 ] && BAR=\"\${BAR}>\"
+        i=0; while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$((\$i+1)); done
+        BAR=\"\${BAR}]\"
+        printf '\r\033[36m%-15s\033[0m %s \033[33m[%d%%]\033[0m' \"@_pb_label\" \"\$BAR\" \$PCT
+    "
+done
+
+;; Animowany spinner (do zadan bez procentow)
+;; Uzycie: % _spinner_msg = "Ladowanie" && -- pb_spin_tick (wywoluj w petli)
+% _spinner_frame = 0
+
+: pb_spin_tick def
+    >> bash -c "
+        FRAMES='|/-\\'
+        F=\$(( @_spinner_frame % 4 ))
+        printf '\r\033[36m%s\033[0m %s' \"\${FRAMES:\$F:1}\" \"@_spinner_msg\"
+    "
+    $( @_spinner_frame + 1 ) -> @_spinner_frame
+done
