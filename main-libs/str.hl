@@ -1,0 +1,61 @@
+;;; main/str.hl — Stale i funkcje stringowe
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/str.hl
+using <gen 2>
+
+% STR_NEWLINE = \n
+% STR_TAB     = \t
+% STR_SPACE   = " "
+% STR_EMPTY   = ""
+
+;; Kolory ANSI (alias do main/colors)
+% STR_RED     = \033[31m
+% STR_GREEN   = \033[32m
+% STR_YELLOW  = \033[33m
+% STR_RESET   = \033[0m
+% STR_BOLD    = \033[1m
+
+;; Konwersja
+: str_to_upper def
+    ;; % _str = wartosc && -- str_to_upper → @_str_result
+    >> bash -c "printf '%s' '@_str' | tr '[:lower:]' '[:upper:]'" |> @_str_result
+done
+
+: str_to_lower def
+    >> bash -c "printf '%s' '@_str' | tr '[:upper:]' '[:lower:]'" |> @_str_result
+done
+
+: str_trim def
+    >> bash -c "printf '%s' '@_str' | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//'" |> @_str_result
+done
+
+: str_len def
+    >> bash -c "printf '%s' '@_str' | wc -c | tr -d ' '" |> @_str_len
+done
+
+: str_replace def
+    ;; % _str = tekst && % _str_from = stary && % _str_to = nowy && -- str_replace
+    >> bash -c "printf '%s' '@_str' | sed 's/@_str_from/@_str_to/g'" |> @_str_result
+done
+
+: str_contains def
+    ;; % _str = tekst && % _str_sub = szukaj && -- str_contains → exit 0/1
+    >> bash -c "printf '%s' '@_str' | grep -qF '@_str_sub'"
+done
+
+: str_starts_with def
+    >> bash -c "printf '%s' '@_str' | grep -q '^@_str_prefix'"
+done
+
+: str_ends_with def
+    >> bash -c "printf '%s' '@_str' | grep -q '@_str_suffix\$'"
+done
+
+: str_split def
+    ;; % _str = a:b:c && % _str_sep = : && -- str_split (wypisuje linie)
+    >> bash -c "printf '%s' '@_str' | tr '@_str_sep' '\n'"
+done
+
+: str_join def
+    ;; Uzyj bash array lub prostego rozwiazania
+    >> bash -c "printf '%s' '@_str' | tr '\n' '@_str_sep' | sed 's/@_str_sep\$//'"
+done
