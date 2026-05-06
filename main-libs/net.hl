@@ -1,0 +1,48 @@
+;;; main/net.hl — Biblioteka sieciowa
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/net.hl
+using <gen 2>
+
+% NET_LOCALHOST  = 127.0.0.1
+% NET_BROADCAST  = 255.255.255.255
+% NET_IPV6_LOCAL = ::1
+
+;; Pobierz adres IP interfejsu
+> ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' |> @NET_MYIP
+> ip route 2>/dev/null | awk '/default/{print $3; exit}' |> @NET_GATEWAY
+> ip route 2>/dev/null | awk '/default/{print $5; exit}' |> @NET_IFACE
+
+;; Porty standardowe
+% PORT_SSH    = 22
+% PORT_HTTP   = 80
+% PORT_HTTPS  = 443
+% PORT_FTP    = 21
+% PORT_SMTP   = 25
+% PORT_DNS    = 53
+% PORT_POP3   = 110
+% PORT_IMAP   = 143
+% PORT_MYSQL  = 3306
+% PORT_PGSQL  = 5432
+% PORT_REDIS  = 6379
+% PORT_MONGO  = 27017
+% PORT_LDAP   = 389
+% PORT_RDP    = 3389
+% PORT_VNC    = 5900
+% PORT_HTTP_ALT = 8080
+% PORT_HTTPS_ALT = 8443
+
+;; Sprawdz czy host odpowiada
+: net_ping def
+    ;; Uzycie: % _net_target = 192.168.1.1 && -- net_ping
+    >> bash -c "ping -c 1 -W 2 @_net_target >/dev/null 2>&1"
+done
+
+;; Pobierz zewnetrzny IP
+: net_myip_public def
+    > curl -fsSL ifconfig.me 2>/dev/null |> @NET_PUBLIC_IP
+done
+
+;; Sprawdz czy port jest otwarty
+: net_port_check def
+    ;; Uzycie: % _net_host = host && % _net_port = 80 && -- net_port_check
+    >> bash -c "nc -z -w2 @_net_host @_net_port >/dev/null 2>&1"
+done
