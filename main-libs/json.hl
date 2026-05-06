@@ -1,0 +1,57 @@
+;;; main/json.hl — Parser JSON
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/json.hl
+using <gen 2>
+
+// jq
+
+% JSON_LOADED = true
+
+: json_get def
+    ;; % _json_file = plik.json && % _json_key = .klucz && -- json_get → stdout
+    >> jq -r "@_json_key" @_json_file
+done
+
+: json_get_var def
+    ;; Jak json_get ale wynik do zmiennej @_json_result
+    >> jq -r "@_json_key" @_json_file |> @_json_result
+done
+
+: json_set def
+    ;; % _json_file && % _json_key = .klucz && % _json_val = wartosc
+    >> bash -c "jq '@_json_key = \"@_json_val\"' @_json_file > /tmp/_json_tmp.$$ && mv /tmp/_json_tmp.$$ @_json_file"
+done
+
+: json_array def
+    >> jq -r "@_json_key[]" @_json_file
+done
+
+: json_keys def
+    >> jq -r "@_json_key | keys[]" @_json_file
+done
+
+: json_has def
+    >> jq -e "@_json_key" @_json_file > /dev/null 2>&1
+done
+
+: json_validate def
+    > jq empty @_json_file > /dev/null 2>&1
+    ? ok
+        ::green JSON OK: @_json_file
+    done
+    ? err
+        ::red JSON NIEPOPRAWNY: @_json_file
+    done
+done
+
+: json_pretty def
+    >> jq . @_json_file
+done
+
+: json_compact def
+    >> jq -c . @_json_file
+done
+
+: json_merge def
+    ;; % _json_file1 && % _json_file2 && % _json_out — polacz dwa pliki JSON
+    >> jq -s '.[0] * .[1]' @_json_file1 @_json_file2 > @_json_out
+done
