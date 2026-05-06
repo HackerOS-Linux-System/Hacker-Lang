@@ -87,7 +87,7 @@ impl RuntimeSymbols {
     fn declare(module: &mut ObjectModule) -> Result<Self> {
         let ptr  = types::I64;
         let i32t = types::I32;
-        let i64t = types::I64;
+        let _i64t = types::I64;
 
         let hl_print         = decl_fn(module, "hl_print",         &[ptr],         &[])?;
         let hl_print_interp  = decl_fn(module, "hl_print_interp",  &[ptr],         &[])?;
@@ -204,7 +204,7 @@ fn emit_instr(instr: &HlInstr, prog: &HlProgram, rt: &RuntimeSymbols,
             let exit_block = builder.create_block();
 
             // Inicjalizuj licznik
-            let count_val = builder.ins().iconst(types::I64, *count as i64);
+            let _count_val = builder.ins().iconst(types::I64, *count as i64);
             let counter   = builder.ins().iconst(types::I64, 0i64);
             let _ = counter; // uproszczenie — pelna impl wymaga SSA phi-nodes
 
