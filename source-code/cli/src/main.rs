@@ -39,9 +39,9 @@ fn die_not_hackeros() -> ! {
 #[derive(Parser, Debug)]
 #[command(
     name    = "hl",
-    version = "gen 1",
+    version = "gen 2",
     author  = "HackerOS Team",
-    about   = "Hacker Lang — jezyk skryptowy HackerOS (gen 1)",
+    about   = "Hacker Lang — jezyk skryptowy HackerOS (gen 2)",
     after_help = "\
 SKRYPTY SYSTEMOWE:
     hl search <nazwa>    Szukaj skryptu w /usr/share/HackerOS/Scripts/Bin/
@@ -317,7 +317,7 @@ fn main() -> Result<()> {
                     Ok(nodes) => {
                         let ast_json = serde_json::to_string(&nodes)?;
                         let bc_content = format!(
-                            "#!/usr/bin/env -S /usr/bin/hl run\n# HL-BC gen 1\n{}\n",
+                            "#!/usr/bin/env -S /usr/bin/hl run\n# HL-BC gen 2\n{}\n",
                             ast_json
                         );
                         std::fs::write(&bc_path, bc_content.as_bytes())?;
@@ -663,19 +663,19 @@ fn run_docs() {
 }
 
 fn print_version() {
-    println!("{} {}", "Hacker Lang".bright_magenta().bold(), "gen 1".bright_white());
+    println!("{} {}", "Hacker Lang".bright_magenta().bold(), "gen 2".bright_white());
     println!();
     println!("{}", "Komponenty:".bright_yellow());
-    println!("  hl-parser    gen 1  -- Lexer, Parser, AST, Gen, Shebang");
-    println!("  hl-core      gen 1  -- Executor, Env, Quick Functions, Diagnostics");
-    println!("  hl-compiler  gen 1  -- Bytecode (.bc) + Cranelift codegen + C runtime");
-    println!("  hl-shell     gen 1  -- REPL, Shell, Completion");
-    println!("  hl-docs      gen 1  -- Dokumentacja TUI (Go + Bubble Tea)");
+    println!("  hl-parser    gen 2  -- Lexer, Parser, AST, Gen, Shebang");
+    println!("  hl-core      gen 2  -- Executor, Env, Quick Functions, Diagnostics");
+    println!("  hl-compiler  gen 2  -- Bytecode (.bc) + Cranelift codegen + C runtime");
+    println!("  hl-shell     gen 2  -- REPL, Shell, Completion");
+    println!("  hl-docs      gen 2  -- Dokumentacja TUI (Go + Bubble Tea)");
     println!();
     println!("{}", "System Genow:".bright_yellow());
     println!("  Aktualny max gen: {}", format!("gen {}", HL_MAX_GEN).bright_magenta().bold());
     println!("  Domyslny gen:     {}", format!("gen {}", HL_DEFAULT_GEN).bright_magenta());
-    println!("  Deklaracja:       {}", "using <gen 1>".bright_cyan());
+    println!("  Deklaracja:       {}", "using <gen 2>".bright_cyan());
     println!();
     println!("{}", "Kompilacja (dwuetapowa):".bright_yellow());
     println!("  .hl -> .bc  {}", "hl compile skrypt.hl    # bytecode (wykonywalny)".bright_cyan());
@@ -696,13 +696,22 @@ fn print_version() {
     println!("  {}   -- biblioteka bit (.so)", "# <bit/nazwa>".bright_magenta());
     println!("  {} -- GitHub", "# <github/user/repo>".bright_blue());
     println!();
-    println!("{}", "Nowe operatory (gen 1):".bright_yellow());
-    println!("  {}  -- uruchom w tle (&  komenda)", "& komenda".bright_cyan());
-    println!("  {}  -- uruchom przez hsh shell", "*> komenda".bright_cyan());
-    println!("  {}  -- goroutine (async)", ":*".bright_magenta());
-    println!("  {}  -- channel", ":**".bright_magenta());
+    println!("{}", "Operatory gen 1:".bright_yellow());
+    println!("  {}  -- uruchom w tle", "& komenda".bright_cyan());
+    println!("  {}  -- uruchom przez hsh", "*> komenda".bright_cyan());
+    println!("  {}  -- goroutine (z nazwa: :* n def)", ":*".bright_magenta());
+    println!("  {}  -- channel / channel-op", ":**, *--".bright_magenta());
     println!("  {}  -- powtorz N razy", "_N".bright_cyan());
     println!("  {}  -- import pliku .hl", "<< plik.hl".bright_cyan());
+    println!();
+    println!("{}", "Operatory gen 2 (NOWE):".bright_yellow());
+    println!("  {}  -- typowana zmienna (int/float/str/bool)", "% n: int = 42".bright_cyan());
+    println!("  {}  -- arytmetyka natywna", "$( expr ) -> @var".bright_cyan());
+    println!("  {}  -- pipe wyniku do zmiennej", "> cmd |> @var".bright_cyan());
+    println!("  {}  -- for-in loop", "@ item in lista".bright_cyan());
+    println!("  {}  -- while loop", "?~ warunek".bright_cyan());
+    println!("  {}  -- switch/case", "? switch @var  |  | pattern".bright_cyan());
+    println!("  {}  -- HackerOS API", "|| narzedzie [args]".bright_magenta());
     println!();
     println!("{}", "Skrypty systemowe:".bright_yellow());
     println!("  Katalog:  {}", HL_SCRIPTS_DIR.bright_white());
