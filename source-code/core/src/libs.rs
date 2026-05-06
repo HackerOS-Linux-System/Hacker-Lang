@@ -49,6 +49,13 @@ pub fn parse_import_spec(raw: &str) -> Option<ImportSource> {
         "virus" => Some(ImportSource::Bit { name: rest.to_string(), version }),
         "community" => Some(ImportSource::GitHub { path: rest.to_string(), version }),
 
+                // core/ = wbudowane biblioteki (alias do main/)
+        "core" => {
+            let (lib, detail) = if let Some(s) = rest.find('/') {
+                (rest[..s].to_string(), Some(rest[s+1..].to_string()))
+            } else { (rest.to_string(), None) };
+            Some(ImportSource::Main { lib, detail, version })
+        }
         _ => None,
     }
 }
