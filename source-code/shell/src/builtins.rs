@@ -13,7 +13,7 @@ pub fn try_builtin(line: &str, env: &mut Env) -> BuiltinResult {
     match cmd {
         "cd" => {
             let target = if rest.is_empty() {
-                dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/".to_string())
+                dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/".into())
             } else { rest.to_string() };
             match std_env::set_current_dir(&target) {
                 Ok(_)  => BuiltinResult::Handled(0),
@@ -21,8 +21,8 @@ pub fn try_builtin(line: &str, env: &mut Env) -> BuiltinResult {
             }
         }
         "exit" | "quit" => { std::process::exit(rest.parse::<i32>().unwrap_or(0)); }
-        "help" => { print_help(); BuiltinResult::Handled(0) }
-        "vars" => {
+        "help"          => { print_help(); BuiltinResult::Handled(0) }
+        "vars"          => {
             println!("{}", "=== Hacker Lang Variables ===".cyan().bold());
             let mut names: Vec<&String> = env.vars.keys().collect();
             names.sort();
@@ -40,62 +40,53 @@ pub fn try_builtin(line: &str, env: &mut Env) -> BuiltinResult {
             BuiltinResult::Handled(0)
         }
         "clear" | "cls" => { print!("\x1b[2J\x1b[H"); BuiltinResult::Handled(0) }
-        _ => BuiltinResult::NotBuiltin,
+        _               => BuiltinResult::NotBuiltin,
     }
 }
 
 fn print_help() {
     println!("{}", r#"
-  Hacker Lang gen 1 — Referencia skladni
+  Hacker Lang gen 2 — Referencia skladni
 
-  PRINT:   ~> tekst          -- wypisz tekst (interpolacja @var)
-  CMD:     >  komenda         -- uruchom komende
-  SUDO:    ^> komenda         -- uruchom z sudo
-  ISO:     -> komenda         -- uruchom w izolacji (unshare)
-  ISO+SU:  ^-> komenda        -- sudo + izolacja
-  VARS:    >> komenda         -- komenda z interpolacja @zmiennych
-  VAR+SU:  ^>> komenda        -- vars + sudo
-  HSH:     *> komenda         -- uruchom przez hsh -c
-  BG:      & komenda          -- uruchom w tle (nie czekaj)
+  ── GEN 1 ────────────────────────────────────────────────────
+  PRINT:     ~> tekst          -- wypisz tekst (@var interpolacja)
+  CMD:       >  komenda         -- uruchom komende
+  SUDO:      ^> komenda         -- uruchom z sudo
+  ISO:       -> komenda         -- izolacja namespace
+  ISO+SU:    ^-> komenda        -- sudo + izolacja
+  VARS:      >> komenda         -- komenda z @zmiennymi
+  HSH:       *> komenda         -- uruchom przez hsh -c
+  BG:        & komenda          -- uruchom w tle
 
-  ZMIENNA: % nazwa = wartosc  -- zmienna lokalna
-  REF:     @nazwa             -- odwolanie do zmiennej
-  EXPORT:  => nazwa = wartosc -- export do srodowiska
-  EXPORT:  => nazwa [         -- export listy wartosci
-           | val1
-           | val2
-           ]
+  VAR:       % n = val          -- zmienna lokalna
+  REF:       @nazwa             -- odwolanie do zmiennej
+  EXPORT:    => n = val         -- export do srodowiska
+  PETLA:     _N > cmd           -- powtorz N razy
+  IMPORT:    << plik.hl         -- importuj plik .hl
+  GOROUTINE: :* [nazwa] def     -- goroutine (blok + done)
+  CHANNEL:   :** nazwa          -- zadeklaruj channel
+  CHAN-OP:   *-- nazwa          -- wyslij/odbierz channel
 
-  PETLA:   _N > komenda       -- powtorz N razy (np. _10 > ls)
-           _N ;; cokolwiek    -- powtorz N razy
-
-  FUNKCJA: : nazwa def        -- definicja funkcji
-           ...
-           done
-  CALL:    -- nazwa           -- wywolanie funkcji
-
-  GOROUTINE: :*               -- goroutine (wg. Go channels)
-             ...
+  ── GEN 2 ────────────────────────────────────────────────────
+  TYPED VAR: % n: int = 42      -- typowana zmienna (int/float/str/bool)
+  ARITH:     $( expr ) -> @var  -- arytmetyka natywna
+  PIPE:      > cmd |> @var      -- pipe wyniku do zmiennej
+  FOR-IN:    @ item in lista    -- for-in loop (done)
+  WHILE:     ?~ warunek         -- while loop (done)
+  SWITCH:    ? switch @var      -- switch/case
+             | "pattern"        -- case arm
+             | *                -- wildcard
              done
-  CHANNEL: :** nazwa          -- zadeklaruj kanal
-  CHAN-OP: *-- nazwa          -- wyslij/odbierz przez kanal
+  HACKEROS:  || narzedzie args  -- HackerOS API (hacker/hsh/lpm/...)
 
-  IMPORT:  # <main/nazwa>     -- standardowa biblioteka (.hl)
-           # <bit/nazwa>      -- biblioteka bit (.so)
-           # <github/u/repo>  -- GitHub
-           << plik.hl         -- import zewnetrznego pliku .hl
-           << plik.hl | szcz  -- import z detalami
+  ── WSPOLNE ──────────────────────────────────────────────────
+  FUNC DEF:  : nazwa def ... done
+  FUNC CALL: -- nazwa
+  COND:      ? ok / ? err ... done
+  IMPORT:    # <main/lib> / # <bit/lib> / # <github/u/r>
+  DEP:       // narzedzie
+  COMMENTS:  ;; linia  ///  doc  // blok \\
 
-  WARUNEK: ? ok               -- jesli exit 0
-           ? err              -- jesli exit != 0
-           done
-
-  KOMENTARZ: ;; tekst         -- liniowy
-             /// tekst        -- dokumentacyjny
-
-  DEP:     // narzedzie       -- deklaracja zaleznosci
-  GEN:     using <gen 1>      -- deklaracja gena
-
-  BUILTINS: cd, vars, funcs, help, clear, exit
+  BUILTINS:  cd, vars, funcs, help, clear, exit
 "#.bright_white());
 }
