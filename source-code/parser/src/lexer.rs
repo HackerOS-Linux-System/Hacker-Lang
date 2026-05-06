@@ -3,11 +3,11 @@ use crate::import_spec::parse_import_line;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    LineComment(String),
-    DocComment(String),
-    BlockComment(String),
+    // Output
     Print(String),
+    // Quick functions
     QuickCall { name: String, args: String },
+    // Commands
     CmdIsolatedSudo(String),
     CmdWithVarsSudo(String),
     CmdWithVarsIsolated(String),
@@ -15,51 +15,72 @@ pub enum Token {
     CmdIsolated(String),
     CmdWithVars(String),
     Cmd(String),
-    /// *> komenda — uruchom przez hsh -c
     HshCmd(String),
-    /// & komenda — uruchom w tle
     Background(String),
-    VarDecl { name: String, value: String },
+    // Gen 2 — > cmd |> @var
+    CmdPipeToVar { cmd: String, mode: PipeCmdMode, var_name: String },
+    // Gen 2 — || tool args
+    HackerOsApi { tool: String, args: String },
+    // Variables
+    VarDecl { name: String, typ: String, value: String },
     VarRef(String),
+    // Export
     ExportSingle { name: String, value: String },
     ExportListStart(String),
     ExportListItem(String),
     ExportListEnd,
+    // Dependencies / imports
     Dependency(String),
     Import { lib: String, detail: Option<String> },
-    /// << plik.hl | szczegoly — import zewnetrznego pliku .hl
     FileImport { path: String, detail: Option<String> },
+    // Functions
     FuncDef(String),
     FuncCall(String),
+    // Conditions
     IfOk,
     IfErr,
+    // Gen 2 — ?~ warunek (while)
+    WhileStart(String),
+    // Gen 2 — ? switch @var (switch/match)
+    SwitchStart(String),
+    // Gen 2 — | "pattern" lub | * (switch arm)
+    SwitchArm { pattern: String },
+    // Gen 2 — for: @ item in lista
+    ForIn { var: String, iterable: String },
+    // Gen 2 — arytmetyka: $( expr ) lub $( expr ) -> @var
+    Arithmetic { expr: String, assign_to: Option<String> },
+    // Flow
     Done,
-    /// using <gen N>
     Using(String),
-    /// :* — goroutine start
-    GoroutineStart,
-    /// :** nazwa — channel declaration
+    // Gen 1 goroutines (poprawiona skladnia: :* nazwa def ... done)
+    GoroutineStart { name: Option<String> },
     ChannelDecl(String),
-    /// *-- nazwa — channel send/receive
     ChannelOp(String),
-    /// _N — repeat N times (next token/block)
+    // Repeat
     RepeatN(u64),
+    // Misc
+    Comments(CommentKind, String),
     Ident(String),
     StringLit(String),
-    Number(f64),
     Bool(bool),
+    Number(f64),
     Newline,
-    Indent(usize),
     Eof,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PipeCmdMode { Plain, Sudo }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommentKind { Line, Doc, Block }
+
 #[derive(Debug, Error)]
 pub enum LexError {
-    #[error("Unexpected character '{0}' at line {1}:{2}")]
+    #[error("Nieoczekiwany znak '{0}' w linii {1}:{2}")]
     UnexpectedChar(char, usize, usize),
-    #[error("Unterminated string at line {0}")]
+    #[error("Niezamkniety string w linii {0}")]
     UnterminatedString(usize),
-    #[error("Unterminated block comment")]
+    #[error("Niezamkniety komentarz blokowy")]
     UnterminatedBlockComment,
 }
 
@@ -77,9 +98,9 @@ impl Lexer {
     }
 
     #[inline] pub fn peek(&self) -> Option<char> { self.source.get(self.pos).copied() }
-    #[inline] fn peek_at(&self, n: usize) -> Option<char> { self.source.get(self.pos+n).copied() }
-    #[inline] fn matches(&self, seq: &[char]) -> bool {
-        self.source.get(self.pos..self.pos+seq.len()) == Some(seq)
+    #[inline] pub fn peek_at(&self, n: usize) -> Option<char> { self.source.get(self.pos + n).copied() }
+    #[inline] fn matches_seq(&self, seq: &[char]) -> bool {
+        self.source.get(self.pos..self.pos + seq.len()) == Some(seq)
     }
 
     #[inline]
@@ -92,7 +113,7 @@ impl Lexer {
         ch
     }
 
-    #[inline] fn skip_n(&mut self, n: usize) { for _ in 0..n { self.advance(); } }
+    fn skip_n(&mut self, n: usize) { for _ in 0..n { self.advance(); } }
     fn skip_ws(&mut self) { while matches!(self.peek(), Some(' ') | Some('\t')) { self.advance(); } }
 
     fn read_line(&mut self) -> String {
@@ -106,7 +127,7 @@ impl Lexer {
 
     fn read_string_lit(&mut self) -> Result<String, LexError> {
         let start_line = self.line;
-        self.advance();
+        self.advance(); // skip opening "
         let mut s = String::with_capacity(64);
         loop {
             match self.advance() {
@@ -151,7 +172,17 @@ impl Lexer {
         s.parse().unwrap_or(0.0)
     }
 
-    #[inline] fn read_cmd(&mut self) -> String { self.skip_ws(); self.read_line() }
+    fn read_cmd(&mut self) -> String { self.skip_ws(); self.read_line() }
+
+    /// Sprawdz czy linia zawiera |> @var — pipe do zmiennej (gen 2)
+    fn split_pipe_to_var(line: &str) -> Option<(String, String)> {
+        if let Some(p) = line.find("|>") {
+            let cmd = line[..p].trim().to_string();
+            let var = line[p+2..].trim().trim_start_matches('@').to_string();
+            if !var.is_empty() && !cmd.is_empty() { return Some((cmd, var)); }
+        }
+        None
+    }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens = Vec::with_capacity(self.source.len() / 8 + 16);
@@ -159,26 +190,24 @@ impl Lexer {
         while self.pos < self.source.len() {
             let ch = match self.peek() { None => break, Some(c) => c };
 
+            // ── Export list mode ─────────────────────────────────────────────
             if self.in_export_list {
                 match ch {
-                    '\n' => { tokens.push(Token::Newline); self.advance(); continue; }
-                    ' ' | '\t' | '\r' => { self.advance(); continue; }
-                    '|' => {
+                    '\n' => { tokens.push(Token::Newline); self.advance(); }
+                    ' ' | '\t' | '\r' => { self.advance(); }
+                    '|' if self.peek_at(1) != Some('>') && self.peek_at(1) != Some('|') => {
                         self.advance(); self.skip_ws();
                         tokens.push(Token::ExportListItem(self.read_line()));
-                        continue;
                     }
                     ']' => {
                         self.advance();
                         self.in_export_list = false;
                         tokens.push(Token::ExportListEnd);
                         self.read_line();
-                        continue;
                     }
                     ';' if self.peek_at(1) == Some(';') => {
                         self.skip_n(2);
-                        tokens.push(Token::LineComment(self.read_line()));
-                        continue;
+                        tokens.push(Token::Comments(CommentKind::Line, self.read_line()));
                     }
                     _ => {
                         let (l, c) = (self.line, self.col);
@@ -186,30 +215,96 @@ impl Lexer {
                         return Err(LexError::UnexpectedChar(ch, l, c));
                     }
                 }
+                continue;
             }
 
             match ch {
                 '\n' => { tokens.push(Token::Newline); self.advance(); }
                 ' ' | '\t' | '\r' => { self.advance(); }
 
+                // ── ~> print ─────────────────────────────────────────────────
                 '~' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2); self.skip_ws();
                     tokens.push(Token::Print(self.read_line()));
                 }
 
-                ':' if self.matches(&[':', '*', '*']) => {
-                    // :** nazwa — channel declaration
+                // ── $( expr ) lub $( expr ) -> @var  — arytmetyka (gen 2) ───
+                '$' if self.peek_at(1) == Some('(') => {
+                    self.skip_n(2);
+                    let mut expr = String::new();
+                    let mut depth = 1usize;
+                    loop {
+                        match self.peek() {
+                            Some('(')  => { depth += 1; expr.push('('); self.advance(); }
+                            Some(')')  => {
+                                depth -= 1; self.advance();
+                                if depth == 0 { break; }
+                                expr.push(')');
+                            }
+                            Some(c)    => { expr.push(c); self.advance(); }
+                            None       => break,
+                        }
+                    }
+                    self.skip_ws();
+                    // Opcjonalne -> @var
+                    let assign_to = if self.matches_seq(&['-', '>']) {
+                        self.skip_n(2); self.skip_ws();
+                        if self.peek() == Some('@') { self.advance(); }
+                        let v = self.read_ident_full();
+                        if v.is_empty() { None } else { Some(v) }
+                    } else { None };
+                    tokens.push(Token::Arithmetic { expr: expr.trim().to_string(), assign_to });
+                }
+
+                // ── || tool args  — HackerOS API (gen 2) ─────────────────────
+                '|' if self.peek_at(1) == Some('|') => {
+                    self.skip_n(2); self.skip_ws();
+                    // Czytaj nazwe narzedzia (moze zawierac - i #)
+                    let mut tool = String::new();
+                    while let Some(c) = self.peek() {
+                        if c.is_alphanumeric() || c == '-' || c == '#' { tool.push(c); self.advance(); }
+                        else { break; }
+                    }
+                    self.skip_ws();
+                    let args = self.read_line();
+                    tokens.push(Token::HackerOsApi { tool, args });
+                }
+
+                // ── | "pattern" / | *  — switch arm (gen 2) ─────────────────
+                // Tylko gdy NIE jestesmy w liscie eksportu i to nie |> ani ||
+                '|' if self.peek_at(1) != Some('>') && self.peek_at(1) != Some('|') => {
+                    self.advance(); self.skip_ws();
+                    let line = self.read_line();
+                    // Usun ewentualne trailing ->
+                    let pattern = if let Some(p) = line.find("->") {
+                        line[..p].trim().to_string()
+                    } else {
+                        line.trim().to_string()
+                    };
+                    tokens.push(Token::SwitchArm { pattern });
+                }
+
+                // ── :** channel declaration ───────────────────────────────────
+                ':' if self.matches_seq(&[':', '*', '*']) => {
                     self.skip_n(3); self.skip_ws();
                     tokens.push(Token::ChannelDecl(self.read_ident_full()));
                     self.read_line();
                 }
 
-                ':' if self.matches(&[':', '*']) => {
-                    // :* — goroutine start
-                    self.skip_n(2); self.read_line();
-                    tokens.push(Token::GoroutineStart);
+                // ── :* nazwa def — goroutine (gen 1 + gen 2 z nazwa) ─────────
+                ':' if self.matches_seq(&[':', '*']) => {
+                    self.skip_n(2); self.skip_ws();
+                    let rest = self.read_line();
+                    let rest = rest.trim();
+                    let name = if rest.ends_with("def") {
+                        let n = rest[..rest.len()-3].trim().to_string();
+                        if n.is_empty() { None } else { Some(n) }
+                    } else if rest.is_empty() { None }
+                    else { Some(rest.to_string()) };
+                    tokens.push(Token::GoroutineStart { name });
                 }
 
+                // ── :: quick call ─────────────────────────────────────────────
                 ':' if self.peek_at(1) == Some(':') => {
                     self.skip_n(2); self.skip_ws();
                     let name = self.read_ident(); self.skip_ws();
@@ -220,143 +315,189 @@ impl Lexer {
                     self.advance(); self.skip_ws();
                     let name = self.read_ident_full(); self.skip_ws();
                     let kw = self.read_ident();
-                    if kw == "def" {
-                        tokens.push(Token::FuncDef(name)); self.read_line();
-                    } else {
-                        tokens.push(Token::Ident(format!(":{} {}", name, kw)));
-                    }
+                    if kw == "def" { tokens.push(Token::FuncDef(name)); self.read_line(); }
+                    else { tokens.push(Token::Ident(format!(":{} {}", name, kw))); }
                 }
 
+                // ── ;; komentarz liniowy ──────────────────────────────────────
                 ';' if self.peek_at(1) == Some(';') => {
                     self.skip_n(2);
-                    tokens.push(Token::LineComment(self.read_line()));
+                    tokens.push(Token::Comments(CommentKind::Line, self.read_line()));
                 }
 
-                '/' if self.matches(&['/', '/', '/']) => {
+                // ── /// doc komentarz ─────────────────────────────────────────
+                '/' if self.matches_seq(&['/', '/', '/']) => {
                     self.skip_n(3);
-                    tokens.push(Token::DocComment(self.read_line()));
+                    tokens.push(Token::Comments(CommentKind::Doc, self.read_line()));
                 }
 
-                '/' if self.matches(&['/', '/']) => {
+                // ── // zaleznosc lub blok komentarz ──────────────────────────
+                '/' if self.matches_seq(&['/', '/']) => {
                     self.skip_n(2); self.skip_ws();
                     let rest: String = self.source[self.pos..].iter().collect();
                     if let Some(end) = rest.find("\\\\") {
                         let content = rest[..end].trim().to_string();
                         self.skip_n(end + 2);
-                        tokens.push(Token::BlockComment(content));
+                        tokens.push(Token::Comments(CommentKind::Block, content));
                     } else {
                         tokens.push(Token::Dependency(self.read_line()));
                     }
                 }
 
-                // << plik.hl | szczegoly — import zewnetrznego pliku
+                // ── << import pliku ───────────────────────────────────────────
                 '<' if self.peek_at(1) == Some('<') => {
                     self.skip_n(2); self.skip_ws();
                     let rest = self.read_line();
-                    if let Some(pipe_pos) = rest.find('|') {
-                        let path   = rest[..pipe_pos].trim().to_string();
-                        let detail = rest[pipe_pos+1..].trim().to_string();
-                        tokens.push(Token::FileImport {
-                            path,
-                            detail: if detail.is_empty() { None } else { Some(detail) },
-                        });
+                    if let Some(p) = rest.find('|') {
+                        let path   = rest[..p].trim().to_string();
+                        let detail = rest[p+1..].trim().to_string();
+                        tokens.push(Token::FileImport { path, detail: if detail.is_empty() { None } else { Some(detail) } });
                     } else {
                         tokens.push(Token::FileImport { path: rest.trim().to_string(), detail: None });
                     }
                 }
 
-                '-' if self.matches(&['-', '-']) => {
+                // ── -- func call ──────────────────────────────────────────────
+                '-' if self.matches_seq(&['-', '-']) => {
                     self.skip_n(2); self.skip_ws();
                     tokens.push(Token::FuncCall(self.read_ident_full()));
                     self.read_line();
                 }
 
+                // ── => export ─────────────────────────────────────────────────
                 '=' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2); self.skip_ws();
                     let name = self.read_ident_full(); self.skip_ws();
                     match self.peek() {
-                        Some('=') => {
-                            self.advance(); self.skip_ws();
-                            tokens.push(Token::ExportSingle { name, value: self.read_line() });
-                        }
-                        Some('[') => {
-                            self.advance(); self.read_line();
-                            self.in_export_list = true;
-                            tokens.push(Token::ExportListStart(name));
-                        }
+                        Some('=') => { self.advance(); self.skip_ws(); tokens.push(Token::ExportSingle { name, value: self.read_line() }); }
+                        Some('[') => { self.advance(); self.read_line(); self.in_export_list = true; tokens.push(Token::ExportListStart(name)); }
                         _ => { tokens.push(Token::ExportSingle { name, value: String::new() }); }
                     }
                 }
 
-                '^' if self.matches(&['^', '-', '>']) => { self.skip_n(3); tokens.push(Token::CmdIsolatedSudo(self.read_cmd())); }
-                '^' if self.matches(&['^', '>', '>']) => { self.skip_n(3); tokens.push(Token::CmdWithVarsSudo(self.read_cmd())); }
-                '^' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdSudo(self.read_cmd())); }
+                // ── Komendy ^>, ->, itp. ──────────────────────────────────────
+                '^' if self.matches_seq(&['^', '-', '>']) => { self.skip_n(3); tokens.push(Token::CmdIsolatedSudo(self.read_cmd())); }
+                '^' if self.matches_seq(&['^', '>', '>']) => { self.skip_n(3); tokens.push(Token::CmdWithVarsSudo(self.read_cmd())); }
+                '^' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    let line = self.read_cmd();
+                    if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::Sudo, var_name: var });
+                    } else {
+                        tokens.push(Token::CmdSudo(line));
+                    }
+                }
                 '^' => { self.advance(); }
 
-                '-' if self.matches(&['-', '>', '>']) => { self.skip_n(3); tokens.push(Token::CmdWithVarsIsolated(self.read_cmd())); }
+                '-' if self.matches_seq(&['-', '>', '>']) => { self.skip_n(3); tokens.push(Token::CmdWithVarsIsolated(self.read_cmd())); }
                 '-' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdIsolated(self.read_cmd())); }
 
                 '>' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdWithVars(self.read_cmd())); }
-                '>' => { self.advance(); tokens.push(Token::Cmd(self.read_cmd())); }
+                '>' => {
+                    self.advance();
+                    let line = self.read_cmd();
+                    if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::Plain, var_name: var });
+                    } else {
+                        tokens.push(Token::Cmd(line));
+                    }
+                }
 
-                // & komenda — uruchom w tle
+                // ── & background ──────────────────────────────────────────────
                 '&' => { self.advance(); self.skip_ws(); tokens.push(Token::Background(self.read_line())); }
 
-                // *-- nazwa — channel op
-                '*' if self.matches(&['*', '-', '-']) => {
+                // ── *-- channel op ────────────────────────────────────────────
+                '*' if self.matches_seq(&['*', '-', '-']) => {
                     self.skip_n(3); self.skip_ws();
                     tokens.push(Token::ChannelOp(self.read_ident_full()));
                     self.read_line();
                 }
 
-                // *> komenda — hsh shell
+                // ── *> hsh command ────────────────────────────────────────────
                 '*' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2); self.skip_ws();
                     tokens.push(Token::HshCmd(self.read_line()));
                 }
 
-                // _N > komenda lub _N ;; linia — powtorz N razy
+                // ── _N repeat ─────────────────────────────────────────────────
                 '_' => {
                     self.advance();
-                    // Czytaj cyfry
                     let mut num_str = String::new();
                     while let Some(c) = self.peek() {
                         if c.is_ascii_digit() { num_str.push(c); self.advance(); } else { break; }
                     }
                     if !num_str.is_empty() {
-                        let n: u64 = num_str.parse().unwrap_or(1);
-                        tokens.push(Token::RepeatN(n));
+                        tokens.push(Token::RepeatN(num_str.parse().unwrap_or(1)));
                     } else {
-                        // identyfikator zaczynajacy sie od _
                         let mut id = String::from("_");
                         id.push_str(&self.read_ident_full());
                         tokens.push(Token::Ident(id));
                     }
                 }
 
+                // ── @ item in lista  — for-in (gen 2) ────────────────────────
+                // Sprawdz z wyprzedzeniem czy to for-in czy VarRef
+                '@' => {
+                    self.advance();
+                    let name = self.read_ident_full();
+                    self.skip_ws();
+                    // Sprawdz czy nastepnie jest "in" — wtedy to for-in
+                    let looks_like_for = {
+                        let mut tmp_pos = self.pos;
+                        let mut kw = String::new();
+                        while tmp_pos < self.source.len() && (self.source[tmp_pos].is_alphabetic()) {
+                            kw.push(self.source[tmp_pos]);
+                            tmp_pos += 1;
+                        }
+                        kw == "in"
+                    };
+                    if looks_like_for {
+                        // Pochlon "in"
+                        let _in_kw = self.read_ident();
+                        self.skip_ws();
+                        let iterable = self.read_line();
+                        tokens.push(Token::ForIn { var: name, iterable });
+                    } else {
+                        tokens.push(Token::VarRef(name));
+                    }
+                }
+
+                // ── % var lub % var: typ = val ────────────────────────────────
                 '%' => {
                     self.advance(); self.skip_ws();
                     let name = self.read_ident_full(); self.skip_ws();
+                    let typ = if self.peek() == Some(':') {
+                        self.advance(); self.skip_ws();
+                        self.read_ident_full()
+                    } else { String::new() };
+                    self.skip_ws();
                     if self.peek() == Some('=') {
                         self.advance(); self.skip_ws();
-                        tokens.push(Token::VarDecl { name, value: self.read_line() });
+                        tokens.push(Token::VarDecl { name, typ, value: self.read_line() });
                     } else {
                         tokens.push(Token::Ident(format!("%{}", name)));
                     }
                 }
 
-                '@' => { self.advance(); tokens.push(Token::VarRef(self.read_ident_full())); }
-
+                // ── ? ok / ? err / ?~ while / ? switch ───────────────────────
                 '?' => {
                     self.advance(); self.skip_ws();
-                    let kw = self.read_ident();
-                    match kw.as_str() {
-                        "ok"  => { tokens.push(Token::IfOk);  self.read_line(); }
-                        "err" => { tokens.push(Token::IfErr); self.read_line(); }
-                        _     => tokens.push(Token::Ident(format!("?{}", kw))),
+                    // ?~ while (gen 2)
+                    if self.peek() == Some('~') {
+                        self.advance(); self.skip_ws();
+                        tokens.push(Token::WhileStart(self.read_line()));
+                    } else {
+                        let kw = self.read_ident();
+                        match kw.as_str() {
+                            "ok"     => { tokens.push(Token::IfOk);  self.read_line(); }
+                            "err"    => { tokens.push(Token::IfErr); self.read_line(); }
+                            "switch" => { self.skip_ws(); tokens.push(Token::SwitchStart(self.read_line())); }
+                            _        => tokens.push(Token::Ident(format!("?{}", kw))),
+                        }
                     }
                 }
 
+                // ── # import ─────────────────────────────────────────────────
                 '#' => {
                     self.advance(); self.skip_ws();
                     let rest = self.read_line();
@@ -371,7 +512,7 @@ impl Lexer {
 
                 c if c.is_ascii_digit() => { tokens.push(Token::Number(self.read_number())); }
 
-                c if c.is_alphabetic() || c == '_' => {
+                c if c.is_alphabetic() => {
                     let id = self.read_ident_full();
                     match id.as_str() {
                         "done"  => { tokens.push(Token::Done); self.read_line(); }
