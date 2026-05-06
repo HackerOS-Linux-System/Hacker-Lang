@@ -1,0 +1,111 @@
+;;; main/hacker.hl — Parser plikow .hacker (v1, v2, v3)
+;;; Instalacja: plik w /usr/lib/HackerOS/Hacker-Lang/main-libs/hacker.hl
+;;; Uzycie: # <main/hacker>
+;;;
+;;; Format .hacker:
+;;;   v1:  [ dowolna zawartosc ]
+;;;   v2:  [ naglowek  sekcja:  = wartosc  sekcja2:  = wartosc2 ]
+;;;   v3:  [ = naglowek  => typ  -> opis  --> plik ]
+using <gen 1>
+
+% HACKER_PARSER_LOADED  = true
+% HACKER_PARSER_VERSION = gen 1
+
+;; ── Wykrywanie wersji pliku .hacker ──────────────────────────────────────────
+
+: hacker_detect_version def
+    ;; Uzycie: % _hacker_file = plik.hacker, -- hacker_detect_version
+    ;; Ustawia %_hacker_version = 1|2|3
+
+    ::exists @_hacker_file
+    ? err
+        ::red Plik .hacker nie istnieje: @_hacker_file
+        > exit 1
+    done
+
+    ;; Sprawdz czy zawiera = (naglowek v3)
+    >> grep -q "^[[:space:]]*= " @_hacker_file
+    ? ok
+        % _hacker_version = 3
+    done
+
+    ;; Sprawdz czy zawiera sekcje z : (v2)
+    >> grep -q ":$" @_hacker_file
+    ? ok
+        % _hacker_version = 2
+    done
+
+    ;; Domyslnie v1
+    % _hacker_version = 1
+done
+
+;; ── Parser v1 ─────────────────────────────────────────────────────────────────
+
+: hacker_parse_v1 def
+    ;; Odczytaj zawartosc miedzy [ ]
+    >> sed -n 's/^[[:space:]]*\[//;s/\][[:space:]]*$//;p' @_hacker_file | head -1
+done
+
+;; ── Parser v2 ─────────────────────────────────────────────────────────────────
+
+: hacker_parse_v2_header def
+    ;; Odczytaj naglowek (linie przed pierwsza sekcja :)
+    >> awk '/^[[:space:]]*[a-zA-Z].*:$/{exit} {print}' @_hacker_file | grep -v '^\[' | grep -v '^\]' | grep -v '^[[:space:]]*$' | head -1
+done
+
+: hacker_parse_v2_section def
+    ;; Uzycie: % _hacker_section = jadro, -- hacker_parse_v2_section
+    ;; Wyswietla wartosci dla sekcji
+    >> awk "/^[[:space:]]*@_hacker_section:/{found=1; next} found && /^[[:space:]]*= /{sub(/^[[:space:]]*= /, \"\"); print} found && /^[[:space:]]*[a-zA-Z].*:$/{exit}" @_hacker_file
+done
+
+;; ── Parser v3 ─────────────────────────────────────────────────────────────────
+
+: hacker_parse_v3_header def
+    >> grep "^[[:space:]]*= " @_hacker_file | head -1 | sed 's/^[[:space:]]*= //'
+done
+
+: hacker_parse_v3_type def
+    >> grep "^[[:space:]]*=> " @_hacker_file | head -1 | sed 's/^[[:space:]]*=> //'
+done
+
+: hacker_parse_v3_description def
+    >> grep "^[[:space:]]*-> " @_hacker_file | head -1 | sed 's/^[[:space:]]*-> //'
+done
+
+: hacker_parse_v3_file def
+    >> grep "^[[:space:]]*--> " @_hacker_file | head -1 | sed 's/^[[:space:]]*--> //'
+done
+
+;; ── Glowna funkcja parsowania ─────────────────────────────────────────────────
+
+: hacker_parse def
+    ;; Uzycie: % _hacker_file = plik.hacker, -- hacker_parse
+    -- hacker_detect_version
+
+    > test "@_hacker_version" = "3"
+    ? ok
+        ~> [.hacker v3]
+        ~> Header:      
+        -- hacker_parse_v3_header
+        ~> Type:        
+        -- hacker_parse_v3_type
+        ~> Description: 
+        -- hacker_parse_v3_description
+        ~> File:        
+        -- hacker_parse_v3_file
+    done
+
+    > test "@_hacker_version" = "2"
+    ? ok
+        ~> [.hacker v2]
+        ~> Header:
+        -- hacker_parse_v2_header
+    done
+
+    > test "@_hacker_version" = "1"
+    ? ok
+        ~> [.hacker v1]
+        -- hacker_parse_v1
+    done
+done
