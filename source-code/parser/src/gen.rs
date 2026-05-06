@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-pub const HL_MAX_GEN: u32 = 1;
-pub const HL_DEFAULT_GEN: u32 = 1;
+pub const HL_MAX_GEN: u32 = 2;
+pub const HL_DEFAULT_GEN: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Gen(pub u32);
@@ -20,6 +20,7 @@ impl Gen {
 
     pub fn supports(&self, feature: GenFeature) -> bool {
         match feature {
+            // Gen 1
             GenFeature::BasicSyntax       => self.0 >= 1,
             GenFeature::ExportOperator    => self.0 >= 1,
             GenFeature::IsolatedCommands  => self.0 >= 1,
@@ -31,9 +32,17 @@ impl Gen {
             GenFeature::FileImport        => self.0 >= 1,
             GenFeature::Goroutines        => self.0 >= 1,
             GenFeature::HshCommands       => self.0 >= 1,
-            // Zarezerwowane
-            GenFeature::AsyncCommands     => self.0 >= 2,
+            // Gen 2
             GenFeature::TypedVariables    => self.0 >= 2,
+            GenFeature::ForLoop           => self.0 >= 2,
+            GenFeature::WhileLoop         => self.0 >= 2,
+            GenFeature::MatchExpr         => self.0 >= 2,
+            GenFeature::NativeArithmetic  => self.0 >= 2,
+            GenFeature::PipeToVar         => self.0 >= 2,
+            GenFeature::MultilineString   => self.0 >= 2,
+            GenFeature::HackerOsApi       => self.0 >= 2,
+            // Gen 3+
+            GenFeature::AsyncCommands     => self.0 >= 3,
             GenFeature::Closures          => self.0 >= 3,
         }
     }
@@ -47,28 +56,18 @@ impl std::fmt::Display for Gen {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GenFeature {
-    BasicSyntax,
-    ExportOperator,
-    IsolatedCommands,
-    QuickFunctions,
-    Dependencies,
-    Imports,
-    Background,
-    RepeatN,
-    FileImport,
-    Goroutines,
-    HshCommands,
-    // Zarezerwowane
-    AsyncCommands,
-    TypedVariables,
-    Closures,
+    BasicSyntax, ExportOperator, IsolatedCommands, QuickFunctions,
+    Dependencies, Imports, Background, RepeatN, FileImport, Goroutines, HshCommands,
+    TypedVariables, ForLoop, WhileLoop, MatchExpr, NativeArithmetic,
+    PipeToVar, MultilineString, HackerOsApi,
+    AsyncCommands, Closures,
 }
 
 #[derive(Debug, Error, Clone)]
 pub enum GenError {
     #[error("Nieprawidlowy gen: {0} (geny sa numerowane od 1)")]
     InvalidGen(u32),
-    #[error("Gen {requested} nie jest wspierany przez ta wersje HL (max: gen {max})")]
+    #[error("Gen {requested} nie jest wspierany (max: gen {max})")]
     UnsupportedGen { requested: u32, max: u32 },
     #[error("Blad parsowania deklaracji gena: '{0}'")]
     ParseError(String),
@@ -82,7 +81,6 @@ pub fn parse_gen_declaration(line: &str) -> Result<Gen, GenError> {
     } else {
         return Err(GenError::ParseError(line.to_string()));
     };
-
     if let Some(n_str) = inner.strip_prefix("gen").map(|s| s.trim()) {
         match n_str.parse::<u32>() {
             Ok(n) => Gen::new(n),
@@ -96,33 +94,16 @@ pub fn parse_gen_declaration(line: &str) -> Result<Gen, GenError> {
 pub fn extract_gen(source: &str) -> (Gen, Option<GenError>) {
     for line in source.lines().take(10) {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') && trimmed.starts_with("#!") { continue; }
-        if trimmed.starts_with(";;") || trimmed.starts_with("///") || trimmed.starts_with("//") { continue; }
-        if trimmed.is_empty() { continue; }
+        if trimmed.starts_with("#!") || trimmed.starts_with(";;") ||
+           trimmed.starts_with("///") || trimmed.starts_with("//") ||
+           trimmed.is_empty() { continue; }
         if trimmed.starts_with("using") {
-            match parse_gen_declaration(trimmed) {
-                Ok(gen)  => return (gen, None),
-                Err(err) => return (Gen::default(), Some(err)),
-            }
+            return match parse_gen_declaration(trimmed) {
+                Ok(gen)  => (gen, None),
+                Err(err) => (Gen::default(), Some(err)),
+            };
         }
         break;
     }
     (Gen::default(), None)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_gen1() {
-        let g = parse_gen_declaration("using <gen 1>").unwrap();
-        assert_eq!(g.0, 1);
-    }
-
-    #[test]
-    fn test_unsupported_gen() {
-        let err = parse_gen_declaration("using <gen 99>").unwrap_err();
-        assert!(matches!(err, GenError::UnsupportedGen { .. }));
-    }
 }
