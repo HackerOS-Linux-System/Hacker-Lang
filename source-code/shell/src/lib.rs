@@ -29,8 +29,8 @@ pub fn run_as_shell(config: Option<&Path>, env: &mut Env) -> Result<()> {
         dirs::home_dir().unwrap_or_default().join(HLRC_FILE)
     });
     if rc_path.exists() {
-        let rc_src = std::fs::read_to_string(&rc_path).unwrap_or_default();
-        let fname  = rc_path.to_string_lossy().into_owned();
+        let rc_src  = std::fs::read_to_string(&rc_path).unwrap_or_default();
+        let fname   = rc_path.to_string_lossy().into_owned();
         execute_source(&rc_src, &fname, env);
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -163,17 +163,25 @@ pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
     match run_source(&source, env) {
         Ok(r)  => Ok(r.exit_code),
         Err(e) => {
-            let d = hl_core::Diag::error(e.to_string()).with_note(format!("blad runtime w '{}'", filename));
+            let d = hl_core::Diag::error(e.to_string())
+                .with_note(format!("blad runtime w '{}'", filename));
             renderer.emit(&d); Ok(1)
         }
     }
 }
 
+/// Wykryj poczatek bloku (wiele linii) — gen 1 + gen 2
 fn is_block_start(line: &str) -> bool {
-    (line.starts_with(':') && !line.starts_with("::") && !line.starts_with(":*") && line.ends_with("def"))
-    || line.starts_with(":*") // goroutine
-    || line.starts_with("? ok")
-    || line.starts_with("? err")
+    // gen 1
+    let is_func_def = line.starts_with(':') && !line.starts_with("::") && !line.starts_with(":*") && line.ends_with("def");
+    let is_goroutine = line.starts_with(":*");
+    let is_cond = line.starts_with("? ok") || line.starts_with("? err");
+    // gen 2
+    let is_for_in  = line.starts_with('@') && line.contains(" in ");
+    let is_while   = line.starts_with("?~");
+    let is_switch  = line.starts_with("? switch");
+
+    is_func_def || is_goroutine || is_cond || is_for_in || is_while || is_switch
 }
 
 fn print_banner() {
@@ -184,5 +192,5 @@ fn print_banner() {
   ██╔══██║██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
   ██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-  L A N G  gen 1  --  REPL"#.bright_cyan().bold());
+  L A N G  gen 2  --  REPL"#.bright_cyan().bold());
 }
