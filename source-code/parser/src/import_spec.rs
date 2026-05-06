@@ -41,6 +41,7 @@ fn normalize_import_spec(raw: &str) -> String {
     if let Some(rest) = raw.strip_prefix("community/") {
         return format!("github/{}", rest);
     }
+    // core/* stays as core/* (wbudowane biblioteki — alias do main/ w libs.rs)
     raw.to_string()
 }
 
