@@ -1,0 +1,44 @@
+;;; main/crypto.hl — Kryptografia
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/crypto.hl
+using <gen 2>
+
+% CRYPTO_SHA256_CMD = sha256sum
+% CRYPTO_MD5_CMD    = md5sum
+% CRYPTO_SHA1_CMD   = sha1sum
+% CRYPTO_SHA512_CMD = sha512sum
+
+;; SHA256 pliku lub stringa
+: crypto_sha256_file def
+    ;; % _crypto_file = /sciezka && -- crypto_sha256_file → @_crypto_hash
+    >> sha256sum @_crypto_file | cut -d' ' -f1 |> @_crypto_hash
+done
+
+: crypto_sha256_str def
+    ;; % _crypto_str = tekst && -- crypto_sha256_str → @_crypto_hash
+    >> bash -c "printf '%s' '@_crypto_str' | sha256sum | cut -d' ' -f1" |> @_crypto_hash
+done
+
+: crypto_md5_file def
+    >> md5sum @_crypto_file | cut -d' ' -f1 |> @_crypto_hash
+done
+
+: crypto_base64_encode def
+    >> bash -c "printf '%s' '@_crypto_str' | base64 -w0" |> @_crypto_result
+done
+
+: crypto_base64_decode def
+    >> bash -c "printf '%s' '@_crypto_str' | base64 -d" |> @_crypto_result
+done
+
+;; Generuj losowy token (hex)
+: crypto_random_hex def
+    ;; % _crypto_len = 32 && -- crypto_random_hex → @_crypto_result
+    >> bash -c "dd if=/dev/urandom bs=1 count=@_crypto_len 2>/dev/null | xxd -p | tr -d '\n'" |> @_crypto_result
+done
+
+;; Weryfikacja hash
+: crypto_verify def
+    ;; % _crypto_file = plik && % _crypto_expected = hash && -- crypto_verify
+    -- crypto_sha256_file
+    >> test "@_crypto_hash" = "@_crypto_expected"
+done
