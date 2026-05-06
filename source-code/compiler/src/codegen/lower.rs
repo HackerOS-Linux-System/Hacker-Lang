@@ -137,7 +137,7 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
             out.push(HlInstr::Print { idx });
         }
 
-        Node::VarDecl { name, value } => {
+        Node::VarDecl { name, value, .. } => {
             let name_idx = prog.intern(name);
             let (val_s, interp) = varvalue_to_string(value);
             let val_idx = prog.intern(&val_s);
@@ -206,6 +206,76 @@ fn lower_node(node: &Node, prog: &mut HlProgram, out: &mut Vec<HlInstr>) -> Resu
         Node::Block(nodes) => {
             lower_nodes(nodes, prog).map(|i| out.extend(i))?;
         }
+
+        // Gen 2 — for-in: emit as repeated cmd (lowered to loop unroll in interpreter)
+        Node::ForIn { var, iterable, body } => {
+            let iter_str = parts_to_string(iterable);
+            let var_idx  = prog.intern(var);
+            let iter_idx = prog.intern(&iter_str);
+            // In compiler: store as SetVar + body (simplified — full loop requires runtime)
+            out.push(HlInstr::SetVar { name_idx: var_idx, val_idx: iter_idx });
+            let body_instrs = lower_nodes(body, prog)?;
+            out.extend(body_instrs);
+        }
+
+        // Gen 2 — while: emit body once (loop requires runtime support)
+        Node::WhileLoop { condition: _, body } => {
+            let body_instrs = lower_nodes(body, prog)?;
+            out.extend(body_instrs);
+        }
+
+        // Gen 2 — switch/match
+        Node::MatchExpr { subject, arms } => {
+            let subj_str = parts_to_string(subject);
+            let subj_idx = prog.intern(&subj_str);
+            // Emit first arm body as approximation (full match requires runtime)
+            if let Some(arm) = arms.first() {
+                let body_instrs = lower_nodes(&arm.body, prog)?;
+                out.extend(body_instrs);
+            }
+        }
+
+        // Gen 2 — arithmetic: use shell $( expr )
+        Node::Arithmetic { expr, assign_to } => {
+            // Build: sh -c 'echo $((expr))'  — using concat! to avoid $ ambiguity
+            let sh_cmd = {
+                let mut s = String::from("sh -c 'echo $((");
+                s.push_str(expr);
+                s.push_str("))'");
+                s
+            };
+            let cmd_idx = prog.intern(&sh_cmd);
+            out.push(HlInstr::RunCmd { cmd_idx, mode: CmdMode::Plain });
+
+            if let Some(var) = assign_to {
+                let var_idx = prog.intern(var);
+                let expr_wrapped = format!("$(( {} ))", expr);
+                let val_idx = prog.intern(&expr_wrapped);
+                out.push(HlInstr::SetVar { name_idx: var_idx, val_idx });
+            }
+        }
+
+        // Gen 2 — pipe to var
+        Node::PipeToVar { command, mode, var_name } => {
+            let cmd  = format!("{} |> {}", command, var_name);
+            let idx  = prog.intern(&cmd);
+            let sudo = matches!(mode, CommandMode::Sudo | CommandMode::IsolatedSudo | CommandMode::WithVarsSudo);
+            let cm   = if sudo { CmdMode::Sudo } else { CmdMode::Plain };
+            out.push(HlInstr::RunCmd { cmd_idx: idx, mode: cm });
+        }
+
+        // Gen 2 — HackerOS API
+        Node::HackerOsApi { tool, args } => {
+            let bin      = tool.binary_name();
+            let args_str = parts_to_string(args);
+            let full_cmd = if args_str.trim().is_empty() {
+                bin.to_string()
+            } else {
+                format!("{} {}", bin, args_str)
+            };
+            let cmd_idx = prog.intern(&full_cmd);
+            out.push(HlInstr::RunCmd { cmd_idx, mode: CmdMode::Plain });
+        }
     }
     Ok(())
 }
@@ -225,8 +295,13 @@ fn varvalue_to_string(v: &VarValue) -> (String, bool) {
     match v {
         VarValue::String(s)       => (s.clone(), false),
         VarValue::Number(n)       => (n.to_string(), false),
+        VarValue::Int(n)          => (n.to_string(), false),
+        VarValue::Float(n)        => (n.to_string(), false),
         VarValue::Bool(b)         => (b.to_string(), false),
         VarValue::Interpolated(p) => (parts_to_string(p), true),
         VarValue::CmdOutput(cmd)  => (format!("$({})", cmd), false),
+        VarValue::Arithmetic(e)   => (format!("$(( {} ))", e), false),
+        VarValue::List(_)         => (String::new(), false),
+        VarValue::Map(_)          => (String::new(), false),
     }
 }
