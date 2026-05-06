@@ -55,7 +55,7 @@ pub fn exec_quick(name: &str, args: &[StringPart], env: &mut Env) -> Result<Exec
         "set"   => { let (name, value) = split_first(arg_str); env.set_var(name, Value::String(value.to_string())); Ok(ExecResult::ok()) }
         "get"   => { println!("{}", env.get_var(arg_str).to_string_val()); Ok(ExecResult::ok()) }
         "type"  => {
-            let t = match env.get_var(arg_str) { Value::String(_)=>"string", Value::Number(_)=>"number", Value::Bool(_)=>"bool", Value::Nil=>"nil" };
+            let t = match env.get_var(arg_str) { Value::String(_)=>"string", Value::Number(_)=>"number", Value::Bool(_)=>"bool", Value::List(_)=>"list", Value::Nil=>"nil" };
             println!("{}", t); Ok(ExecResult::ok())
         }
         "unset" => { env.vars.remove(arg_str); Ok(ExecResult::ok()) }
