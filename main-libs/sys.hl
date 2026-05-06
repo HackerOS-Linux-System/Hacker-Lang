@@ -1,0 +1,40 @@
+;;; main/sys.hl — Informacje systemowe
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/sys.hl
+using <gen 2>
+
+> uname -m |> @SYS_ARCH
+> uname -r |> @SYS_KERNEL
+> uname -s |> @SYS_OS_NAME
+> cat /etc/hostname 2>/dev/null |> @SYS_HOSTNAME
+> cat /etc/os-release 2>/dev/null | grep "^PRETTY_NAME" | cut -d'"' -f2 |> @SYS_OS
+> nproc 2>/dev/null |> @SYS_CPU_CORES
+> grep -c processor /proc/cpuinfo 2>/dev/null |> @SYS_CPU
+> free -h 2>/dev/null | awk '/^Mem:/{print $2}' |> @SYS_MEMTOTAL
+> free -h 2>/dev/null | awk '/^Mem:/{print $3}' |> @SYS_MEMUSED
+> uptime -p 2>/dev/null |> @SYS_UPTIME
+> id -u |> @SYS_UID
+> id -un |> @SYS_USER
+% SYS_HACKEROS_VER = gen 2
+
+;; Sprawdz czy root
+: sys_is_root def
+    > test "@SYS_UID" = "0"
+done
+
+;; Pobierz wersje pakietu
+: sys_pkg_version def
+    ;; % _sys_pkg = curl && -- sys_pkg_version → @_sys_pkg_ver
+    >> bash -c "@_sys_pkg --version 2>/dev/null | head -1" |> @_sys_pkg_ver
+done
+
+;; Restart uslugi (wymaga sudo)
+: sys_restart def
+    ;; % _sys_service = nginx && -- sys_restart
+    ^>> systemctl restart @_sys_service
+done
+
+;; Status uslugi
+: sys_status def
+    ;; % _sys_service = nginx && -- sys_status
+    >> systemctl is-active @_sys_service |> @_sys_service_status
+done
