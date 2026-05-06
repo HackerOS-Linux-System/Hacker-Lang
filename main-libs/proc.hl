@@ -1,0 +1,35 @@
+;;; main/proc.hl — Informacje o procesach
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/proc.hl
+using <gen 2>
+
+> echo $$ |> @PROC_SELF_PID
+> echo $PPID |> @PROC_PPID
+
+: proc_list def
+    > ps aux
+done
+
+: proc_kill def
+    ;; % _proc_pid = 1234 && -- proc_kill
+    >> kill @_proc_pid
+done
+
+: proc_kill_name def
+    ;; % _proc_name = nginx && -- proc_kill_name
+    >> pkill @_proc_name
+done
+
+: proc_find def
+    ;; % _proc_name = nginx && -- proc_find → @_proc_pids
+    >> pgrep @_proc_name |> @_proc_pids
+done
+
+: proc_is_running def
+    ;; % _proc_name = nginx && -- proc_is_running → exit 0/1
+    >> pgrep -x @_proc_name > /dev/null 2>&1
+done
+
+: proc_wait def
+    ;; % _proc_pid = 1234 && -- proc_wait
+    >> wait @_proc_pid
+done
