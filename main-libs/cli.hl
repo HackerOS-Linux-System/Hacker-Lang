@@ -1,0 +1,65 @@
+;;; main/cli.hl — Argumenty i konfiguracja CLI
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/cli.hl
+using <gen 2>
+
+% CLI_ARGC    = @argc
+% CLI_ARG0    = @arg0
+% CLI_ARG1    = @arg1
+% CLI_ARG2    = @arg2
+% CLI_ARG3    = @arg3
+
+> echo "$0" |> @CLI_PROG_PATH
+::basename @CLI_PROG_PATH
+;; Pobierz nazwe programu do zmiennej przez pipe
+> basename "@CLI_PROG_PATH" |> @CLI_PROG
+
+% CLI_NO_COLOR = false
+% CLI_VERBOSE  = false
+% CLI_DEBUG    = false
+% CLI_QUIET    = false
+
+;; Sprawdz flagi srodowiskowe
+> test "${NO_COLOR:-}" = "1"
+? ok
+    % CLI_NO_COLOR = true
+done
+
+> test "${VERBOSE:-}" = "1"
+? ok
+    % CLI_VERBOSE = true
+done
+
+> test "${DEBUG:-}" = "1"
+? ok
+    % CLI_DEBUG = true
+done
+
+;; Uzycie: % _cli_flag = --verbose && -- cli_has_flag
+: cli_has_flag def
+    >> bash -c "
+        for arg in \"\$@\"; do
+            [ \"\$arg\" = '@_cli_flag' ] && exit 0
+        done
+        exit 1
+    " -- @arg0 @arg1 @arg2 @arg3
+done
+
+;; Pobierz wartosc opcji: --output=wartosc lub --output wartosc
+: cli_get_opt def
+    ;; % _cli_opt = --output && -- cli_get_opt → @_cli_opt_val
+    >> bash -c "
+        for arg in \"\$@\"; do
+            case \"\$arg\" in
+                @_cli_opt=*) printf '%s' \"\${arg#*=}\"; exit 0 ;;
+            esac
+        done
+        exit 1
+    " -- @arg0 @arg1 @arg2 @arg3 |> @_cli_opt_val
+done
+
+;; Wyswietl uzycie
+: cli_usage def
+    ;; % _cli_usage_text = "uzycie: ..." && -- cli_usage
+    ~> Uzycie: @_cli_usage_text
+    > exit 1
+done
