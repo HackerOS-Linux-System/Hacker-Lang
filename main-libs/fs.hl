@@ -1,0 +1,39 @@
+;;; main/fs.hl — System plikow
+;;; /usr/lib/HackerOS/Hacker-Lang/main-libs/fs.hl
+using <gen 2>
+
+> echo "$HOME" |> @FS_HOME
+% FS_TMP       = /tmp
+% FS_ETC       = /etc
+% FS_VAR_LOG   = /var/log
+% FS_USR_BIN   = /usr/bin
+% FS_USR_LOCAL = /usr/local
+% FS_PROC      = /proc
+% FS_SYS       = /sys
+% FS_DEV       = /dev
+% FS_MEDIA     = /media
+% FS_MNT       = /mnt
+% FS_HACKEROS  = /usr/share/HackerOS
+% FS_HL_LIBS   = /usr/lib/HackerOS/Hacker-Lang
+
+;; Pomocnicze funkcje plikowe
+
+: fs_mktemp def
+    ;; Uzycie: -- fs_mktemp → @_fs_tmpfile
+    > mktemp |> @_fs_tmpfile
+done
+
+: fs_size def
+    ;; Uzycie: % _fs_path = /sciezka && -- fs_size → @_fs_size
+    >> bash -c "du -sh @_fs_path 2>/dev/null | cut -f1" |> @_fs_size
+done
+
+: fs_lines def
+    ;; Uzycie: % _fs_path = plik && -- fs_lines → @_fs_lines
+    >> bash -c "wc -l < @_fs_path 2>/dev/null | tr -d ' '" |> @_fs_lines
+done
+
+: fs_ext def
+    ;; Uzycie: % _fs_path = plik.txt && -- fs_ext → @_fs_ext
+    >> bash -c "echo @_fs_path | sed 's/.*\\.//'" |> @_fs_ext
+done
