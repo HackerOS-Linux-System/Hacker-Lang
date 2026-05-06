@@ -7,7 +7,8 @@ pub mod quick;
 
 pub use hl_parser::{
     ast, lexer, parser, gen, shebang,
-    Node, StringPart, VarValue, ExportValue, CommandMode, ConditionKind,
+    Node, StringPart, VarValue, VarType, ExportValue, CommandMode, ConditionKind,
+    MatchArm, HackerOsTool,
     parse_source, parse_source_with_meta, ParseError, LexError,
     Gen, GenError, GenFeature, extract_gen, HL_MAX_GEN, HL_DEFAULT_GEN,
     ShebangInfo, PreprocessResult, preprocess,
@@ -37,7 +38,6 @@ pub fn check_source(source: &str) -> std::result::Result<Vec<Node>, ParseError> 
     parse_source(source)
 }
 
-/// Publiczne API dla uruchamiania wczesniej sparsowanych wezlow (uzycie z .bc)
 pub fn exec_nodes_pub(nodes: &[Node], env: &mut Env) -> Result<executor::ExecResult> {
     exec_nodes(nodes, env)
 }
