@@ -523,6 +523,21 @@ impl Lexer {
                     }
                 }
 
+                // '/' alone (not //) — treat as part of an identifier/path
+                '/' => {
+                    let mut path = String::from("/");
+                    self.advance();
+                    while let Some(c) = self.peek() {
+                        if c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_') {
+                            path.push(c); self.advance();
+                        } else { break; }
+                    }
+                    tokens.push(Token::Ident(path));
+                }
+
+                // '=' alone (not =>) — skip (e.g. inside unquoted bash strings)
+                '=' => { self.advance(); }
+
                 _ => {
                     let (l, c) = (self.line, self.col);
                     self.advance();
