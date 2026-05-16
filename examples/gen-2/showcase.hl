@@ -1,4 +1,4 @@
-#!/usr/bin/hl
+#!/usr/bin/env hl
 /// showcase.hl — Pelny showcase Hacker Lang gen 2
 /// Uruchom: hl run showcase.hl
 using <gen 2>
@@ -100,8 +100,9 @@ $( (2 + 3) * 4 )       -> @res_paren
 ::hr 40
 
 ~> Iteracja po slach:
-@ dir in /tmp /etc /usr /var
-    ~>   → @dir
+% _dirs = "/tmp /etc /usr /var"
+@ _d in @_dirs
+    ~>   → @_d
 done
 
 ~> Iteracja po komendach systemowych:
@@ -116,9 +117,9 @@ done
 done
 
 ;; For ze zmiennej
-% dirs = /bin /sbin /usr/bin
-@ d in @dirs
-    ~>   katalog: @d
+% _all_dirs = "/bin /sbin /usr/bin"
+@ _d2 in @_all_dirs
+    ~>   katalog: @_d2
 done
 
 ;; ═══════════════════════════════════════════════════════════════════════════════
@@ -228,7 +229,8 @@ done
 ;; Daj czas na wykonanie
 > sleep 0.5
 
-@ tmpfile in /tmp/hl_gr_anon.txt /tmp/hl_gr_scan.txt /tmp/hl_gr_write.txt /tmp/hl_gr_work.txt
+% _gr_files = "/tmp/hl_gr_anon.txt /tmp/hl_gr_scan.txt /tmp/hl_gr_write.txt /tmp/hl_gr_work.txt"
+@ tmpfile in @_gr_files
     ::exists @tmpfile
     ? ok
         ::green   ✓ @tmpfile
