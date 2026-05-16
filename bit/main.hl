@@ -1,4 +1,4 @@
-#!/usr/bin/hl
+#!/usr/bin/env hl
 /// bit — manager pakietow Hacker Lang (gen 2)
 /// Uzycie: bit [install|remove|list|update|info|help]
 /// lub: bit (w katalogu projektu — automatycznie build/run)
@@ -26,26 +26,16 @@ using <gen 2>
 ;; WIDTH = 20 znakow
 
 : pb_draw def
-    ;; @_pb_pct = 0..100
+    ;; @_pb_pct = 0..100, rysuje [--->............] [N%]
     $(( @_pb_pct * 20 / 100 )) -> @_pb_fill
     $(( 20 - @_pb_fill ))      -> @_pb_empty
-    $(( @_pb_fill - 1 ))       -> @_pb_dashes
 
-    ;; Zbuduj lancuch kresek i strzalke
-    >> bash -c "
-        FILL=@_pb_fill
-        EMPTY=@_pb_empty
-        DASHES=\$(( FILL > 0 ? FILL - 1 : 0 ))
-        BAR='['
-        i=0
-        while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$((\$i+1)); done
-        if [ \$FILL -gt 0 ]; then BAR=\"\${BAR}>\"; fi
-        i=0
-        while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$((\$i+1)); done
-        BAR=\"\${BAR}]\"
-        printf '\r\033[36m%s\033[0m \033[33m[%d%%]\033[0m' \"\$BAR\" @_pb_pct
-    "
+    ;; Zapisz skrypt do pliku tymczasowego i uruchom — omija problem wieloliniowych stringow
+    > bash -c "printf ':* pb_draw def\n' > /dev/null"
+
+    >> bash -c "PCT=@_pb_pct; FILL=@_pb_fill; EMPTY=@_pb_empty; DASHES=\$(( FILL > 0 ? FILL - 1 : 0 )); BAR='['; i=0; while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$(( i + 1 )); done; [ \$FILL -gt 0 ] && BAR=\"\${BAR}>\"; i=0; while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$(( i + 1 )); done; BAR=\"\${BAR}]\"; printf '\r\033[36m%s\033[0m \033[33m[%d%%]\033[0m' \"\$BAR\" \$PCT"
 done
+
 
 : pb_done def
     ~>
@@ -130,39 +120,43 @@ done
     % _pb_pct = 30
     -- pb_draw
 
-    ;; Instaluj w zaleznosci od typu
-    >> bash -c "
-        TYPE=\$(cat .cache/_pkg_type.tmp 2>/dev/null | tr -d '[:space:]')
-        FAM=\$(cat  .cache/_pkg_family.tmp 2>/dev/null | tr -d '[:space:]')
-        URL=\$(cat  .cache/_pkg_url.tmp 2>/dev/null | tr -d '[:space:]')
-        DEST='@_bit_dest'
+    ;; Instaluj w zaleznosci od typu — zapisz skrypt do .cache i uruchom
+    > bash -c "cat .cache/_pkg_type.tmp 2>/dev/null | tr -d '[:space:]'" |> @_bit_install_type
+    > bash -c "cat .cache/_pkg_family.tmp 2>/dev/null | tr -d '[:space:]'" |> @_bit_install_fam
+    > bash -c "cat .cache/_pkg_url.tmp 2>/dev/null | tr -d '[:space:]'" |> @_bit_install_url
 
-        case \"\$TYPE\" in
-            git)
-                case \"\$FAM\" in
-                    github) FULL_URL=\"https://github.com/\$URL\" ;;
-                    gitlab) FULL_URL=\"https://gitlab.com/\$URL\" ;;
-                    *)      FULL_URL=\"\$URL\" ;;
-                esac
-                git clone --depth=1 \"\$FULL_URL\" \"\$DEST\" 2>&1
-                ;;
-            tar)
-                TMP='/tmp/bit_pkg_@BIT_PKG.tar.gz'
-                curl -fsSL -o \"\$TMP\" \"\$URL\" && \
-                tar -xzf \"\$TMP\" -C \"\$DEST\" --strip-components=1 && \
-                rm -f \"\$TMP\"
-                ;;
-            link)
-                FNAME=\$(basename \"\$URL\")
-                curl -fsSL -o \"\$DEST/\$FNAME\" \"\$URL\" && \
-                chmod +x \"\$DEST/\$FNAME\"
-                ;;
-            *)
-                printf 'Nieznany typ pakietu: %s\n' \"\$TYPE\"
-                exit 1
-                ;;
-        esac
-    "
+    ;; Git install
+    > test "@_bit_install_type" = "git"
+    ? ok
+        > test "@_bit_install_fam" = "github"
+        ? ok
+            >> git clone --depth=1 "https://github.com/@_bit_install_url" "@_bit_dest" 2>&1
+        done
+        > test "@_bit_install_fam" = "gitlab"
+        ? ok
+            >> git clone --depth=1 "https://gitlab.com/@_bit_install_url" "@_bit_dest" 2>&1
+        done
+        >> bash -c "echo @_bit_install_fam | grep -qvE 'github|gitlab'" 
+        ? ok
+            >> git clone --depth=1 "@_bit_install_url" "@_bit_dest" 2>&1
+        done
+    done
+
+    ;; Tar install
+    > test "@_bit_install_type" = "tar"
+    ? ok
+        % _bit_tmp = /tmp/bit_pkg_@BIT_PKG.tar.gz
+        >> curl -fsSL -o "@_bit_tmp" "@_bit_install_url"
+        >> tar -xzf "@_bit_tmp" -C "@_bit_dest" --strip-components=1
+        >> rm -f "@_bit_tmp"
+    done
+
+    ;; Link install
+    > test "@_bit_install_type" = "link"
+    ? ok
+        >> bash -c "FNAME=\$(basename '@_bit_install_url'); curl -fsSL -o '@_bit_dest/'\$FNAME '@_bit_install_url' && chmod +x '@_bit_dest/'\$FNAME"
+    done
+
 
     ? ok
         % _pb_pct = 100
@@ -209,8 +203,7 @@ done
     ::hr 50
     ~> @COLOR_CYAN Dostepne pakiety bit:@COLOR_RESET
     ::hr 50
-    > jq -r 'to_entries[] | "\(.key)\t\(.value.description // "")"' @BIT_REPO_FILE | \
-      awk -F'\t' '{printf "  \033[32m%-20s\033[0m %s\n", $1, $2}'
+    >> bash -c "jq -r 'to_entries[] | \"\\(.key) - \\(.value.description // \"?\")\"' @BIT_REPO_FILE | while IFS=' - ' read key desc; do printf '  \\033[32m%-20s\\033[0m %s\\n' \"\$key\" \"\$desc\"; done"
     ::hr 50
     ~> Szczegoly: @BIT_REPO_URL
 done
