@@ -1,2 +1,612 @@
-# Hacker-Lang
-  Simple and fast HackerOS programming language for scripting and automation.
+= Hacker Lang (HL) — gen 2
+HackerOS Team <hackeros068@gmail.com>
+:toc:
+:toc-title: Spis treści
+:toclevels: 3
+:icons: font
+:source-highlighter: highlight.js
+:lang: pl
+
+[.lead]
+Hacker Lang to natywny język skryptowy HackerOS — interpretowany, kompilowany do bytecode i ELF, z własną składnią operatorową, managerem pakietów *bit* i bezpośrednim dostępem do API HackerOS.
+
+[WARNING]
+====
+Hacker Lang działa **wyłącznie na HackerOS**. Binarka `hl` jest wbudowana w system.
+====
+
+== Składnia — gen 2 (domyślny)
+
+=== Print
+
+[source,hl]
+----
+~> Tekst z interpolacja @zmiennej
+----
+
+=== Komendy
+
+[source,hl]
+----
+>   komenda            # zwykła
+^>  komenda            # sudo
+->  komenda            # izolacja namespace
+^-> komenda            # sudo + izolacja
+>>  komenda @var       # z interpolacją zmiennych
+^>> komenda @var       # interpolacja + sudo
+->> komenda @var       # interpolacja + izolacja
+*>  komenda            # przez hsh -c (HackerOS shell)
+&   komenda            # w tle (non-blocking), PID → @_bg_pid
+----
+
+=== Zmienne
+
+[source,hl]
+----
+% nazwa = wartosc           # gen 1 — bez typu
+% nazwa: int   = 42         # gen 2 — int
+% nazwa: float = 3.14       # gen 2 — float
+% nazwa: str   = tekst      # gen 2 — string
+% nazwa: bool  = true       # gen 2 — bool
+@nazwa                      # odwołanie do zmiennej
+----
+
+=== Arytmetyka natywna (gen 2)
+
+[source,hl]
+----
+$( 2 + 2 )           -> @wynik    # oblicz i zapisz do zmiennej
+$( @a * @b + 10 )    -> @res      # z interpolacją zmiennych
+% x: int = $( 100 / 4 )           # jako wartość zmiennej
+----
+
+=== Pipe do zmiennej (gen 2)
+
+[source,hl]
+----
+> hostname       |> @host     # wynik komendy → zmienna
+> uname -r       |> @kernel
+^> id -u         |> @uid      # sudo pipe
+----
+
+=== Export
+
+[source,hl]
+----
+=> EDITOR = nvim
+=> PATH [
+| /usr/local/bin
+| /usr/bin
+| /usr/lib/HackerOS
+]
+----
+
+=== Pętle (gen 2)
+
+[source,hl]
+----
+@ item in wartosc1 wartosc2 wartosc3   # for-in
+    ~> element: @item
+done
+
+@ cmd in @lista_komend                 # for-in ze zmiennej
+    ::which @cmd
+done
+
+?~ @licznik < 10                       # while
+    $( @licznik + 1 ) -> @licznik
+done
+----
+
+=== Switch/case (gen 2)
+
+[source,hl]
+----
+? switch @zmienna
+| linux
+    ::green Linux!
+| windows
+    ::yellow Windows!
+| *
+    ~> nieznany: @zmienna
+done
+----
+
+=== Pętla N razy
+
+[source,hl]
+----
+_10 > hacker update
+_5  ~> powtorzenie
+_3  ::green OK
+----
+
+=== Funkcje
+
+[source,hl]
+----
+: nazwa def
+    ~> ciało funkcji
+done
+
+-- nazwa     # wywołanie
+----
+
+=== Warunki
+
+[source,hl]
+----
+> test -f /etc/passwd
+? ok
+    ::green plik istnieje
+done
+? err
+    ::red brak pliku
+done
+----
+
+=== Goroutines i Channels (gen 1+2)
+
+[source,hl]
+----
+:** kanal          # zadeklaruj kanał
+
+:* nazwa def       # goroutine z nazwą (gen 2)
+    > jakies_zadanie
+    *-- kanal
+done
+
+:*                 # goroutine anonimowa (gen 1)
+    > inne_zadanie
+done
+
+*-- kanal          # odbierz z kanału
+----
+
+=== Import pliku
+
+[source,hl]
+----
+<< utils.hl
+<< config.hl | szczegol
+----
+
+=== HackerOS API (gen 2)
+
+[source,hl]
+----
+|| hacker update
+|| hpkg install nmap
+|| lpm list
+|| hsh -c "ls /tmp"
+|| H# --version
+|| hco status
+|| hedit plik.txt
+|| hnm scan
+|| Blue-Environment start
+|| hackeros-steam launch
+----
+
+Dostępne narzędzia: `H#` `hco` `hacker` `hsh` `hpkg` `Blue-Environment`
+`hnm` `hpm` `hedit` `ngt` `eiq` `getit` `hdev` `anvil` `a` `hbuild`
+`lpm` `chker` `isolator` `hackeros-steam` `ulb` `gameframe` `hup` `hackeros-builder`
+
+=== Komentarze
+
+[source,hl]
+----
+;; komentarz liniowy
+/// komentarz dokumentacyjny (widoczny w hl search)
+// komentarz blokowy
+   moze byc wieloliniowy
+   konczy sie \\
+----
+
+=== Zależności i importy
+
+[source,hl]
+----
+// curl             # deklaracja zależności (auto-install)
+// nmap
+
+# <main/net>        # biblioteka standardowa (.hl)
+# <main/colors>
+# <main/progress-bar>
+# <main/json>
+# <main/hk-parser>  # parser .hk (HackerOS Config)
+# <main/hacker>     # parser .hacker v1/v2/v3
+# <bit/hashlib>     # biblioteka bit (.so)
+# <github/user/repo> # GitHub
+----
+
+Biblioteki `main/` to pliki `.hl` w `/usr/lib/HackerOS/Hacker-Lang/main-libs/`.
+
+[NOTE]
+====
+Stara składnia jest kompatybilna: `# <std/net>` → `main/net`,
+`# <virus/hashlib>` → `bit/hashlib`, `# <community/u/r>` → `github/u/r`
+====
+
+=== Quick Functions
+
+[source,hl]
+----
+::upper  tekst      # → TEKST
+::lower  tekst      # → tekst
+::len    tekst      # → długość
+::trim   tekst      # → bez białych znaków
+::rev    tekst      # → tskset
+::replace @t s d    # zamień s→d
+::contains @t sub   # exit 0/1
+::split  @t :       # podziel
+::abs    -42        # wartość bezwzgl.
+::ceil   3.2        # → 4
+::floor  3.9        # → 3
+::round  3.5        # → 4
+::max    10 20      # → 20
+::min    10 20      # → 10
+::rand              # 0-99
+::env    HOME       # zmienna środow.
+::date              # RRRR-MM-DD
+::time              # GG:MM:SS
+::pid               # PID procesu
+::which  curl       # ścieżka narzędzia
+::exists /etc/file  # exit 0/1
+::isdir  /tmp       # exit 0/1
+::isfile /etc/hosts # exit 0/1
+::basename /a/b.c   # → b.c
+::dirname  /a/b.c   # → /a
+::read   plik.txt   # wyświetl zawartość
+::set    n wartosc  # ustaw zmienną
+::get    n          # pobierz zmienną
+::type   n          # typ zmiennej
+::unset  n          # usuń zmienną
+::nl                # pusta linia
+::hr     40         # ────────────
+::bold   tekst      # pogrubiony
+::red    tekst      # czerwony
+::green  tekst      # zielony
+::yellow tekst      # żółty
+::cyan   tekst      # cyjanowy
+----
+
+== CLI — binarka `hl`
+
+[source,bash]
+----
+hl plik.hl                  # uruchom skrypt
+hl run plik.hl              # jawna forma
+hl run plik.bc              # uruchom bytecode
+hl compile plik.hl          # .hl → plik.bc (bytecode)
+hl compile plik.bc          # .bc → binarka ELF
+hl compile --shared plik.bc # .bc → .so (biblioteka bit)
+hl check plik.hl            # sprawdź składnię + linter
+hl check --meta plik.hl     # + gen i shebang
+hl ast plik.hl              # AST jako JSON
+hl repl                     # REPL interaktywny
+hl shell                    # HL jako powłoka systemowa
+hl exec nazwa               # uruchom skrypt systemowy
+hl search fraza             # szukaj skryptów systemowych
+hl search all               # wylistuj wszystkie
+hl gen-info plik.hl         # gen + shebang + węzły AST
+hl docs                     # dokumentacja TUI
+hl clean                    # wyczyść cache
+hl version                  # informacje o wersji
+hl -c "~> Hej!"             # kod inline
+----
+
+== Kompilacja — pipeline dwuetapowy
+
+[source,bash]
+----
+hl compile skrypt.hl    # Etap 1: .hl → skrypt.bc (bytecode JSON + shebang)
+./skrypt.bc             # uruchom .bc bezpośrednio (ma shebang)
+hl run skrypt.bc        # lub przez hl run
+
+hl compile skrypt.bc    # Etap 2: .bc → binarka ELF x86_64
+./skrypt                # uruchom binkarkę
+----
+
+[TIP]
+====
+Pliki `.bc` mają automatycznie dodany shebang `#!/usr/bin/env -S /usr/bin/hl run`
+i bit wykonywalny — można je uruchamiać bezpośrednio.
+====
+
+== Manager pakietów `bit`
+
+=== Komendy
+
+[source,bash]
+----
+bit                     # auto-detect: run.hl / build.hl / source-code/
+bit install hashlib     # zainstaluj pakiet
+bit remove hashlib      # usuń pakiet
+bit list                # lista dostępnych pakietów
+bit update              # zaktualizuj listę pakietów
+bit info hashlib        # informacje o pakiecie
+bit help                # pomoc
+----
+
+=== Struktury projektu
+
+[source]
+----
+Wariant 1 — run (interpretowany):
+  run.hl          ← główny skrypt uruchomieniowy
+  main.hl         ← kod źródłowy
+  .cache/         ← izolowane środowisko (auto, usuwane po zakończeniu)
+
+Wariant 2 — build (kompilowany):
+  build.hl        ← konfiguracja budowania
+  main.hl         ← kod źródłowy
+  .cache/
+
+Wariant 3 — source-code/ (rust-like):
+  source-code/    ← katalog z kodem źródłowym
+  build.hl        ← konfiguracja budowania
+  .cache/
+----
+
+=== build.hl — konfiguracja
+
+[source,hl]
+----
+using <gen 2>
+
+;; Docelowy format wyjściowy
+% BIT_BUILD_TARGET = bc     # bc | elf | so
+
+;; Główny plik wejściowy
+% BIT_BUILD_INPUT = main.hl
+
+;; Opcjonalna nazwa wyjściowa
+% BIT_BUILD_OUTPUT = moj_program
+----
+
+=== Repozytorium pakietów
+
+Lista pakietów: https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
+
+Format `repo-list.json`:
+
+[source,json]
+----
+{
+  "hashlib": {
+    "type": "git",
+    "family": "github",
+    "url": "HackerOS-Linux-System/hashlib-bit.git",
+    "description": "Kryptografia: sha256, md5, blake3"
+  },
+  "obsidian": {
+    "type": "git",
+    "family": "github",
+    "url": "Bytes-Repository/obsidian-lib.git",
+    "description": "GUI dialogi dla HL"
+  }
+}
+----
+
+Typy pakietów: `git` (github/gitlab), `tar` (archiwum), `link` (binarka)
+
+== System Genów
+
+[cols="1,1,3"]
+|===
+|Gen |Status |Opis
+
+|gen 1
+|aktywny
+|Podstawowa składnia, `&`, `*>`, `_N`, `<<`, `:*`, `:**`, `*--`
+
+|gen 2 _(domyślny)_
+|aktywny
+|Typowane zmienne (`%: typ`), `$()`, `\|>`, `@ in`, `?~`, `? switch`, `\|\|`
+
+|gen 3
+|zarezerwowany
+|Domknięcia (planowane)
+|===
+
+Deklaracja genu (opcjonalna — domyślnie gen 2):
+
+[source,hl]
+----
+#!/usr/bin/env hl
+using <gen 2>
+----
+
+== Przykłady
+
+=== Hello World
+
+[source,hl]
+----
+#!/usr/bin/env hl
+using <gen 2>
+
+% name: str = HackerOS
+~> Witaj, @name!
+----
+
+=== Skrypt systemowy z arytmetyką
+
+[source,hl]
+----
+#!/usr/bin/env hl
+using <gen 2>
+
+# <main/sys>
+# <main/colors>
+
+> uname -r |> @kernel
+> nproc     |> @cores
+$( @cores * 2 ) -> @threads
+
+~> @COLOR_BOLD System Info: @COLOR_RESET
+~> Kernel:  @kernel
+~> Cores:   @cores
+~> Threads: @threads
+----
+
+=== For-in z switch
+
+[source,hl]
+----
+using <gen 2>
+
+% tools = "curl git nmap python3"
+@ tool in @tools
+    ::which @tool
+    ? ok
+        ::green ✓ @tool
+    done
+    ? err
+        ::red   ✗ @tool
+    done
+done
+----
+
+=== While loop
+
+[source,hl]
+----
+using <gen 2>
+
+% i: int = 0
+
+?~ @i < 5
+    $( @i + 1 ) -> @i
+    ~> iteracja: @i
+done
+----
+
+=== Switch
+
+[source,hl]
+----
+using <gen 2>
+
+> uname -s |> @os
+
+? switch @os
+| Linux
+    ::green Linux wykryty
+| Darwin
+    ::cyan  macOS wykryty
+| *
+    ~> Nieznany OS: @os
+done
+----
+
+=== Goroutines
+
+[source,hl]
+----
+using <gen 2>
+
+:** wyniki
+
+:* scanner def
+    > nmap -sn 192.168.1.0/24
+    *-- wyniki
+done
+
+:* pinger def
+    > ping -c 3 8.8.8.8
+    *-- wyniki
+done
+
+*-- wyniki
+----
+
+=== HackerOS API
+
+[source,hl]
+----
+using <gen 2>
+
+|| hacker update
+|| hpkg install nmap
+|| lpm list
+----
+
+== Powłoka
+
+HL może działać jako powłoka systemowa:
+
+[source,bash]
+----
+hl shell                # uruchom powłokę
+hl shell -c "~> test"   # jednorazowa komenda
+----
+
+Plik konfiguracyjny `~/.hlrc`:
+
+[source,hl]
+----
+using <gen 2>
+
+=> EDITOR = nvim
+=> PATH [
+| /usr/local/bin
+| /usr/bin
+| /usr/lib/HackerOS
+]
+
+: ll def
+    > ls -la
+done
+----
+
+Builtiny powłoki: `cd`, `vars`, `funcs`, `help`, `clear`, `exit`
+
+== Linter i diagnostyka
+
+HL posiada wbudowany linter w stylu Rust — z numerami linii i sugestiami:
+
+[source]
+----
+error: `echo` jest zabronione w blokach komend HL
+  --> skrypt.hl:5:1
+ 5 │ > echo hello
+   ^^^^^^^^^^^
+  help: zamień na: `~> hello`
+
+warning: `> sudo cmd` — użyj operatora `^>`
+  --> skrypt.hl:8:1
+  help: zamień na: `^> cmd`
+----
+
+Automatycznie wykrywa: `echo` w `>`, `sudo` zamiast `^>`, `% PATH` zamiast `=>`,
+brakujące deklaracje `//` dla narzędzi sieciowych.
+
+== Pliki i rozszerzenia
+
+|===
+|Rozszerzenie |Opis
+
+|`.hl`
+|Kod źródłowy Hacker Lang
+
+|`.bc`
+|Bytecode HL (JSON AST + shebang, wykonywalny)
+
+|`.hlrc`
+|Konfiguracja powłoki (`~/.hlrc`)
+
+|`.hk`
+|Format konfiguracyjny HackerOS (parsowany przez `main/hk-parser`)
+
+|`.hacker`
+|Format metadanych HackerOS v1/v2/v3 (parsowany przez `main/hacker`)
+|===
+
+== Licencja i autorzy
+
+Hacker Lang jest częścią projektu HackerOS.
+
+* Autorzy: HackerOS Team <hackeros068@gmail.com>
+* Repozytorium: https://github.com/HackerOS-Linux-System/Hacker-Lang
+* HackerOS: https://github.com/HackerOS-Linux-System
