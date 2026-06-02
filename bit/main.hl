@@ -1,47 +1,33 @@
-#!/usr/bin/env hl
-/// bit — manager pakietow Hacker Lang (gen 2)
-/// Uzycie: bit [install|remove|list|update|info|help]
-/// lub: bit (w katalogu projektu — automatycznie build/run)
+#!/usr/bin/hl
+
 using <gen 2>
 
 // curl
 // git
-// jq
 
-# <main/progress-bar>
-# <main/json>
 # <main/colors>
+# <main/progress-bar>
 
 ;; ── Konfiguracja ──────────────────────────────────────────────────────────────
-% BIT_RAW_URL    = https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json
-% BIT_REPO_URL   = https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
-% BIT_HOME       = /usr/lib/HackerOS/Hacker-Lang/bit
-% BIT_CACHE_DIR  = .cache
-% BIT_REPO_FILE  = .cache/repo-list.json
-% BIT_CMD        = @arg0
-% BIT_PKG        = @arg1
+% BIT_REPO_RAW    = https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json
+% BIT_REPO_URL    = https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
+% BIT_HOME        = /usr/lib/HackerOS/Hacker-Lang/bit
+% BIT_CACHE_DIR   = .cache
+% BIT_REPO_FILE   = .cache/repo-list.json
+% BIT_CMD         = @arg0
+% BIT_PKG         = @arg1
 
 ;; ── Progress bar ───────────────────────────────────────────────────────────────
-;; Format: [--->............] [10%]
-;; WIDTH = 20 znakow
 
 : pb_draw def
-    ;; @_pb_pct = 0..100, rysuje [--->............] [N%]
-    $(( @_pb_pct * 20 / 100 )) -> @_pb_fill
-    $(( 20 - @_pb_fill ))      -> @_pb_empty
-
-    ;; Zapisz skrypt do pliku tymczasowego i uruchom — omija problem wieloliniowych stringow
-    > bash -c "printf ':* pb_draw def\n' > /dev/null"
-
-    >> bash -c "PCT=@_pb_pct; FILL=@_pb_fill; EMPTY=@_pb_empty; DASHES=\$(( FILL > 0 ? FILL - 1 : 0 )); BAR='['; i=0; while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$(( i + 1 )); done; [ \$FILL -gt 0 ] && BAR=\"\${BAR}>\"; i=0; while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$(( i + 1 )); done; BAR=\"\${BAR}]\"; printf '\r\033[36m%s\033[0m \033[33m[%d%%]\033[0m' \"\$BAR\" \$PCT"
+    >> bash -c "PCT=@_pb_pct; FILL=\$(( PCT * 20 / 100 )); EMPTY=\$(( 20 - FILL )); DASHES=\$(( FILL > 0 ? FILL - 1 : 0 )); BAR='['; i=0; while [ \$i -lt \$DASHES ]; do BAR=\"\${BAR}-\"; i=\$(( i + 1 )); done; [ \$FILL -gt 0 ] && BAR=\"\${BAR}>\"; i=0; while [ \$i -lt \$EMPTY ]; do BAR=\"\${BAR}.\"; i=\$(( i + 1 )); done; BAR=\"\${BAR}]\"; printf '\r\033[36m%s\033[0m \033[33m[%d%%]\033[0m' \"\$BAR\" \$PCT"
 done
-
 
 : pb_done def
     ~>
 done
 
-;; ── Funkcje pomocnicze ────────────────────────────────────────────────────────
+;; ── Naglowek ──────────────────────────────────────────────────────────────────
 
 : bit_header def
     ::hr 50
@@ -49,6 +35,8 @@ done
     ::hr 50
     ::nl
 done
+
+;; ── Cache i repo ──────────────────────────────────────────────────────────────
 
 : bit_ensure_cache def
     ::exists @BIT_CACHE_DIR
@@ -63,7 +51,7 @@ done
     -- pb_draw
     % _pb_pct = 20
     -- pb_draw
-    >> curl -fsSL -o @BIT_REPO_FILE @BIT_RAW_URL
+    >> curl -fsSL -o @BIT_REPO_FILE @BIT_REPO_RAW
     ? ok
         % _pb_pct = 100
         -- pb_draw
@@ -73,7 +61,7 @@ done
     ? err
         -- pb_done
         ::red Blad pobierania listy pakietow!
-        ~> URL: @BIT_RAW_URL
+        ~> URL: @BIT_REPO_RAW
         > exit 1
     done
 done
@@ -82,6 +70,25 @@ done
     ::exists @BIT_REPO_FILE
     ? err
         -- bit_fetch_repo
+    done
+done
+
+;; ── Pomocnik: pobierz pole z repo-list.json ───────────────────────────────────
+;; Uzyj jq lub python3 jako fallback
+
+: bit_jq_get def
+    ;; % _jq_pkg = nazwa && % _jq_field = url|type && -- bit_jq_get -> @_jq_result
+    ::which jq
+    ? ok
+        >> jq -r ".\"@_jq_pkg\".@_jq_field // empty" @BIT_REPO_FILE |> @_jq_result
+    done
+    ? err
+        >> python3 -c "
+import json, sys
+with open('@BIT_REPO_FILE') as f: d = json.load(f)
+pkg = d.get('@_jq_pkg', {})
+print(pkg.get('@_jq_field', ''))
+" |> @_jq_result
     done
 done
 
@@ -96,21 +103,25 @@ done
     % _pb_pct = 5
     -- pb_draw
 
-    ;; Pobierz metadane z repo-list.json
-    > jq -r ".\"@BIT_PKG\".type   // empty" @BIT_REPO_FILE > .cache/_pkg_type.tmp
-    > jq -r ".\"@BIT_PKG\".url    // empty" @BIT_REPO_FILE > .cache/_pkg_url.tmp
-    > jq -r ".\"@BIT_PKG\".family // empty" @BIT_REPO_FILE > .cache/_pkg_family.tmp
+    ;; Pobierz url i type
+    % _jq_pkg = @BIT_PKG
+    % _jq_field = url
+    -- bit_jq_get
+    % _bit_url = @_jq_result
+
+    % _jq_field = type
+    -- bit_jq_get
+    % _bit_type = @_jq_result
 
     % _pb_pct = 15
     -- pb_draw
 
-    ;; Sprawdz czy pakiet istnieje
-    > test -s .cache/_pkg_type.tmp
-    ? err
+    ;; Sprawdz czy pakiet znaleziony
+    > test -z "@_bit_url"
+    ? ok
         -- pb_done
         ::red Pakiet '@BIT_PKG' nie znaleziony w repozytorium bit.
         ~> Sprawdz liste: @COLOR_CYAN bit list@COLOR_RESET
-        > rm -f .cache/_pkg_type.tmp .cache/_pkg_url.tmp .cache/_pkg_family.tmp
         > exit 1
     done
 
@@ -120,57 +131,71 @@ done
     % _pb_pct = 30
     -- pb_draw
 
-    ;; Instaluj w zaleznosci od typu — zapisz skrypt do .cache i uruchom
-    > bash -c "cat .cache/_pkg_type.tmp 2>/dev/null | tr -d '[:space:]'" |> @_bit_install_type
-    > bash -c "cat .cache/_pkg_family.tmp 2>/dev/null | tr -d '[:space:]'" |> @_bit_install_fam
-    > bash -c "cat .cache/_pkg_url.tmp 2>/dev/null | tr -d '[:space:]'" |> @_bit_install_url
-
-    ;; Git install
-    > test "@_bit_install_type" = "git"
-    ? ok
-        > test "@_bit_install_fam" = "github"
-        ? ok
-            >> git clone --depth=1 "https://github.com/@_bit_install_url" "@_bit_dest" 2>&1
-        done
-        > test "@_bit_install_fam" = "gitlab"
-        ? ok
-            >> git clone --depth=1 "https://gitlab.com/@_bit_install_url" "@_bit_dest" 2>&1
-        done
-        >> bash -c "echo @_bit_install_fam | grep -qvE 'github|gitlab'" 
-        ? ok
-            >> git clone --depth=1 "@_bit_install_url" "@_bit_dest" 2>&1
-        done
-    done
-
-    ;; Tar install
-    > test "@_bit_install_type" = "tar"
-    ? ok
-        % _bit_tmp = /tmp/bit_pkg_@BIT_PKG.tar.gz
-        >> curl -fsSL -o "@_bit_tmp" "@_bit_install_url"
-        >> tar -xzf "@_bit_tmp" -C "@_bit_dest" --strip-components=1
-        >> rm -f "@_bit_tmp"
-    done
-
-    ;; Link install
-    > test "@_bit_install_type" = "link"
-    ? ok
-        >> bash -c "FNAME=\$(basename '@_bit_install_url'); curl -fsSL -o '@_bit_dest/'\$FNAME '@_bit_install_url' && chmod +x '@_bit_dest/'\$FNAME"
-    done
-
-
-    ? ok
-        % _pb_pct = 100
-        -- pb_draw
-        -- pb_done
-        ::green Pakiet '@BIT_PKG' zainstalowany pomyslnie!
-        ~> Lokalizacja: @COLOR_DIM@_bit_dest@COLOR_RESET
-    done
+    ;; Klonuj repozytorium
+    ~> Klonowanie z: @_bit_url
+    >> git clone --depth=1 @_bit_url @_bit_dest
     ? err
         -- pb_done
-        ::red Blad instalacji pakietu '@BIT_PKG'!
+        ::red Nie udalo sie sklonowac: @_bit_url
+        > exit 1
     done
 
-    > rm -f .cache/_pkg_type.tmp .cache/_pkg_url.tmp .cache/_pkg_family.tmp
+    % _pb_pct = 70
+    -- pb_draw
+
+    ;; Instalacja w zaleznosci od typu
+    ? switch @_bit_type
+
+    | hl
+        ;; Hacker Lang — sprawdz czy jest source-code/main.hl
+        % _hl_main = @_bit_dest/source-code/main.hl
+        ::exists @_hl_main
+        ? ok
+            ~> @COLOR_DIM[bit] Pakiet HL gotowy. Uzyj: # <bit/@BIT_PKG>@COLOR_RESET
+        done
+        ? err
+            ~> @COLOR_YELLOW[bit] Brak source-code/main.hl — sprawdz strukture pakietu@COLOR_RESET
+        done
+
+    | rust
+        ;; Rust — sprawdz czy mamy cargo, skompiluj ze zrodel
+        ::which cargo
+        ? ok
+            % _cargo_dir = @_bit_dest/source-code
+            ::isdir @_cargo_dir
+            ? ok
+                ~> @COLOR_CYAN[bit] Budowanie pakietu Rust...@COLOR_RESET
+                >> bash -c "cd @_cargo_dir && cargo build --release 2>&1"
+                ? ok
+                    ;; Znajdz zbudowane pliki i zainstaluj
+                    >> bash -c "find @_cargo_dir/target/release -maxdepth 1 -type f -executable ! -name '*.d' ! -name '*.rlib' -exec cp {} @_bit_dest/ \;"
+                    ::green Pakiet Rust '@BIT_PKG' zbudowany i zainstalowany.
+                done
+                ? err
+                    ::red Blad budowania pakietu Rust '@BIT_PKG'.
+                    > exit 1
+                done
+            done
+            ? err
+                ::red Brak katalogu source-code/ w paczce Rust.
+                > exit 1
+            done
+        done
+        ? err
+            ::red cargo nie jest zainstalowany. Zainstaluj Rust: https://rustup.rs
+            > exit 1
+        done
+
+    | *
+        ~> @COLOR_YELLOW[bit] Nieznany typ pakietu: '@_bit_type' — pakiet sklonowany, brak specjalnej instalacji.@COLOR_RESET
+
+    done
+
+    % _pb_pct = 100
+    -- pb_draw
+    -- pb_done
+    ::green Pakiet '@BIT_PKG' zainstalowany pomyslnie!
+    ~> Lokalizacja: @COLOR_DIM@_bit_dest@COLOR_RESET
 done
 
 ;; ── bit remove ────────────────────────────────────────────────────────────────
@@ -203,9 +228,24 @@ done
     ::hr 50
     ~> @COLOR_CYAN Dostepne pakiety bit:@COLOR_RESET
     ::hr 50
-    >> bash -c "jq -r 'to_entries[] | \"\\(.key) - \\(.value.description // \"?\")\"' @BIT_REPO_FILE | while IFS=' - ' read key desc; do printf '  \\033[32m%-20s\\033[0m %s\\n' \"\$key\" \"\$desc\"; done"
+    ::nl
+
+    ::which jq
+    ? ok
+        >> jq -r 'to_entries[] | "\(.key)|\(.value.type // "?")"' @BIT_REPO_FILE | while IFS='|' read pkg typ; do printf "  \033[32m%-24s\033[0m \033[90m[%s]\033[0m\n" "$pkg" "$typ"; done
+    done
+    ? err
+        >> python3 -c "
+import json
+with open('@BIT_REPO_FILE') as f: d = json.load(f)
+for k, v in d.items():
+    print(f'  {k:<24} [{v.get(\"type\",\"?\")}]')
+"
+    done
+
+    ::nl
     ::hr 50
-    ~> Szczegoly: @BIT_REPO_URL
+    ~> Repozytorium: @BIT_REPO_URL
 done
 
 ;; ── bit update ────────────────────────────────────────────────────────────────
@@ -223,25 +263,99 @@ done
     ::hr 40
     ~> @COLOR_CYAN Pakiet:@COLOR_RESET @BIT_PKG
     ::hr 40
-    >> jq ".\"@BIT_PKG\"" @BIT_REPO_FILE
+
+    ::which jq
+    ? ok
+        >> jq ".\"@BIT_PKG\"" @BIT_REPO_FILE
+    done
+    ? err
+        >> python3 -c "
+import json
+with open('@BIT_REPO_FILE') as f: d = json.load(f)
+import pprint; pprint.pprint(d.get('@BIT_PKG', {}))
+"
+    done
+
     ::hr 40
 done
 
-;; ── bit (bez argumentow) — projekt mode ───────────────────────────────────────
-;;
-;; Sprawdz strukture projektu i wykonaj odpowiednio:
-;;
-;; Wariant 1: run.hl + [kod.hl]
-;;   → uruchom interpretowalnie przez: hl run run.hl
-;;
-;; Wariant 2: build.hl + [kod.hl]
-;;   → kompiluj zgodnie z build.hl (bc/elf/so) + link bibliotek
-;;
-;; Wariant 3: source-code/ + build.hl
-;;   → kompiluj z source-code/ zgodnie z build.hl
+;; ── bit project mode ──────────────────────────────────────────────────────────
+
+: bit_setup_cache def
+    > mkdir -p @BIT_CACHE_DIR
+    ~> @COLOR_DIM[bit] Srodowisko: .cache/@COLOR_RESET
+done
+
+: bit_cleanup_cache def
+    ~> @COLOR_DIM[bit] Czyszczenie .cache...@COLOR_RESET
+    > rm -rf @BIT_CACHE_DIR
+done
+
+: bit_do_build def
+    % BIT_BUILD_TARGET = bc
+    % BIT_BUILD_INPUT  = main.hl
+    % BIT_BUILD_OUTPUT =
+
+    ::exists build.hl
+    ? ok
+        << build.hl
+    done
+
+    ::isdir source-code
+    ? ok
+        ~> @COLOR_CYAN[bit] Kompilacja source-code/ — tryb HL@COLOR_RESET
+        % _bit_build_type = hl
+
+        ;; Sprawdz czy jest source-code/main.hl
+        ::exists source-code/main.hl
+        ? ok
+            % BIT_BUILD_INPUT = source-code/main.hl
+        done
+
+        ;; Sprawdz czy to moze byc projekt Rust
+        ::exists source-code/Cargo.toml
+        ? ok
+            % _bit_build_type = rust
+        done
+
+        ? switch @_bit_build_type
+        | rust
+            ::which cargo
+            ? ok
+                ~> @COLOR_CYAN[bit] Budowanie ze zrodel Rust (source-code/)...@COLOR_RESET
+                >> bash -c "cd source-code && cargo build --release 2>&1"
+                ? ok
+                    ::green Zbudowano!
+                done
+                ? err
+                    ::red Blad budowania Rust.
+                    > exit 1
+                done
+            done
+            ? err
+                ::red cargo nie znalezione — zainstaluj Rust.
+                > exit 1
+            done
+        | *
+            ;; Domyslnie HL
+            ::green [bit] Uruchamianie projektu HL
+        done
+    done
+
+    ;; Uruchom przez hl run (jesli to HL)
+    ? switch @BIT_BUILD_TARGET
+    | bc
+        >> hl run @BIT_BUILD_INPUT
+    | elf
+        >> hl run @BIT_BUILD_INPUT
+    | so
+        >> hl run @BIT_BUILD_INPUT
+    | *
+        >> hl run @BIT_BUILD_INPUT
+    done
+done
 
 : bit_project_run def
-    ;; Wariant 1: run.hl
     ::exists run.hl
     ? ok
         ~> @COLOR_GREEN [bit] run.hl@COLOR_RESET — tryb interpretowany
@@ -251,7 +365,6 @@ done
         > exit 0
     done
 
-    ;; Wariant 2/3: build.hl
     ::exists build.hl
     ? ok
         ~> @COLOR_GREEN [bit] build.hl@COLOR_RESET — tryb kompilacji
@@ -261,92 +374,37 @@ done
         > exit 0
     done
 
-    ;; Nic nie znaleziono
-    ::red Nie znaleziono run.hl ani build.hl w biezacym katalogu.
+    ::exists source-code/main.hl
+    ? ok
+        ~> @COLOR_GREEN [bit] source-code/main.hl@COLOR_RESET — tryb HL
+        -- bit_setup_cache
+        > hl run source-code/main.hl
+        -- bit_cleanup_cache
+        > exit 0
+    done
+
+    ::exists source-code/Cargo.toml
+    ? ok
+        ~> @COLOR_GREEN [bit] source-code/Cargo.toml@COLOR_RESET — tryb Rust
+        ::which cargo
+        ? ok
+            >> bash -c "cd source-code && cargo build --release 2>&1"
+            > exit 0
+        done
+        ? err
+            ::red cargo nie znalezione.
+            > exit 1
+        done
+    done
+
+    ::red Nie znaleziono run.hl / build.hl / source-code/main.hl / source-code/Cargo.toml
     ::nl
     ~> Struktura projektu bit:
-    ~>   @COLOR_CYAN run.hl@COLOR_RESET   + kod.hl   → interpretowany
-    ~>   @COLOR_CYAN build.hl@COLOR_RESET + kod.hl   → kompilowany
-    ~>   @COLOR_CYAN build.hl@COLOR_RESET + source-code/ → kompilowany (rust-like)
+    ~>   @COLOR_CYAN run.hl@COLOR_RESET                     → bit (tryb run)
+    ~>   @COLOR_CYAN build.hl@COLOR_RESET                   → bit (tryb build)
+    ~>   @COLOR_CYAN source-code/main.hl@COLOR_RESET        → bit (tryb HL)
+    ~>   @COLOR_CYAN source-code/Cargo.toml@COLOR_RESET     → bit (tryb Rust)
     > exit 1
-done
-
-: bit_setup_cache def
-    > mkdir -p @BIT_CACHE_DIR
-    ;; Pobierz i zainstaluj biblioteki zadeklarowane w projekcie
-    ;; (future: parsuj # <bit/...> z pliku i instaluj)
-    ~> @COLOR_DIM[bit] Srodowisko izolowane: .cache/@COLOR_RESET
-done
-
-: bit_cleanup_cache def
-    ;; Cache usuwamy po zakonczeniu prac (izolowane srodowisko)
-    ~> @COLOR_DIM[bit] Czyszczenie .cache...@COLOR_RESET
-    > rm -rf @BIT_CACHE_DIR
-done
-
-: bit_do_build def
-    ;; Wczytaj build.hl i wykonaj — to on decyduje co kompilujemy
-    ;; build.hl ustawia zmienne:
-    ;;   BIT_BUILD_TARGET = bc|elf|so
-    ;;   BIT_BUILD_INPUT  = sciezka do glownego pliku .hl
-    ;;   BIT_BUILD_OUTPUT = nazwa wyjsciowa (opcjonalne)
-
-    % BIT_BUILD_TARGET = bc
-    % BIT_BUILD_INPUT  = main.hl
-    % BIT_BUILD_OUTPUT =
-
-    ;; Wykonaj build.hl — moze nadpisac powyzsze zmienne
-    ::exists build.hl
-    ? ok
-        << build.hl
-    done
-
-    ;; Sprawdz czy jest source-code/
-    ::isdir source-code
-    ? ok
-        ;; Skompiluj wszystkie .hl z source-code/
-        ~> @COLOR_CYAN[bit] Kompilacja source-code/ → .bc@COLOR_RESET
-        > find source-code -name "*.hl" -exec hl compile {} \;
-        % BIT_BUILD_INPUT = source-code/main.hl
-    done
-
-    ;; Kompiluj zgodnie z targetem
-    ~> @COLOR_CYAN[bit] Kompilacja: @BIT_BUILD_INPUT → @BIT_BUILD_TARGET@COLOR_RESET
-
-    % _pb_pct = 10
-    -- pb_draw
-
-    ? switch @BIT_BUILD_TARGET
-    | bc
-        >> hl compile @BIT_BUILD_INPUT
-        % _pb_pct = 100
-        -- pb_draw
-        -- pb_done
-        ::green Wygenerowano .bc
-    | elf
-        >> hl compile @BIT_BUILD_INPUT
-        % _pb_pct = 60
-        -- pb_draw
-        >> bash -c "BC=\$(basename @BIT_BUILD_INPUT .hl).bc; hl compile \$BC"
-        % _pb_pct = 100
-        -- pb_draw
-        -- pb_done
-        ::green Wygenerowano binarke ELF
-    | so
-        >> hl compile @BIT_BUILD_INPUT
-        % _pb_pct = 60
-        -- pb_draw
-        >> bash -c "BC=\$(basename @BIT_BUILD_INPUT .hl).bc; hl compile --shared \$BC"
-        % _pb_pct = 100
-        -- pb_draw
-        -- pb_done
-        ::green Wygenerowano .so
-    | *
-        -- pb_done
-        ::red Nieznany BIT_BUILD_TARGET: @BIT_BUILD_TARGET
-        ::yellow Ustaw w build.hl: % BIT_BUILD_TARGET = bc|elf|so
-        > exit 1
-    done
 done
 
 ;; ── bit help ──────────────────────────────────────────────────────────────────
@@ -354,24 +412,30 @@ done
 : bit_help def
     -- bit_header
     ~> @COLOR_BOLD Komendy:@COLOR_RESET
-    ~>   @COLOR_GREEN bit@COLOR_RESET                  — uruchom/skompiluj projekt (auto-detect)
+    ~>   @COLOR_GREEN bit@COLOR_RESET                      — uruchom/skompiluj projekt
     ~>   @COLOR_GREEN bit install @COLOR_CYAN<nazwa>@COLOR_RESET    — zainstaluj pakiet
-    ~>   @COLOR_GREEN bit remove @COLOR_CYAN<nazwa>@COLOR_RESET     — usun pakiet
-    ~>   @COLOR_GREEN bit list@COLOR_RESET               — pokaz dostepne pakiety
-    ~>   @COLOR_GREEN bit update@COLOR_RESET              — zaktualizuj liste pakietow
-    ~>   @COLOR_GREEN bit info @COLOR_CYAN<nazwa>@COLOR_RESET       — info o pakiecie
-    ~>   @COLOR_GREEN bit help@COLOR_RESET                — ta pomoc
+    ~>   @COLOR_GREEN bit remove  @COLOR_CYAN<nazwa>@COLOR_RESET    — usun pakiet
+    ~>   @COLOR_GREEN bit list@COLOR_RESET                  — pokaz dostepne pakiety
+    ~>   @COLOR_GREEN bit update@COLOR_RESET                — zaktualizuj liste pakietow
+    ~>   @COLOR_GREEN bit info    @COLOR_CYAN<nazwa>@COLOR_RESET    — info o pakiecie
+    ~>   @COLOR_GREEN bit help@COLOR_RESET                  — ta pomoc
     ::nl
-    ~> @COLOR_BOLD Struktury projektu:@COLOR_RESET
-    ~>   @COLOR_CYAN run.hl@COLOR_RESET + kod.hl         → bit (tryb run)
-    ~>   @COLOR_CYAN build.hl@COLOR_RESET + kod.hl       → bit (tryb build: bc/elf/so)
-    ~>   @COLOR_CYAN build.hl@COLOR_RESET + source-code/ → bit (tryb build, rust-like)
+    ~> @COLOR_BOLD Struktura pakietu bit:@COLOR_RESET
+    ~>   README.md
+    ~>   LICENSE
+    ~>   source-code/             — kod zrodlowy
+    ~>     @COLOR_CYAN main.hl@COLOR_RESET             (type: hl)
+    ~>     @COLOR_CYAN src/main.rs + Cargo.toml@COLOR_RESET (type: rust)
     ::nl
-    ~>   .cache/ tworzony automatycznie, usuwany po zakonczeniu.
+    ~> @COLOR_BOLD Typy pakietow:@COLOR_RESET
+    ~>   @COLOR_CYAN hl@COLOR_RESET    — Hacker Lang (source-code/main.hl)
+    ~>   @COLOR_CYAN rust@COLOR_RESET  — Rust (source-code/Cargo.toml + src/main.rs)
     ::nl
-    ~> @COLOR_BOLD Importy bit w .hl:@COLOR_RESET
-    ~>   @COLOR_CYAN# <bit/hashlib>@COLOR_RESET
-    ~>   @COLOR_CYAN# <bit/obsidian>@COLOR_RESET
+    ~> @COLOR_BOLD Format repo-list.json:@COLOR_RESET
+    ~>   @COLOR_DIM{ "nazwa": { "url": "https://...", "type": "hl|rust" } }@COLOR_RESET
+    ::nl
+    ~> @COLOR_BOLD Struktura projektu lokalnego:@COLOR_RESET
+    ~>   @COLOR_CYAN run.hl@COLOR_RESET / @COLOR_CYAN build.hl@COLOR_RESET / @COLOR_CYAN source-code/main.hl@COLOR_RESET / @COLOR_CYAN source-code/Cargo.toml@COLOR_RESET
     ::nl
     ~> Repozytorium: @BIT_REPO_URL
 done
@@ -396,16 +460,13 @@ done
 | help
     -- bit_help
 | *
-    ;; Puste wywolanie lub nieznana komenda — projekt mode
     ::len @BIT_CMD
     ? ok
-        ;; Mamy jakis argument — nieznana komenda
         ::red Nieznana komenda: @BIT_CMD
         -- bit_help
         > exit 1
     done
     ? err
-        ;; Brak argumentu — sprawdz strukture projektu
         -- bit_project_run
     done
 done
