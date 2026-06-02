@@ -259,7 +259,6 @@ impl Lexer {
                 // ── || tool args  — HackerOS API (gen 2) ─────────────────────
                 '|' if self.peek_at(1) == Some('|') => {
                     self.skip_n(2); self.skip_ws();
-                    // Czytaj nazwe narzedzia (moze zawierac - i #)
                     let mut tool = String::new();
                     while let Some(c) = self.peek() {
                         if c.is_alphanumeric() || c == '-' || c == '#' { tool.push(c); self.advance(); }
@@ -271,11 +270,9 @@ impl Lexer {
                 }
 
                 // ── | "pattern" / | *  — switch arm (gen 2) ─────────────────
-                // Tylko gdy NIE jestesmy w liscie eksportu i to nie |> ani ||
                 '|' if self.peek_at(1) != Some('>') && self.peek_at(1) != Some('|') => {
                     self.advance(); self.skip_ws();
                     let line = self.read_line();
-                    // Usun ewentualne trailing ->
                     let pattern = if let Some(p) = line.find("->") {
                         line[..p].trim().to_string()
                     } else {
@@ -419,7 +416,7 @@ impl Lexer {
                     tokens.push(Token::HshCmd(self.read_line()));
                 }
 
-                // ── _N repeat ─────────────────────────────────────────────────
+                // ── _N repeat lub _var (VarRef) ───────────────────────────────
                 '_' => {
                     self.advance();
                     let mut num_str = String::new();
@@ -427,21 +424,35 @@ impl Lexer {
                         if c.is_ascii_digit() { num_str.push(c); self.advance(); } else { break; }
                     }
                     if !num_str.is_empty() {
-                        tokens.push(Token::RepeatN(num_str.parse().unwrap_or(1)));
-                    } else {
+                        // Sprawdz czy po cyfrach nie ma liter (np. _1abc to nie repeat)
+                        let next_is_alnum = self.peek().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
+                        if !next_is_alnum {
+                            tokens.push(Token::RepeatN(num_str.parse().unwrap_or(1)));
+                            continue;
+                        }
+                        // Jesli po cyfrach sa litery, traktuj jako VarRef
                         let mut id = String::from("_");
+                        id.push_str(&num_str);
                         id.push_str(&self.read_ident_full());
-                        tokens.push(Token::Ident(id));
+                        tokens.push(Token::VarRef(id));
+                    } else {
+                        // _ bez cyfr — VarRef (np. _d, _result, __var)
+                        let rest = self.read_ident_full();
+                        if rest.is_empty() {
+                            // Samotny _ — ignoruj
+                            tokens.push(Token::Comments(CommentKind::Line, String::new()));
+                        } else {
+                            let id = format!("_{}", rest);
+                            tokens.push(Token::VarRef(id));
+                        }
                     }
                 }
 
                 // ── @ item in lista  — for-in (gen 2) ────────────────────────
-                // Sprawdz z wyprzedzeniem czy to for-in czy VarRef
                 '@' => {
                     self.advance();
                     let name = self.read_ident_full();
                     self.skip_ws();
-                    // Sprawdz czy nastepnie jest "in" — wtedy to for-in
                     let looks_like_for = {
                         let mut tmp_pos = self.pos;
                         let mut kw = String::new();
@@ -452,7 +463,6 @@ impl Lexer {
                         kw == "in"
                     };
                     if looks_like_for {
-                        // Pochlon "in"
                         let _in_kw = self.read_ident();
                         self.skip_ws();
                         let iterable = self.read_line();
@@ -482,7 +492,6 @@ impl Lexer {
                 // ── ? ok / ? err / ?~ while / ? switch ───────────────────────
                 '?' => {
                     self.advance(); self.skip_ws();
-                    // ?~ while (gen 2)
                     if self.peek() == Some('~') {
                         self.advance(); self.skip_ws();
                         tokens.push(Token::WhileStart(self.read_line()));
@@ -499,7 +508,14 @@ impl Lexer {
 
                 // ── # import ─────────────────────────────────────────────────
                 '#' => {
-                    self.advance(); self.skip_ws();
+                    self.advance();
+                    // Sprawdz shebang (#!)
+                    if self.peek() == Some('!') {
+                        // Shebang — traktuj jako komentarz liniowy
+                        tokens.push(Token::Comments(CommentKind::Line, self.read_line()));
+                        continue;
+                    }
+                    self.skip_ws();
                     let rest = self.read_line();
                     if let Some(decl) = parse_import_line(&rest) {
                         tokens.push(Token::Import { lib: decl.spec, detail: decl.detail });
@@ -523,7 +539,6 @@ impl Lexer {
                     }
                 }
 
-                // '/' alone (not //) — treat as part of an identifier/path
                 '/' => {
                     let mut path = String::from("/");
                     self.advance();
@@ -535,7 +550,6 @@ impl Lexer {
                     tokens.push(Token::Ident(path));
                 }
 
-                // '=' alone (not =>) — skip (e.g. inside unquoted bash strings)
                 '=' => { self.advance(); }
 
                 _ => {
