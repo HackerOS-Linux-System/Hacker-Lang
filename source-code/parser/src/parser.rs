@@ -44,7 +44,6 @@ impl Parser {
     fn parse_var_value(value: &str, typ: &str) -> VarValue {
         let value = value.trim();
 
-        // Typowane (gen 2)
         match typ {
             "int" => {
                 if let Ok(n) = value.parse::<i64>() { return VarValue::Int(n); }
@@ -63,7 +62,6 @@ impl Parser {
             _ => {}
         }
 
-        // Automatyczne wykrywanie
         if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
             let inner = &value[1..value.len()-1];
             let parts = parse_string_parts(inner);
@@ -73,7 +71,6 @@ impl Parser {
             return VarValue::String(inner.to_string());
         }
 
-        // Gen 2 — $( expr ) jako wartosc zmiennej
         if value.starts_with("$(") && value.ends_with(')') {
             let expr = value[2..value.len()-1].trim().to_string();
             return VarValue::Arithmetic(expr);
@@ -106,7 +103,6 @@ impl Parser {
         Ok(items)
     }
 
-    /// Parsuj blok switch — zbierz arms do done
     fn parse_switch_arms(&mut self) -> Result<Vec<MatchArm>, ParseError> {
         let mut arms = Vec::new();
         loop {
@@ -117,7 +113,6 @@ impl Parser {
                 Token::SwitchArm { pattern } => {
                     self.advance();
                     let mut body = Vec::new();
-                    // Zbierz body do nastepnego | lub done
                     loop {
                         self.skip_newlines();
                         match self.peek() {
@@ -160,13 +155,9 @@ impl Parser {
                 Ok(Some(Node::QuickCall { name, args: parse_string_parts(&args) }))
             }
 
-            // & background
             Token::Background(raw) => { self.advance(); Ok(Some(Node::Background { raw })) }
-
-            // *> hsh
             Token::HshCmd(raw) => { self.advance(); Ok(Some(Node::HshCommand { raw })) }
 
-            // _N repeat
             Token::RepeatN(n) => {
                 self.advance();
                 self.skip_newlines();
@@ -174,32 +165,27 @@ impl Parser {
                 Ok(Some(Node::RepeatN { count: n, body }))
             }
 
-            // << file import
             Token::FileImport { path, detail } => {
                 self.advance();
                 Ok(Some(Node::FileImport { path, detail }))
             }
 
-            // :* goroutine (z opcjonalna nazwa, gen 2: :* nazwa def)
             Token::GoroutineStart { name } => {
                 self.advance();
                 let body = self.parse_block()?;
                 Ok(Some(Node::Goroutine { name, body }))
             }
 
-            // :** channel
             Token::ChannelDecl(name) => {
                 self.advance();
                 Ok(Some(Node::Channel { name }))
             }
 
-            // *-- channel op
             Token::ChannelOp(name) => {
                 self.advance();
                 Ok(Some(Node::ChannelOp { name, value: None }))
             }
 
-            // Gen 2 — @ item in lista (for-in)
             Token::ForIn { var, iterable } => {
                 self.advance();
                 let body = self.parse_block()?;
@@ -210,7 +196,6 @@ impl Parser {
                 }))
             }
 
-            // Gen 2 — ?~ warunek (while)
             Token::WhileStart(condition) => {
                 self.advance();
                 let body = self.parse_block()?;
@@ -220,7 +205,6 @@ impl Parser {
                 }))
             }
 
-            // Gen 2 — ? switch @var (switch/match)
             Token::SwitchStart(subject) => {
                 self.advance();
                 let arms = self.parse_switch_arms()?;
@@ -230,13 +214,11 @@ impl Parser {
                 }))
             }
 
-            // Gen 2 — $( expr ) -> @var
             Token::Arithmetic { expr, assign_to } => {
                 self.advance();
                 Ok(Some(Node::Arithmetic { expr, assign_to }))
             }
 
-            // Gen 2 — > cmd |> @var
             Token::CmdPipeToVar { cmd, mode, var_name } => {
                 self.advance();
                 let cmd_mode = match mode {
@@ -246,7 +228,6 @@ impl Parser {
                 Ok(Some(Node::PipeToVar { command: cmd, mode: cmd_mode, var_name }))
             }
 
-            // Gen 2 — || tool args
             Token::HackerOsApi { tool, args } => {
                 self.advance();
                 Ok(Some(Node::HackerOsApi {
@@ -255,7 +236,6 @@ impl Parser {
                 }))
             }
 
-            // Komendy
             Token::Cmd(raw)                 => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Plain,            interpolate: false })) }
             Token::CmdSudo(raw)             => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Sudo,             interpolate: false })) }
             Token::CmdIsolated(raw)         => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Isolated,         interpolate: false })) }
@@ -264,14 +244,17 @@ impl Parser {
             Token::CmdWithVarsSudo(raw)     => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::WithVarsSudo,     interpolate: true  })) }
             Token::CmdWithVarsIsolated(raw) => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::WithVarsIsolated, interpolate: true  })) }
 
-            // % var: typ = val (gen 2 typowane)
             Token::VarDecl { name, typ, value } => {
                 self.advance();
                 let var_type = VarType::from_str(&typ);
                 Ok(Some(Node::VarDecl { name, typ: var_type, value: Self::parse_var_value(&value, &typ) }))
             }
 
-            Token::VarRef(name) => { self.advance(); Ok(Some(Node::VarRef(name))) }
+            // VarRef — takze zmienne z _ (np. _d, _result, _pb_pct)
+            Token::VarRef(name) => {
+                self.advance();
+                Ok(Some(Node::VarRef(name)))
+            }
 
             Token::ExportSingle { name, value } => {
                 self.advance();
@@ -283,8 +266,9 @@ impl Parser {
                 Ok(Some(Node::Export { name, value: ExportValue::List(items) }))
             }
             Token::ExportListItem(_) | Token::ExportListEnd => {
-                let pos = self.pos; self.advance();
-                Err(ParseError::UnexpectedToken(pos, "ExportList poza listem".into()))
+                // Poza listem — ignoruj
+                self.advance();
+                Ok(None)
             }
 
             Token::Dependency(dep)        => { self.advance(); Ok(Some(Node::Dependency { name: dep })) }
@@ -309,12 +293,11 @@ impl Parser {
             }
 
             Token::SwitchArm { .. } => {
-                // Switch arm poza switch — ignoruj
                 self.advance(); Ok(None)
             }
 
-            // Bool/Number tokens jako standalone — ignoruj (uzywane w VarDecl)
-            Token::Bool(_) | Token::Number(_) => {
+            // Bool/Number/Ident tokens jako standalone — ignoruj (nie crashuj)
+            Token::Bool(_) | Token::Number(_) | Token::Ident(_) | Token::StringLit(_) => {
                 self.advance(); Ok(None)
             }
 
@@ -422,5 +405,22 @@ mod tests {
         let src = ":* scanner def\n> nmap -sn 192.168.1.0/24\ndone";
         let nodes = parse_source(src).unwrap();
         assert!(nodes.iter().any(|n| matches!(n, Node::Goroutine { name: Some(_), .. })));
+    }
+
+    #[test]
+    fn test_underscore_var_ref() {
+        // _d, _result itp. nie powinny crashowac
+        let src = "% _d = test\n% _result = 0";
+        let nodes = parse_source(src).unwrap();
+        assert!(!nodes.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_ident_ignored() {
+        // Nieznany token Ident powinien byc ignorowany zamiast crashowac
+        let src = "~> hello\nsome_ident_that_means_nothing\n~> world";
+        let nodes = parse_source(src).unwrap();
+        let prints: Vec<_> = nodes.iter().filter(|n| matches!(n, Node::Print { .. })).collect();
+        assert_eq!(prints.len(), 2);
     }
 }
