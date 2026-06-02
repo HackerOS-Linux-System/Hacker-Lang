@@ -6,7 +6,6 @@ use hl_core::env::Env;
 use hl_core::{check_source, run_source, cmd_clean_cache};
 use hl_core::{HL_MAX_GEN, HL_DEFAULT_GEN, parse_source_with_meta};
 use hl_shell::{run_interactive, run_as_shell};
-use hl_compiler::{compile, CompileOptions, CompileMode, OptLevel};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -53,11 +52,8 @@ MANAGER PAKIETOW bit:
 
 PRZYKLADY:
     hl run skrypt.hl
-    hl run skrypt.bc
     hl exec update-system
     hl search update
-    hl compile skrypt.hl     -> skrypt.bc (bytecode)
-    hl compile skrypt.bc     -> binarka ELF
     hl repl"
 )]
 struct Cli {
@@ -79,7 +75,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Uruchom skrypt .hl lub .bc
+    /// Uruchom skrypt .hl
     Run {
         file: PathBuf,
         #[arg(last = true)]
@@ -118,21 +114,6 @@ enum Commands {
 
     /// Wydrukuj AST jako JSON
     Ast { file: PathBuf },
-
-    /// Kompiluj:
-    ///   .hl -> .bc (bytecode HL, wykonywalny przez hl run lub bezposrednio)
-    ///   .bc -> binarka ELF x86_64
-    Compile {
-        file: PathBuf,
-        #[arg(short, long, value_name = "FILE")]
-        output: Option<PathBuf>,
-        #[arg(short, long)]
-        verbose: bool,
-        #[arg(long)]
-        shared: bool,
-        #[arg(long, default_value = "speed")]
-        opt: String,
-    },
 
     /// Wyczysc cache bibliotek
     Clean,
@@ -277,132 +258,6 @@ fn main() -> Result<()> {
             }
         }
 
-        // ── hl compile ───────────────────────────────────────────────────────
-        // .hl -> .bc (bytecode)
-        // .bc -> ELF binarka
-        Some(Commands::Compile { file, output, verbose, shared, opt }) => {
-            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-            if ext == "hl" {
-                // Etap 1: .hl -> .bc (bytecode HL)
-                let source = std::fs::read_to_string(&file)?;
-                let fname  = file.file_name().and_then(|n| n.to_str()).unwrap_or("<unknown>");
-                let renderer = DiagRenderer::new(fname, &source);
-
-                let mut lint_diags = lint_source(&source);
-                lint_diags.extend(lint_gen(&source));
-                if !lint_diags.is_empty() {
-                    renderer.emit_all(&lint_diags);
-                    let sum = DiagSummary::from_diags(&lint_diags);
-                    sum.print();
-                    if sum.has_errors() { eprintln!("{} Kompilacja przerwana.", "BLAD".red().bold()); std::process::exit(2); }
-                }
-
-                if let Err(e) = check_source(&source) {
-                    renderer.emit(&parse_error_to_diag(&e)); std::process::exit(2);
-                }
-
-                let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-                let bc_path = output.clone().unwrap_or_else(|| {
-                    file.parent().unwrap_or(Path::new(".")).join(format!("{}.bc", stem))
-                });
-
-                eprintln!("{} {} -> {}",
-                    "hl compile:".bright_magenta().bold(),
-                    file.display().to_string().bright_white(),
-                    bc_path.display().to_string().bright_cyan());
-
-                // Zapisz bytecode: serializacja AST (JSON) z naglowkiem HL-BC
-                match check_source(&source) {
-                    Ok(nodes) => {
-                        let ast_json = serde_json::to_string(&nodes)?;
-                        let bc_content = format!(
-                            "#!/usr/bin/env -S /usr/bin/hl run\n# HL-BC gen 2\n{}\n",
-                            ast_json
-                        );
-                        std::fs::write(&bc_path, bc_content.as_bytes())?;
-
-                        // Ustaw bit wykonywalny (shebang pozwala uruchamiac bezposrednio)
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            if let Ok(meta) = std::fs::metadata(&bc_path) {
-                                let mut perms = meta.permissions();
-                                perms.set_mode(0o755);
-                                let _ = std::fs::set_permissions(&bc_path, perms);
-                            }
-                        }
-
-                        let size = std::fs::metadata(&bc_path).map(|m| m.len()).unwrap_or(0);
-                        println!("{} {} [HL Bytecode] ({} KB)",
-                            "OK".green().bold(),
-                            bc_path.display().to_string().bright_green().bold(),
-                            size / 1024);
-                        println!("  Uruchom: {} lub bezposrednio {}",
-                            format!("hl run {}", bc_path.display()).bright_cyan(),
-                            bc_path.display().to_string().bright_cyan());
-                    }
-                    Err(e) => {
-                        renderer.emit(&parse_error_to_diag(&e));
-                        std::process::exit(1);
-                    }
-                }
-
-            } else if ext == "bc" {
-                // Etap 2: .bc -> ELF binarka
-                eprintln!("{} {} -> {}",
-                    "hl compile:".bright_magenta().bold(),
-                    file.display().to_string().bright_white(),
-                    "binarka ELF".bright_cyan());
-
-                // Odczytaj .bc, wyodrebnij JSON AST
-                let bc_content = std::fs::read_to_string(&file)?;
-                let ast_json_line = bc_content.lines()
-                    .find(|l| l.starts_with('[') || l.starts_with('{'))
-                    .unwrap_or("[]");
-
-                // Zapisz do tymczasowego .hl i kompiluj przez pipeline Cranelift
-                let tmp_dir = tempfile::tempdir()?;
-                let tmp_hl = tmp_dir.path().join("_bc_src.hl");
-                // Rekonstruuj zrodlo z .bc — uruchom przez standardowy kompilator
-                // W uproszczeniu: .bc -> ponownie parsuj JSON i kompiluj
-                let source_for_compile = format!(
-                    ";;  Skompilowany z: {}\n> echo '[HL-BC: compile from bytecode]'\n",
-                    file.display()
-                );
-                std::fs::write(&tmp_hl, &source_for_compile)?;
-
-                let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-                let mode = if shared { CompileMode::Shared } else { CompileMode::Binary };
-                let opt_level = match opt.as_str() { "none" => OptLevel::None, "size" => OptLevel::Size, _ => OptLevel::Speed };
-
-                match compile(CompileOptions {
-                    input: tmp_hl,
-                    output,
-                    verbose: verbose || cli.verbose,
-                    mode,
-                    opt: opt_level,
-                }) {
-                    Ok(result) => {
-                        let badge = match result.mode {
-                            CompileMode::Binary   => "[ELF x86_64 + C runtime]".bright_black(),
-                            CompileMode::Shared   => "[.so — bit]".bright_magenta(),
-                            CompileMode::Bytecode => "[HL Bytecode .bc]".bright_cyan(),
-                        };
-                        println!("{} {} {} ({} KB)",
-                            "OK".green().bold(),
-                            result.output_path.display().to_string().bright_green().bold(),
-                            badge,
-                            result.object_size / 1024);
-                    }
-                    Err(e) => { eprintln!("{} {}", "BLAD".red().bold(), e); std::process::exit(1); }
-                }
-            } else {
-                eprintln!("{} Plik musi miec rozszerzenie .hl lub .bc", "BLAD".red().bold());
-                std::process::exit(1);
-            }
-        }
-
         // ── hl clean ─────────────────────────────────────────────────────────
         Some(Commands::Clean) => cmd_clean_cache(),
 
@@ -422,7 +277,7 @@ fn main() -> Result<()> {
             println!();
             println!("  Skladnia importu w plikach .hl:");
             println!("    {}  -- biblioteka standardowa", "# <main/net>".bright_cyan());
-            println!("    {}  -- biblioteka bit (.so)", "# <bit/hashlib>".bright_magenta());
+            println!("    {}  -- biblioteka bit", "# <bit/hashlib>".bright_magenta());
             println!("    {}  -- GitHub", "# <github/user/repo>".bright_blue());
             println!();
             println!("  Biblioteki main sa plikami .hl w:");
@@ -576,12 +431,6 @@ fn run_file_with_diag(file: &Path, env: &mut Env, verbose: bool) -> i32 {
         return 1;
     }
 
-    // Obsluga .bc (bytecode)
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext == "bc" {
-        return run_bc_file(file, env, verbose);
-    }
-
     if verbose {
         if let Ok(source) = std::fs::read_to_string(file) {
             if let Ok(meta) = parse_source_with_meta(&source) {
@@ -597,31 +446,6 @@ fn run_file_with_diag(file: &Path, env: &mut Env, verbose: bool) -> i32 {
     match hl_shell::run_file(file, env) {
         Ok(code) => code,
         Err(e)   => { eprintln!("{} {}", "BLAD".red().bold(), e); 1 }
-    }
-}
-
-fn run_bc_file(file: &Path, env: &mut Env, _verbose: bool) -> i32 {
-    // Odczytaj .bc i uruchom jako skrypt HL (JSON AST -> exec)
-    let content = match std::fs::read_to_string(file) {
-        Ok(c) => c,
-        Err(e) => { eprintln!("{} {}", "BLAD".red().bold(), e); return 1; }
-    };
-
-    // Wyodrebnij JSON AST (linia zaczynajaca sie od '[')
-    let ast_json = content.lines()
-        .find(|l| l.starts_with('['))
-        .unwrap_or("[]");
-
-    let nodes: Vec<hl_core::Node> = match serde_json::from_str(ast_json) {
-        Ok(n) => n,
-        Err(e) => { eprintln!("{} Nieprawidlowy bytecode .bc: {}", "BLAD".red().bold(), e); return 1; }
-    };
-
-    env.set_var("HL_SCRIPT", hl_core::Value::String(file.display().to_string()));
-
-    match hl_core::exec_nodes_pub(&nodes, env) {
-        Ok(r)  => r.exit_code,
-        Err(e) => { eprintln!("{} {}", "BLAD".red().bold(), e); 1 }
     }
 }
 
@@ -668,7 +492,6 @@ fn print_version() {
     println!("{}", "Komponenty:".bright_yellow());
     println!("  hl-parser    gen 2  -- Lexer, Parser, AST, Gen, Shebang");
     println!("  hl-core      gen 2  -- Executor, Env, Quick Functions, Diagnostics");
-    println!("  hl-compiler  gen 2  -- Bytecode (.bc) + Cranelift codegen + C runtime");
     println!("  hl-shell     gen 2  -- REPL, Shell, Completion");
     println!("  hl-docs      gen 2  -- Dokumentacja TUI (Go + Bubble Tea)");
     println!();
@@ -676,16 +499,11 @@ fn print_version() {
     println!("  Aktualny max gen: {}", format!("gen {}", HL_MAX_GEN).bright_magenta().bold());
     println!("  Domyslny gen:     {}", format!("gen {}", HL_DEFAULT_GEN).bright_magenta());
     println!("  Deklaracja:       {}", "using <gen 2>".bright_cyan());
-    println!();
-    println!("{}", "Kompilacja (dwuetapowa):".bright_yellow());
-    println!("  .hl -> .bc  {}", "hl compile skrypt.hl    # bytecode (wykonywalny)".bright_cyan());
-    println!("  .bc -> ELF  {}", "hl compile skrypt.bc    # binarka ELF x86_64".bright_cyan());
-    println!("  Uruchom BC: {}", "hl run skrypt.bc  lub  ./skrypt.bc".bright_cyan());
+    println!("  ROLLING:          {}", "using <rolling>  -- najnowsze funkcje (pre-gen 3)".bright_yellow());
     println!();
     println!("{}", "Shebang:".bright_yellow());
     println!("  {}", "#!/usr/bin/env hl".bright_cyan());
     println!("  {}", "#!/usr/bin/hl".bright_cyan());
-    println!("  Pliki .bc maja automatycznie: #!/usr/bin/env -S /usr/bin/hl run");
     println!();
     println!("{}", "Manager pakietow:".bright_yellow());
     println!("  {}  -- manager pakietow bit (ekosystem HL)", "bit".bright_green().bold());
@@ -693,25 +511,8 @@ fn print_version() {
     println!();
     println!("{}", "Importy:".bright_yellow());
     println!("  {}  -- biblioteka standardowa (pliki .hl w {})", "# <main/nazwa>".bright_cyan(), HL_MAIN_LIBS_DIR.bright_black());
-    println!("  {}   -- biblioteka bit (.so)", "# <bit/nazwa>".bright_magenta());
+    println!("  {}   -- biblioteka bit", "# <bit/nazwa>".bright_magenta());
     println!("  {} -- GitHub", "# <github/user/repo>".bright_blue());
-    println!();
-    println!("{}", "Operatory gen 1:".bright_yellow());
-    println!("  {}  -- uruchom w tle", "& komenda".bright_cyan());
-    println!("  {}  -- uruchom przez hsh", "*> komenda".bright_cyan());
-    println!("  {}  -- goroutine (z nazwa: :* n def)", ":*".bright_magenta());
-    println!("  {}  -- channel / channel-op", ":**, *--".bright_magenta());
-    println!("  {}  -- powtorz N razy", "_N".bright_cyan());
-    println!("  {}  -- import pliku .hl", "<< plik.hl".bright_cyan());
-    println!();
-    println!("{}", "Operatory gen 2 (NOWE):".bright_yellow());
-    println!("  {}  -- typowana zmienna (int/float/str/bool)", "% n: int = 42".bright_cyan());
-    println!("  {}  -- arytmetyka natywna", "$( expr ) -> @var".bright_cyan());
-    println!("  {}  -- pipe wyniku do zmiennej", "> cmd |> @var".bright_cyan());
-    println!("  {}  -- for-in loop", "@ item in lista".bright_cyan());
-    println!("  {}  -- while loop", "?~ warunek".bright_cyan());
-    println!("  {}  -- switch/case", "? switch @var  |  | pattern".bright_cyan());
-    println!("  {}  -- HackerOS API", "|| narzedzie [args]".bright_magenta());
     println!();
     println!("{}", "Skrypty systemowe:".bright_yellow());
     println!("  Katalog:  {}", HL_SCRIPTS_DIR.bright_white());
