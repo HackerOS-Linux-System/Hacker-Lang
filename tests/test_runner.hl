@@ -1,0 +1,318 @@
+#!/usr/bin/hl
+
+using <gen 2>
+
+# <main/colors>
+
+;; ── Liczniki ──────────────────────────────────────────────────────────────────
+% _t_pass  = 0
+% _t_fail  = 0
+% _t_skip  = 0
+% _t_total = 0
+
+;; ── API testow ────────────────────────────────────────────────────────────────
+
+;; assert_eq: porownaj dwie wartosci
+;; % _assert_got = <wartosc> && % _assert_exp = <oczekiwana> && % _assert_name = <opis> && -- assert_eq
+: assert_eq def
+    $(@_t_total + 1) -> @_t_total
+    > test "@_assert_got" = "@_assert_exp"
+    ? ok
+        $(@_t_pass + 1) -> @_t_pass
+        ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+    done
+    ? err
+        $(@_t_fail + 1) -> @_t_fail
+        ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name
+        ~>        got: [@_assert_got]
+        ~>        exp: [@_assert_exp]
+    done
+done
+
+;; assert_ok: sprawdz czy ostatni exit code = 0
+;; % _assert_name = <opis> && -- assert_ok
+: assert_ok def
+    $(@_t_total + 1) -> @_t_total
+    > test "@_last_exit" = "0"
+    ? ok
+        $(@_t_pass + 1) -> @_t_pass
+        ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+    done
+    ? err
+        $(@_t_fail + 1) -> @_t_fail
+        ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name (exit: @_last_exit)
+    done
+done
+
+;; assert_err: sprawdz czy ostatni exit code != 0
+: assert_err def
+    $(@_t_total + 1) -> @_t_total
+    > test "@_last_exit" != "0"
+    ? ok
+        $(@_t_pass + 1) -> @_t_pass
+        ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+    done
+    ? err
+        $(@_t_fail + 1) -> @_t_fail
+        ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name (oczekiwano bladu, exit=0)
+    done
+done
+
+;; skip: pominij test z komunikatem
+: assert_skip def
+    $(@_t_skip + 1) -> @_t_skip
+    ~> @COLOR_YELLOW  SKIP@COLOR_RESET @_assert_name
+done
+
+;; Podsumowanie
+: test_summary def
+    ::nl
+    ::hr 50
+    ~> Wyniki testow:
+    ~>   @COLOR_GREEN PASS@COLOR_RESET: @_t_pass
+    ~>   @COLOR_RED FAIL@COLOR_RESET: @_t_fail
+    ~>   @COLOR_YELLOW SKIP@COLOR_RESET: @_t_skip
+    ~>   Lacznie: @_t_total
+    ::hr 50
+    > test "@_t_fail" = "0"
+    ? ok
+        ::green Wszystkie testy przeszly!
+    done
+    ? err
+        ::red Bledy w testach: @_t_fail
+    done
+done
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; TESTY
+;; ─────────────────────────────────────────────────────────────────────────────
+
+::hr 50
+~> @COLOR_CYAN Hacker Lang — testy jednostkowe@COLOR_RESET
+::hr 50
+::nl
+
+;; ── 1. Zmienne ────────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [1] Zmienne@COLOR_RESET
+
+% _assert_name = "zmienna string"
+% val = hello
+% _assert_got = @val
+% _assert_exp = hello
+-- assert_eq
+
+% _assert_name = "zmienna int"
+% n: int = 42
+% _assert_got = @n
+% _assert_exp = 42
+-- assert_eq
+
+% _assert_name = "zmienna bool true"
+% flag: bool = true
+% _assert_got = @flag
+% _assert_exp = true
+-- assert_eq
+
+% _assert_name = "zmienna z podkreslnikiem (_d)"
+% _d = test_val
+% _assert_got = @_d
+% _assert_exp = test_val
+-- assert_eq
+
+;; ── 2. Arytmetyka ─────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [2] Arytmetyka@COLOR_RESET
+
+$(2 + 2) -> @_arith_result
+% _assert_name = "dodawanie 2+2=4"
+% _assert_got = @_arith_result
+% _assert_exp = 4
+-- assert_eq
+
+$(10 - 3) -> @_arith_result
+% _assert_name = "odejmowanie 10-3=7"
+% _assert_got = @_arith_result
+% _assert_exp = 7
+-- assert_eq
+
+$(3 * 4) -> @_arith_result
+% _assert_name = "mnozenie 3*4=12"
+% _assert_got = @_arith_result
+% _assert_exp = 12
+-- assert_eq
+
+;; ── 3. Quick functions ────────────────────────────────────────────────────────
+~> @COLOR_BOLD [3] Quick Functions@COLOR_RESET
+
+% _assert_name = "::upper"
+>> echo "hello" | tr '[:lower:]' '[:upper:]' |> @_qf_result
+% _assert_got = @_qf_result
+% _assert_exp = HELLO
+-- assert_eq
+
+% _assert_name = "::exists /tmp (istnieje)"
+::exists /tmp
+? ok
+    % _last_exit = 0
+done
+? err
+    % _last_exit = 1
+done
+% _assert_name = "::exists /tmp istnieje"
+> test "@_last_exit" = "0"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET ::exists /tmp
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET ::exists /tmp
+done
+
+% _assert_name = "::exists /nonexistent (nie istnieje)"
+::exists /this_path_definitely_does_not_exist_hl_test
+? err
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET ::exists /nonexistent zwraca err
+done
+? ok
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET ::exists /nonexistent powinno byc err
+done
+
+;; ── 4. Pipe do zmiennej ───────────────────────────────────────────────────────
+~> @COLOR_BOLD [4] Pipe do zmiennej |>@COLOR_RESET
+
+> echo "hackeros" |> @_pipe_result
+% _assert_name = "> echo |> @var"
+% _assert_got = @_pipe_result
+% _assert_exp = hackeros
+-- assert_eq
+
+>> echo "gen2" |> @_pipe_result2
+% _assert_name = ">> echo |> @var"
+% _assert_got = @_pipe_result2
+% _assert_exp = gen2
+-- assert_eq
+
+>> echo "hello world" | tr ' ' '-' |> @_pipe_result3
+% _assert_name = ">> echo | tr |> @var"
+% _assert_got = @_pipe_result3
+% _assert_exp = hello-world
+-- assert_eq
+
+;; ── 5. For-in ─────────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [5] For-in loop@COLOR_RESET
+
+% _for_count = 0
+@ _item in a b c d e
+    $(@_for_count + 1) -> @_for_count
+done
+
+% _assert_name = "for-in liczy 5 elementow"
+% _assert_got = @_for_count
+% _assert_exp = 5
+-- assert_eq
+
+;; ── 6. While ──────────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [6] While loop@COLOR_RESET
+
+% _w = 0
+?~ @_w < 5
+    $(@_w + 1) -> @_w
+done
+
+% _assert_name = "while liczy do 5"
+% _assert_got = @_w
+% _assert_exp = 5
+-- assert_eq
+
+;; ── 7. Switch ─────────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [7] Switch/case@COLOR_RESET
+
+% _sw_val = hl
+% _sw_result = unknown
+? switch @_sw_val
+| hl
+    % _sw_result = matched_hl
+| rust
+    % _sw_result = matched_rust
+| *
+    % _sw_result = matched_wildcard
+done
+
+% _assert_name = "switch dopasowanie 'hl'"
+% _assert_got = @_sw_result
+% _assert_exp = matched_hl
+-- assert_eq
+
+% _sw_val2 = other
+% _sw_result2 = unknown
+? switch @_sw_val2
+| hl
+    % _sw_result2 = matched_hl
+| *
+    % _sw_result2 = wildcard_hit
+done
+
+% _assert_name = "switch wildcard *"
+% _assert_got = @_sw_result2
+% _assert_exp = wildcard_hit
+-- assert_eq
+
+;; ── 8. Funkcje ────────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [8] Funkcje@COLOR_RESET
+
+% _fn_called = false
+: test_fn def
+    % _fn_called = true
+done
+-- test_fn
+
+% _assert_name = "wywolanie funkcji"
+% _assert_got = @_fn_called
+% _assert_exp = true
+-- assert_eq
+
+;; ── 9. Warunkowe ? ok / ? err ────────────────────────────────────────────────
+~> @COLOR_BOLD [9] Warunkowe@COLOR_RESET
+
+% _cond_result = none
+> test "1" = "1"
+? ok
+    % _cond_result = ok_branch
+done
+
+% _assert_name = "? ok po exit 0"
+% _assert_got = @_cond_result
+% _assert_exp = ok_branch
+-- assert_eq
+
+% _cond_result2 = none
+> test "1" = "2"
+? err
+    % _cond_result2 = err_branch
+done
+
+% _assert_name = "? err po exit 1"
+% _assert_got = @_cond_result2
+% _assert_exp = err_branch
+-- assert_eq
+
+;; ── 10. Interpolacja stringow ─────────────────────────────────────────────────
+~> @COLOR_BOLD [10] Interpolacja@COLOR_RESET
+
+% _interp_a = Hello
+% _interp_b = World
+> echo "@_interp_a @_interp_b" |> @_interp_result
+
+% _assert_name = "interpolacja w echo"
+% _assert_got = @_interp_result
+% _assert_exp = Hello World
+-- assert_eq
+
+;; ── Podsumowanie ──────────────────────────────────────────────────────────────
+-- test_summary
