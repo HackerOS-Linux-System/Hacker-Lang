@@ -19,6 +19,18 @@ impl ExecResult {
     #[inline] pub fn is_ok(&self) -> bool { self.exit_code == 0 }
 }
 
+/// Sprawdz czy komenda to wbudowany exit
+#[inline]
+fn try_builtin_exit(cmd: &str) -> Option<i32> {
+    let t = cmd.trim();
+    if t == "exit" { return Some(0); }
+    if let Some(rest) = t.strip_prefix("exit ") {
+        let code = rest.trim().parse::<i32>().unwrap_or(1);
+        return Some(code);
+    }
+    None
+}
+
 #[inline]
 fn needs_shell(cmd: &str) -> bool {
     cmd.contains("&&") || cmd.contains("||")
@@ -50,10 +62,21 @@ fn shell_words(s: &str) -> SmallVec<[String; 8]> {
     words
 }
 
-fn run_command(raw: &str, sudo: bool, isolated: bool, env: &mut Env, capture: bool) -> Result<ExecResult> {
-    let expanded = env.interpolate(raw);
-    let trimmed  = expanded.trim();
+fn run_command(raw: &str, sudo: bool, isolated: bool, interpolate: bool, env: &mut Env, capture: bool) -> Result<ExecResult> {
+    // Interpoluj jesli potrzeba (>> albo explicite)
+    let expanded = if interpolate || raw.contains('@') {
+        env.interpolate(raw)
+    } else {
+        raw.to_string()
+    };
+    let trimmed = expanded.trim();
     debug!("run: {}", trimmed);
+
+    // Wbudowany exit
+    if let Some(code) = try_builtin_exit(trimmed) {
+        std::process::exit(code);
+    }
+
     if needs_shell(trimmed) { return run_via_shell(trimmed, sudo, isolated, capture); }
     let parts = shell_words(trimmed);
     if parts.is_empty() { return Ok(ExecResult::ok()); }
@@ -127,38 +150,46 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
 
         Node::Command { raw, mode, .. } => {
             let trimmed = raw.trim();
+
+            // Wbudowany exit (np. > exit 1)
+            if let Some(code) = try_builtin_exit(trimmed) {
+                std::process::exit(code);
+            }
+
             if trimmed.starts_with("echo ") || trimmed == "echo" {
                 bail!("'echo' jest zabroniony. Uzyj '~>'.");
             }
-            let (sudo, isolated) = match mode {
-                CommandMode::Plain            => (false, false),
-                CommandMode::Sudo             => (true,  false),
-                CommandMode::Isolated         => (false, true),
-                CommandMode::IsolatedSudo     => (true,  true),
-                CommandMode::WithVars         => (false, false),
-                CommandMode::WithVarsSudo     => (true,  false),
-                CommandMode::WithVarsIsolated => (false, true),
+
+            let (sudo, isolated, interpolate) = match mode {
+                CommandMode::Plain            => (false, false, false),
+                CommandMode::Sudo             => (true,  false, false),
+                CommandMode::Isolated         => (false, true,  false),
+                CommandMode::IsolatedSudo     => (true,  true,  false),
+                CommandMode::WithVars         => (false, false, true),
+                CommandMode::WithVarsSudo     => (true,  false, true),
+                CommandMode::WithVarsIsolated => (false, true,  true),
             };
-            run_command(raw, sudo, isolated, env, false)
+            run_command(raw, sudo, isolated, interpolate, env, false)
         }
 
         Node::HshCommand { raw } => {
-            let cmd = raw.trim();
+            let expanded = env.interpolate(raw);
+            let cmd = expanded.trim();
             let status = Command::new("hsh")
-                .args(["-c", cmd])
-                .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-                .status()
-                .map_err(|e| anyhow::anyhow!("hsh nie znaleziony: {}", e))?;
+            .args(["-c", cmd])
+            .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| anyhow::anyhow!("hsh nie znaleziony: {}", e))?;
             Ok(ExecResult { exit_code: status.code().unwrap_or(1), stdout: None })
         }
 
         Node::Background { raw } => {
             let expanded = env.interpolate(raw);
             let child = Command::new("sh")
-                .args(["-c", expanded.trim()])
-                .stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("Blad tla: {}", e))?;
+            .args(["-c", expanded.trim()])
+            .stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Blad tla: {}", e))?;
             env.set_var("_bg_pid", Value::Number(child.id() as f64));
             eprintln!("\x1b[90m[hl &] PID={}\x1b[0m", child.id());
             std::mem::forget(child);
@@ -215,17 +246,16 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             Ok(ExecResult::ok())
         }
 
-        // Gen 2 — typowane zmienne
         Node::VarDecl { name, typ: _typ, value } => {
             let val = match value {
-                VarValue::String(s)       => Value::String(s.clone()),
-                VarValue::Int(n)          => Value::Number(*n as f64),
-                VarValue::Float(n)        => Value::Number(*n),
-                VarValue::Number(n)       => Value::Number(*n),
-                VarValue::Bool(b)         => Value::Bool(*b),
-                VarValue::Interpolated(p) => Value::String(env.resolve_string_parts(p)),
-                VarValue::CmdOutput(cmd)  => {
-                    let r = run_command(cmd, false, false, env, true)?;
+                VarValue::String(s)        => Value::String(s.clone()),
+                VarValue::Int(n)           => Value::Number(*n as f64),
+                VarValue::Float(n)         => Value::Number(*n),
+                VarValue::Number(n)        => Value::Number(*n),
+                VarValue::Bool(b)          => Value::Bool(*b),
+                VarValue::Interpolated(p)  => Value::String(env.resolve_string_parts(p)),
+                VarValue::CmdOutput(cmd)   => {
+                    let r = run_command(cmd, false, false, true, env, true)?;
                     Value::String(r.stdout.unwrap_or_default().trim().to_string())
                 }
                 VarValue::Arithmetic(expr) => {
@@ -236,11 +266,11 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
                 VarValue::List(items) => {
                     let parts: Vec<Value> = items.iter().map(|v| match v {
                         VarValue::String(s)  => Value::String(s.clone()),
-                        VarValue::Int(n)     => Value::Number(*n as f64),
-                        VarValue::Float(n)   => Value::Number(*n),
-                        VarValue::Number(n)  => Value::Number(*n),
-                        VarValue::Bool(b)    => Value::Bool(*b),
-                        _                    => Value::Nil,
+                                                             VarValue::Int(n)     => Value::Number(*n as f64),
+                                                             VarValue::Float(n)   => Value::Number(*n),
+                                                             VarValue::Number(n)  => Value::Number(*n),
+                                                             VarValue::Bool(b)    => Value::Bool(*b),
+                                                             _                    => Value::Nil,
                     }).collect();
                     Value::List(parts)
                 }
@@ -294,12 +324,10 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             if run { exec_nodes(body, env) } else { Ok(ExecResult::ok()) }
         }
 
-        // Gen 2 — for @var in lista
         Node::ForIn { var, iterable, body } => {
             let iter_str = env.resolve_string_parts(iterable);
-            let items: Vec<&str> = iter_str.split_whitespace().collect();
             let mut last = ExecResult::ok();
-            for item in items {
+            for item in iter_str.split_whitespace() {
                 env.set_var(var, Value::String(item.to_string()));
                 last = exec_nodes(body, env)?;
                 env.last_exit = last.exit_code;
@@ -307,7 +335,6 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             Ok(last)
         }
 
-        // Gen 2 — ?~ warunek (while)
         Node::WhileLoop { condition, body } => {
             let mut iterations = 0usize;
             const MAX_ITER: usize = 100_000;
@@ -316,61 +343,67 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
                     bail!("Petla while: przekroczono limit {} iteracji", MAX_ITER);
                 }
                 iterations += 1;
-
                 let cond_str = env.resolve_string_parts(condition);
-                let cond_result = eval_condition(&cond_str, env)?;
-                if !cond_result { break; }
-
+                if !eval_condition(&cond_str, env)? { break; }
                 let r = exec_nodes(body, env)?;
                 env.last_exit = r.exit_code;
             }
             Ok(ExecResult::ok())
         }
 
-        // Gen 2 — ? switch @var
         Node::MatchExpr { subject, arms } => {
             let subj = env.resolve_string_parts(subject);
             let mut matched = false;
             for arm in arms {
                 let pattern = arm.pattern.trim();
-                let matches = pattern == "*" || pattern == subj
-                    || env.interpolate(pattern) == subj;
-                if matches || (!matched && pattern == "*") {
+                let pat_resolved = env.interpolate(pattern);
+                let matches_pat = pattern == "*" || pat_resolved == subj || pattern == subj;
+                if matches_pat {
                     exec_nodes(&arm.body, env)?;
                     matched = true;
                     if pattern != "*" { break; }
                 }
             }
+            // Jesli nic nie dopasowano, uruchom wildcard *
+            if !matched {
+                for arm in arms {
+                    if arm.pattern.trim() == "*" {
+                        exec_nodes(&arm.body, env)?;
+                        break;
+                    }
+                }
+            }
             Ok(ExecResult::ok())
         }
 
-        // Gen 2 — $( expr ) -> @var
         Node::Arithmetic { expr, assign_to } => {
             let expanded = env.interpolate(expr);
             let result   = eval_arithmetic(&expanded, env)?;
             if let Some(var) = assign_to {
                 env.set_var(var, Value::String(result.clone()));
+            } else {
+                println!("{}", result);
             }
-            println!("{}", result);
             Ok(ExecResult::ok())
         }
 
-        // Gen 2 — > cmd |> @var
         Node::PipeToVar { command, mode, var_name } => {
+            // Interpoluj polecenie (zawsze — bo |> sluzy do pobierania danych)
+            let interpolate = matches!(mode, CommandMode::WithVars | CommandMode::WithVarsSudo | CommandMode::WithVarsIsolated);
             let sudo = matches!(mode, CommandMode::Sudo | CommandMode::IsolatedSudo | CommandMode::WithVarsSudo);
-            let r = run_command(command, sudo, false, env, true)?;
+            let isolated = matches!(mode, CommandMode::Isolated | CommandMode::IsolatedSudo | CommandMode::WithVarsIsolated);
+
+            let r = run_command(command, sudo, isolated, interpolate || true, env, true)?;
             let output = r.stdout.unwrap_or_default().trim().to_string();
             env.set_var(var_name, Value::String(output));
             Ok(ExecResult { exit_code: r.exit_code, stdout: None })
         }
 
-        // Gen 2 — || tool args (HackerOS API)
         Node::HackerOsApi { tool, args } => {
             let bin = tool.binary_name();
             let args_str = env.resolve_string_parts(args);
             let args_str = args_str.trim();
 
-            // Sprawdz czy narzedzie jest dostepne
             if which::which(bin).is_err() {
                 eprintln!("\x1b[33m[hl ||]\x1b[0m Narzedzie '{}' nie jest zainstalowane.", bin);
                 eprintln!("        Zainstaluj przez: hpkg install {} lub lpm install {}", bin, bin);
@@ -380,9 +413,9 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             debug!("hackeros-api: {} {}", bin, args_str);
 
             let r = if args_str.is_empty() {
-                run_command(bin, false, false, env, false)
+                run_command(bin, false, false, false, env, false)
             } else {
-                run_command(&format!("{} {}", bin, args_str), false, false, env, false)
+                run_command(&format!("{} {}", bin, args_str), false, false, false, env, false)
             }?;
             Ok(r)
         }
@@ -391,76 +424,97 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
     }
 }
 
-// ── Ewaluacja arytmetyki (gen 2) ─────────────────────────────────────────────
-// Uzywa sh -c "echo $(( expr ))" jako prosty backend
+// ── Arytmetyka ────────────────────────────────────────────────────────────────
 fn eval_arithmetic(expr: &str, env: &mut Env) -> Result<String> {
     let expanded = env.interpolate(expr);
-    // Zastap zmienne HL (@var) ich wartosciami
     let expr_clean = expanded.trim();
 
-    // Uzyj powloki do obliczen
+    // Prosta arytmetyka liczb calkowitych bez wywolania powloki
+    if let Some(result) = try_simple_arithmetic(expr_clean) {
+        return Ok(result);
+    }
+
     let sh_expr = format!("echo $(( {} ))", expr_clean);
     let out = Command::new("sh")
-        .args(["-c", &sh_expr])
-        .output()
-        .map_err(|e| anyhow::anyhow!("Arytmetyka: {}", e))?;
+    .args(["-c", &sh_expr])
+    .output()
+    .map_err(|e| anyhow::anyhow!("Arytmetyka: {}", e))?;
 
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        // Fallback: sprobuj jako float przez python3
-        let py_expr = format!("python3 -c \"print({})\"", expr_clean);
-        let out2 = Command::new("sh").args(["-c", &py_expr]).output();
-        match out2 {
-            Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
-            _ => bail!("Nie mozna obliczyc wyrazenia: {}", expr_clean),
-        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() { return Ok(s); }
+    }
+
+    // Fallback python3
+    let py_expr = format!("python3 -c \"print({})\"", expr_clean);
+    let out2 = Command::new("sh").args(["-c", &py_expr]).output();
+    match out2 {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        _ => bail!("Nie mozna obliczyc wyrazenia: {}", expr_clean),
     }
 }
 
-// ── Ewaluacja warunku while (gen 2) ──────────────────────────────────────────
-// Obsluguje: @var == val, @var != val, @var > val, @var < val,
-//            @var >= val, @var <= val, ::exists @path, exit 0, itp.
+/// Prosta arytmetyka bez wywolania powloki — dla wydajnosci
+fn try_simple_arithmetic(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    // a op b
+    for op in &['+', '-', '*', '/'] {
+        if let Some(pos) = expr.rfind(*op) {
+            if pos == 0 { continue; }
+            let left  = expr[..pos].trim();
+            let right = expr[pos+1..].trim();
+            let l: f64 = left.parse().ok()?;
+            let r: f64 = right.parse().ok()?;
+            let result = match op {
+                '+' => l + r,
+                '-' => l - r,
+                '*' => l * r,
+                '/' => { if r == 0.0 { return None; } l / r }
+                _   => return None,
+            };
+            if result.fract() == 0.0 {
+                return Some(format!("{}", result as i64));
+            }
+            return Some(format!("{}", result));
+        }
+    }
+    None
+}
+
+// ── Warunek while ─────────────────────────────────────────────────────────────
 fn eval_condition(cond: &str, env: &mut Env) -> Result<bool> {
     let cond = env.interpolate(cond);
     let cond = cond.trim();
 
-    // Pusty warunek = false
     if cond.is_empty() { return Ok(false); }
 
-    // == / != / < / > / >= / <=
+    // Operatory porownania — sprawdz od dluzszych do krotszych
     for op in &["==", "!=", ">=", "<=", ">", "<"] {
         if let Some(pos) = cond.find(op) {
-            let left  = cond[..pos].trim();
-            let right = cond[pos+op.len()..].trim();
-            let lv = env.get_var(left.trim_start_matches('@')).to_string_val();
-            let rv = right.trim_matches('"').to_string();
+            let left  = cond[..pos].trim().trim_start_matches('@');
+            let right = cond[pos+op.len()..].trim().trim_matches('"');
+            let lv = env.get_var(left).to_string_val();
+            let rv = right.to_string();
             return Ok(match *op {
                 "==" => lv == rv,
                 "!=" => lv != rv,
                 ">=" => lv.parse::<f64>().unwrap_or(0.0) >= rv.parse::<f64>().unwrap_or(0.0),
-                "<=" => lv.parse::<f64>().unwrap_or(0.0) <= rv.parse::<f64>().unwrap_or(0.0),
-                ">"  => lv.parse::<f64>().unwrap_or(0.0) >  rv.parse::<f64>().unwrap_or(0.0),
-                "<"  => lv.parse::<f64>().unwrap_or(0.0) <  rv.parse::<f64>().unwrap_or(0.0),
-                _    => false,
+                      "<=" => lv.parse::<f64>().unwrap_or(0.0) <= rv.parse::<f64>().unwrap_or(0.0),
+                      ">"  => lv.parse::<f64>().unwrap_or(0.0) >  rv.parse::<f64>().unwrap_or(0.0),
+                      "<"  => lv.parse::<f64>().unwrap_or(0.0) <  rv.parse::<f64>().unwrap_or(0.0),
+                      _    => false,
             });
         }
     }
 
-    // true / false
     if cond == "true"  { return Ok(true);  }
     if cond == "false" { return Ok(false); }
 
-    // @var (truthy check: niepusty i != "false" i != "0")
     if cond.starts_with('@') {
         let val = env.get_var(&cond[1..]).to_string_val();
         return Ok(!val.is_empty() && val != "false" && val != "0");
     }
 
-    // Fallback: uruchom jako komende przez sh, sprawdz exit code
-    let out = Command::new("sh").args(["-c", cond]).status();
-    match out {
-        Ok(s) => Ok(s.success()),
-        Err(_) => Ok(false),
-    }
+    // Fallback: komenda shell
+    Ok(Command::new("sh").args(["-c", cond]).status().map(|s| s.success()).unwrap_or(false))
 }
