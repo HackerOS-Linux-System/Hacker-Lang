@@ -3,11 +3,8 @@ use crate::import_spec::parse_import_line;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // Output
     Print(String),
-    // Quick functions
     QuickCall { name: String, args: String },
-    // Commands
     CmdIsolatedSudo(String),
     CmdWithVarsSudo(String),
     CmdWithVarsIsolated(String),
@@ -17,48 +14,32 @@ pub enum Token {
     Cmd(String),
     HshCmd(String),
     Background(String),
-    // Gen 2 — > cmd |> @var
     CmdPipeToVar { cmd: String, mode: PipeCmdMode, var_name: String },
-    // Gen 2 — || tool args
     HackerOsApi { tool: String, args: String },
-    // Variables
     VarDecl { name: String, typ: String, value: String },
     VarRef(String),
-    // Export
     ExportSingle { name: String, value: String },
     ExportListStart(String),
     ExportListItem(String),
     ExportListEnd,
-    // Dependencies / imports
     Dependency(String),
     Import { lib: String, detail: Option<String> },
     FileImport { path: String, detail: Option<String> },
-    // Functions
     FuncDef(String),
     FuncCall(String),
-    // Conditions
     IfOk,
     IfErr,
-    // Gen 2 — ?~ warunek (while)
     WhileStart(String),
-    // Gen 2 — ? switch @var (switch/match)
     SwitchStart(String),
-    // Gen 2 — | "pattern" lub | * (switch arm)
     SwitchArm { pattern: String },
-    // Gen 2 — for: @ item in lista
     ForIn { var: String, iterable: String },
-    // Gen 2 — arytmetyka: $( expr ) lub $( expr ) -> @var
     Arithmetic { expr: String, assign_to: Option<String> },
-    // Flow
     Done,
     Using(String),
-    // Gen 1 goroutines (poprawiona skladnia: :* nazwa def ... done)
     GoroutineStart { name: Option<String> },
     ChannelDecl(String),
     ChannelOp(String),
-    // Repeat
     RepeatN(u64),
-    // Misc
     Comments(CommentKind, String),
     Ident(String),
     StringLit(String),
@@ -69,7 +50,7 @@ pub enum Token {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PipeCmdMode { Plain, Sudo }
+pub enum PipeCmdMode { Plain, Sudo, WithVars }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommentKind { Line, Doc, Block }
@@ -100,7 +81,7 @@ impl Lexer {
     #[inline] pub fn peek(&self) -> Option<char> { self.source.get(self.pos).copied() }
     #[inline] pub fn peek_at(&self, n: usize) -> Option<char> { self.source.get(self.pos + n).copied() }
     #[inline] fn matches_seq(&self, seq: &[char]) -> bool {
-        self.source.get(self.pos..self.pos + seq.len()) == Some(seq)
+    self.source.get(self.pos..self.pos + seq.len()) == Some(seq)
     }
 
     #[inline]
@@ -127,7 +108,7 @@ impl Lexer {
 
     fn read_string_lit(&mut self) -> Result<String, LexError> {
         let start_line = self.line;
-        self.advance(); // skip opening "
+        self.advance();
         let mut s = String::with_capacity(64);
         loop {
             match self.advance() {
@@ -174,12 +155,28 @@ impl Lexer {
 
     fn read_cmd(&mut self) -> String { self.skip_ws(); self.read_line() }
 
-    /// Sprawdz czy linia zawiera |> @var — pipe do zmiennej (gen 2)
+    /// Sprawdz czy linia zawiera |> @var (pipe do zmiennej)
+    /// Zwraca (cmd_part, var_name) albo None
     fn split_pipe_to_var(line: &str) -> Option<(String, String)> {
-        if let Some(p) = line.find("|>") {
-            let cmd = line[..p].trim().to_string();
-            let var = line[p+2..].trim().trim_start_matches('@').to_string();
-            if !var.is_empty() && !cmd.is_empty() { return Some((cmd, var)); }
+        // Szukaj |> poza cudzyslowami
+        let bytes = line.as_bytes();
+        let mut in_sq = false;
+        let mut in_dq = false;
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            match bytes[i] {
+                b'\'' if !in_dq => in_sq = !in_sq,
+                b'"'  if !in_sq => in_dq = !in_dq,
+                b'|' if !in_sq && !in_dq && bytes[i+1] == b'>' => {
+                    let cmd = line[..i].trim().to_string();
+                    let var = line[i+2..].trim().trim_start_matches('@').to_string();
+                    if !var.is_empty() && !cmd.is_empty() {
+                        return Some((cmd, var));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
         }
         None
     }
@@ -228,7 +225,7 @@ impl Lexer {
                     tokens.push(Token::Print(self.read_line()));
                 }
 
-                // ── $( expr ) lub $( expr ) -> @var  — arytmetyka (gen 2) ───
+                // ── $( expr ) arytmetyka ──────────────────────────────────────
                 '$' if self.peek_at(1) == Some('(') => {
                     self.skip_n(2);
                     let mut expr = String::new();
@@ -246,7 +243,6 @@ impl Lexer {
                         }
                     }
                     self.skip_ws();
-                    // Opcjonalne -> @var
                     let assign_to = if self.matches_seq(&['-', '>']) {
                         self.skip_n(2); self.skip_ws();
                         if self.peek() == Some('@') { self.advance(); }
@@ -256,7 +252,7 @@ impl Lexer {
                     tokens.push(Token::Arithmetic { expr: expr.trim().to_string(), assign_to });
                 }
 
-                // ── || tool args  — HackerOS API (gen 2) ─────────────────────
+                // ── || HackerOS API ───────────────────────────────────────────
                 '|' if self.peek_at(1) == Some('|') => {
                     self.skip_n(2); self.skip_ws();
                     let mut tool = String::new();
@@ -265,11 +261,10 @@ impl Lexer {
                         else { break; }
                     }
                     self.skip_ws();
-                    let args = self.read_line();
-                    tokens.push(Token::HackerOsApi { tool, args });
+                    tokens.push(Token::HackerOsApi { tool, args: self.read_line() });
                 }
 
-                // ── | "pattern" / | *  — switch arm (gen 2) ─────────────────
+                // ── | switch arm ──────────────────────────────────────────────
                 '|' if self.peek_at(1) != Some('>') && self.peek_at(1) != Some('|') => {
                     self.advance(); self.skip_ws();
                     let line = self.read_line();
@@ -281,14 +276,14 @@ impl Lexer {
                     tokens.push(Token::SwitchArm { pattern });
                 }
 
-                // ── :** channel declaration ───────────────────────────────────
+                // ── :** channel ───────────────────────────────────────────────
                 ':' if self.matches_seq(&[':', '*', '*']) => {
                     self.skip_n(3); self.skip_ws();
                     tokens.push(Token::ChannelDecl(self.read_ident_full()));
                     self.read_line();
                 }
 
-                // ── :* nazwa def — goroutine (gen 1 + gen 2 z nazwa) ─────────
+                // ── :* goroutine ──────────────────────────────────────────────
                 ':' if self.matches_seq(&[':', '*']) => {
                     self.skip_n(2); self.skip_ws();
                     let rest = self.read_line();
@@ -316,19 +311,19 @@ impl Lexer {
                     else { tokens.push(Token::Ident(format!(":{} {}", name, kw))); }
                 }
 
-                // ── ;; komentarz liniowy ──────────────────────────────────────
+                // ── ;; komentarz ──────────────────────────────────────────────
                 ';' if self.peek_at(1) == Some(';') => {
                     self.skip_n(2);
                     tokens.push(Token::Comments(CommentKind::Line, self.read_line()));
                 }
 
-                // ── /// doc komentarz ─────────────────────────────────────────
+                // ── /// doc comment ───────────────────────────────────────────
                 '/' if self.matches_seq(&['/', '/', '/']) => {
                     self.skip_n(3);
                     tokens.push(Token::Comments(CommentKind::Doc, self.read_line()));
                 }
 
-                // ── // zaleznosc lub blok komentarz ──────────────────────────
+                // ── // zaleznosc lub blok ─────────────────────────────────────
                 '/' if self.matches_seq(&['/', '/']) => {
                     self.skip_n(2); self.skip_ws();
                     let rest: String = self.source[self.pos..].iter().collect();
@@ -341,7 +336,7 @@ impl Lexer {
                     }
                 }
 
-                // ── << import pliku ───────────────────────────────────────────
+                // ── << file import ────────────────────────────────────────────
                 '<' if self.peek_at(1) == Some('<') => {
                     self.skip_n(2); self.skip_ws();
                     let rest = self.read_line();
@@ -372,9 +367,21 @@ impl Lexer {
                     }
                 }
 
-                // ── Komendy ^>, ->, itp. ──────────────────────────────────────
+                // ── ^-> izolacja sudo ─────────────────────────────────────────
                 '^' if self.matches_seq(&['^', '-', '>']) => { self.skip_n(3); tokens.push(Token::CmdIsolatedSudo(self.read_cmd())); }
-                '^' if self.matches_seq(&['^', '>', '>']) => { self.skip_n(3); tokens.push(Token::CmdWithVarsSudo(self.read_cmd())); }
+
+                // ── ^>> sudo z vars ───────────────────────────────────────────
+                '^' if self.matches_seq(&['^', '>', '>']) => {
+                    self.skip_n(3);
+                    let line = self.read_cmd();
+                    if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
+                    } else {
+                        tokens.push(Token::CmdWithVarsSudo(line));
+                    }
+                }
+
+                // ── ^> sudo ───────────────────────────────────────────────────
                 '^' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2);
                     let line = self.read_cmd();
@@ -386,10 +393,32 @@ impl Lexer {
                 }
                 '^' => { self.advance(); }
 
-                '-' if self.matches_seq(&['-', '>', '>']) => { self.skip_n(3); tokens.push(Token::CmdWithVarsIsolated(self.read_cmd())); }
+                // ── ->> izolacja z vars ───────────────────────────────────────
+                '-' if self.matches_seq(&['-', '>', '>']) => {
+                    self.skip_n(3);
+                    let line = self.read_cmd();
+                    if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
+                    } else {
+                        tokens.push(Token::CmdWithVarsIsolated(line));
+                    }
+                }
+
+                // ── -> izolacja ───────────────────────────────────────────────
                 '-' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdIsolated(self.read_cmd())); }
 
-                '>' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdWithVars(self.read_cmd())); }
+                // ── >> komenda z vars ─────────────────────────────────────────
+                '>' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    let line = self.read_cmd();
+                    if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
+                    } else {
+                        tokens.push(Token::CmdWithVars(line));
+                    }
+                }
+
+                // ── > komenda ─────────────────────────────────────────────────
                 '>' => {
                     self.advance();
                     let line = self.read_cmd();
@@ -410,13 +439,13 @@ impl Lexer {
                     self.read_line();
                 }
 
-                // ── *> hsh command ────────────────────────────────────────────
+                // ── *> hsh ────────────────────────────────────────────────────
                 '*' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2); self.skip_ws();
                     tokens.push(Token::HshCmd(self.read_line()));
                 }
 
-                // ── _N repeat lub _var (VarRef) ───────────────────────────────
+                // ── _N repeat lub _var VarRef ─────────────────────────────────
                 '_' => {
                     self.advance();
                     let mut num_str = String::new();
@@ -424,55 +453,50 @@ impl Lexer {
                         if c.is_ascii_digit() { num_str.push(c); self.advance(); } else { break; }
                     }
                     if !num_str.is_empty() {
-                        // Sprawdz czy po cyfrach nie ma liter (np. _1abc to nie repeat)
-                        let next_is_alnum = self.peek().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
+                        let next_is_alnum = self.peek()
+                        .map(|c| c.is_alphanumeric() || c == '_')
+                        .unwrap_or(false);
                         if !next_is_alnum {
                             tokens.push(Token::RepeatN(num_str.parse().unwrap_or(1)));
                             continue;
                         }
-                        // Jesli po cyfrach sa litery, traktuj jako VarRef
-                        let mut id = String::from("_");
-                        id.push_str(&num_str);
+                        let mut id = format!("_{}", num_str);
                         id.push_str(&self.read_ident_full());
                         tokens.push(Token::VarRef(id));
                     } else {
-                        // _ bez cyfr — VarRef (np. _d, _result, __var)
                         let rest = self.read_ident_full();
                         if rest.is_empty() {
-                            // Samotny _ — ignoruj
                             tokens.push(Token::Comments(CommentKind::Line, String::new()));
                         } else {
-                            let id = format!("_{}", rest);
-                            tokens.push(Token::VarRef(id));
+                            tokens.push(Token::VarRef(format!("_{}", rest)));
                         }
                     }
                 }
 
-                // ── @ item in lista  — for-in (gen 2) ────────────────────────
+                // ── @ var lub @ item in lista ─────────────────────────────────
                 '@' => {
                     self.advance();
                     let name = self.read_ident_full();
                     self.skip_ws();
                     let looks_like_for = {
-                        let mut tmp_pos = self.pos;
+                        let mut tmp = self.pos;
                         let mut kw = String::new();
-                        while tmp_pos < self.source.len() && (self.source[tmp_pos].is_alphabetic()) {
-                            kw.push(self.source[tmp_pos]);
-                            tmp_pos += 1;
+                        while tmp < self.source.len() && self.source[tmp].is_alphabetic() {
+                            kw.push(self.source[tmp]);
+                            tmp += 1;
                         }
                         kw == "in"
                     };
                     if looks_like_for {
                         let _in_kw = self.read_ident();
                         self.skip_ws();
-                        let iterable = self.read_line();
-                        tokens.push(Token::ForIn { var: name, iterable });
+                        tokens.push(Token::ForIn { var: name, iterable: self.read_line() });
                     } else {
                         tokens.push(Token::VarRef(name));
                     }
                 }
 
-                // ── % var lub % var: typ = val ────────────────────────────────
+                // ── % zmienna ─────────────────────────────────────────────────
                 '%' => {
                     self.advance(); self.skip_ws();
                     let name = self.read_ident_full(); self.skip_ws();
@@ -509,9 +533,7 @@ impl Lexer {
                 // ── # import ─────────────────────────────────────────────────
                 '#' => {
                     self.advance();
-                    // Sprawdz shebang (#!)
                     if self.peek() == Some('!') {
-                        // Shebang — traktuj jako komentarz liniowy
                         tokens.push(Token::Comments(CommentKind::Line, self.read_line()));
                         continue;
                     }
