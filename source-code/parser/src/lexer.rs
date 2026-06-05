@@ -574,6 +574,19 @@ impl Lexer {
 
                 '=' => { self.advance(); }
 
+                // '.' — moze pojawic sie w sciezkach (np. ./main.hl)
+                // traktujemy jako poczatek sciezki/identyfikatora
+                '.' => {
+                    let mut path = String::from(".");
+                    self.advance();
+                    while let Some(c) = self.peek() {
+                        if c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_') {
+                            path.push(c); self.advance();
+                        } else { break; }
+                    }
+                    tokens.push(Token::Ident(path));
+                }
+
                 _ => {
                     let (l, c) = (self.line, self.col);
                     self.advance();
