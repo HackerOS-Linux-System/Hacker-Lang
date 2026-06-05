@@ -228,6 +228,7 @@ impl Parser {
             Token::Bool(_) | Token::Number(_) | Token::Ident(_) |
             Token::StringLit(_)                                  => { self.advance(); Ok(None) }
 
+            #[allow(unreachable_patterns)]
             tok => {
                 let pos = self.pos; self.advance();
                 Err(ParseError::UnexpectedToken(pos, format!("{:?}", tok)))
