@@ -1,5 +1,6 @@
 use colored::Colorize;
 use std::fmt;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiagLevel { Error, Warning, Hint, Note }
@@ -81,29 +82,44 @@ impl<'a> DiagRenderer<'a> {
 
 pub fn lint_source(source: &str) -> Vec<Diag> {
     let mut diags = Vec::new();
+
+    // ── OPTYMALIZACJA: jednorazowy pre-pass dla deklaracji narzedzi ────────────
+    // Poprzednio: O(n^2) - dla kazdej linii komendy iterowalo wszystkie linie
+    // Teraz: O(n) - jeden HashSet zbierany na poczatku
+    let declared_tools: HashSet<&str> = source.lines()
+    .filter_map(|l| {
+        let t = l.trim();
+        // linia // narzedzie (nie ///, nie blok komentarz z \\)
+        if t.starts_with("//") && !t.starts_with("///") && !t.ends_with("\\\\") {
+            let tool = t[2..].trim();
+            if !tool.is_empty() && !tool.contains(' ') { Some(tool) } else { None }
+        } else { None }
+    })
+    .collect();
+
     for (idx, raw_line) in source.lines().enumerate() {
         let line_no = idx + 1;
         let trimmed = raw_line.trim();
 
-        // echo zakazane
+        // echo zakazane w blokach >
         if let Some(rest) = strip_cmd_prefix(trimmed, ">") {
             let rest = rest.trim();
             if rest.starts_with("echo ") || rest == "echo" {
                 let msg = rest.trim_start_matches("echo").trim();
                 let col = raw_line.find('>').map(|c| c+1).unwrap_or(1);
                 diags.push(Diag::error("`echo` jest zabronione w blokach komend HL")
-                    .with_span(Span::new(line_no, col, trimmed.len()))
-                    .with_suggestion(if msg.is_empty() { "uzyj: `~>`".into() } else { format!("zamien na: `~> {}`", msg) })
-                    .with_note("operator `~>` to jedyny sposob wypisywania tekstu w HL"));
+                .with_span(Span::new(line_no, col, trimmed.len()))
+                .with_suggestion(if msg.is_empty() { "uzyj: `~>`".into() } else { format!("zamien na: `~> {}`", msg) })
+                .with_note("operator `~>` to jedyny sposob wypisywania tekstu w HL"));
             }
             // sudo zamiast ^>
             if rest.starts_with("sudo ") {
                 let actual_cmd = rest.trim_start_matches("sudo").trim();
                 let col = raw_line.find('>').map(|c| c+1).unwrap_or(1);
-                diags.push(Diag::warning(format!("`> sudo` — uzyj operatora `^>`"))
-                    .with_span(Span::new(line_no, col, trimmed.len()))
-                    .with_suggestion(format!("zamien na: `^> {}`", actual_cmd))
-                    .with_note("`^>` to natywny odpowiednik sudo w HL"));
+                diags.push(Diag::warning("`> sudo` — uzyj operatora `^>`".to_string())
+                .with_span(Span::new(line_no, col, trimmed.len()))
+                .with_suggestion(format!("zamien na: `^> {}`", actual_cmd))
+                .with_note("`^>` to natywny odpowiednik sudo w HL"));
             }
         }
 
@@ -111,41 +127,41 @@ pub fn lint_source(source: &str) -> Vec<Diag> {
         if trimmed.starts_with('%') {
             if let Some(eq_pos) = trimmed.find('=') {
                 let varname = trimmed[1..eq_pos].trim().trim_end_matches(':')
-                    .split(':').next().unwrap_or("").trim();
-                let env_vars = ["PATH","HOME","USER","SHELL","LANG","LD_LIBRARY_PATH",
-                                "JAVA_HOME","GOPATH","CARGO_HOME","PYTHONPATH"];
-                if env_vars.contains(&varname) {
+                .split(':').next().unwrap_or("").trim();
+                const ENV_VARS: &[&str] = &["PATH","HOME","USER","SHELL","LANG","LD_LIBRARY_PATH",
+                "JAVA_HOME","GOPATH","CARGO_HOME","PYTHONPATH"];
+                if ENV_VARS.contains(&varname) {
                     let col = raw_line.find('%').map(|c| c+1).unwrap_or(1);
                     diags.push(Diag::hint(format!("`%{}` to zmienna lokalna HL — uzyj `=>` dla exportu", varname))
-                        .with_span(Span::new(line_no, col, trimmed.len()))
-                        .with_suggestion(format!("zamien na: `=> {} = <wartosc>`", varname)));
+                    .with_span(Span::new(line_no, col, trimmed.len()))
+                    .with_suggestion(format!("zamien na: `=> {} = <wartosc>`", varname)));
                 }
             }
         }
 
-        // Sugestia dla narzedzi bez zaleznosci
-        lazy_check_missing_dep(trimmed, line_no, source, &mut diags);
+        // Sprawdz narzedzia — uzywa pre-obliczonego HashSet (O(1) lookup)
+        check_missing_dep_fast(trimmed, line_no, &declared_tools, &mut diags);
     }
     diags
 }
 
-fn lazy_check_missing_dep(line: &str, line_no: usize, source: &str, diags: &mut Vec<Diag>) {
+/// Sprawdz czy narzedzie jest uzywane bez deklaracji //
+/// Uzywa przekazanego HashSet zamiast skanowac cale zrodlo (O(1) vs O(n))
+fn check_missing_dep_fast(line: &str, line_no: usize, declared: &HashSet<&str>, diags: &mut Vec<Diag>) {
     const WATCHED: &[&str] = &["nmap","curl","wget","whois","john","hydra","sqlmap",
-                                "nikto","masscan","aircrack-ng","hashcat","git","python3"];
-    let cmd_content = if let Some(r) = strip_cmd_prefix(line,">>") { r.to_string() }
-        else if let Some(r) = strip_cmd_prefix(line,">")   { r.to_string() }
-        else if let Some(r) = strip_cmd_prefix(line,"->")  { r.to_string() }
-        else if let Some(r) = strip_cmd_prefix(line,"^>")  { r.to_string() }
-        else { return };
+    "nikto","masscan","aircrack-ng","hashcat","git","python3"];
+    let cmd_content = if let Some(r) = strip_cmd_prefix(line, ">>") { r.to_string() }
+    else if let Some(r) = strip_cmd_prefix(line, ">")   { r.to_string() }
+    else if let Some(r) = strip_cmd_prefix(line, "->")  { r.to_string() }
+    else if let Some(r) = strip_cmd_prefix(line, "^>")  { r.to_string() }
+    else { return };
+
     let first_word = cmd_content.trim().split_whitespace().next().unwrap_or("");
     if let Some(&tool) = WATCHED.iter().find(|&&t| t == first_word) {
-        let declared = source.lines().enumerate().any(|(i, l)| {
-            i + 1 < line_no && { let t = l.trim(); t.starts_with("//") && !t.ends_with("\\\\") && t.contains(tool) }
-        });
-        if !declared {
+        if !declared.contains(tool) {
             diags.push(Diag::hint(format!("narzedzie `{}` uzyte bez `// {}`", tool, tool))
-                .with_span(Span::new(line_no, 1, line.len()))
-                .with_suggestion(format!("dodaj: `// {}`", tool)));
+            .with_span(Span::new(line_no, 1, line.len()))
+            .with_suggestion(format!("dodaj: `// {}`", tool)));
         }
     }
 }
@@ -153,7 +169,7 @@ fn lazy_check_missing_dep(line: &str, line_no: usize, source: &str, diags: &mut 
 fn strip_cmd_prefix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let line = line.trim();
     if prefix == ">>" && (line.starts_with("^>>") || line.starts_with("->>")) { return None; }
-    if prefix == ">" && (line.starts_with(">>") || line.starts_with("^>") || line.starts_with("->") || line.starts_with("*>")) { return None; }
+    if prefix == ">"  && (line.starts_with(">>") || line.starts_with("^>") || line.starts_with("->") || line.starts_with("*>")) { return None; }
     if prefix == "->" && line.starts_with("^->") { return None; }
     if line.starts_with(prefix) { Some(&line[prefix.len()..]) } else { None }
 }
@@ -189,28 +205,28 @@ pub fn parse_error_to_diag(err: &ParseError) -> Diag {
     match err {
         ParseError::Lex(e) => lex_error_to_diag(e),
         ParseError::UnexpectedToken(pos, tok) => Diag::error(format!("nieoczekiwany token `{}` (pozycja {})", tok, pos))
-            .with_suggestion("sprawdz skladnie — kazda linia powinna zaczynac sie od operatora"),
+        .with_suggestion("sprawdz skladnie — kazda linia powinna zaczynac sie od operatora"),
         ParseError::MissingDone => Diag::error("brakujace `done` — blok nie jest zamkniety")
-            .with_suggestion("dodaj `done` na koncu bloku"),
+        .with_suggestion("dodaj `done` na koncu bloku"),
         ParseError::MissingDef  => Diag::error("brakujace `def` po nazwie funkcji")
-            .with_suggestion("poprawna skladnia: `: nazwa_funkcji def`"),
+        .with_suggestion("poprawna skladnia: `: nazwa_funkcji def`"),
         ParseError::MissingExportListEnd => Diag::error("brakujace `]` — lista eksportu nie jest zamknieta")
-            .with_suggestion("dodaj `]` na koncu listy"),
+        .with_suggestion("dodaj `]` na koncu listy"),
         ParseError::Gen(gen_err) => Diag::error(format!("blad deklaracji gena: {}", gen_err))
-            .with_suggestion("poprawna skladnia: `using <gen 2>`"),
+        .with_suggestion("poprawna skladnia: `using <gen 2>`"),
     }
 }
 
 pub fn lex_error_to_diag(err: &LexError) -> Diag {
     match err {
         LexError::UnexpectedChar(ch, line, col) => Diag::error(format!("nieoczekiwany znak `{}` w linii {}:{}", ch, line, col))
-            .with_span(Span::new(*line, *col, 1))
-            .with_suggestion("usun lub zastap nieznany znak"),
+        .with_span(Span::new(*line, *col, 1))
+        .with_suggestion("usun lub zastap nieznany znak"),
         LexError::UnterminatedString(line) => Diag::error("niezamkniety string")
-            .with_span(Span::line_only(*line))
-            .with_suggestion("dodaj `\"` na koncu stringa"),
+        .with_span(Span::line_only(*line))
+        .with_suggestion("dodaj `\"` na koncu stringa"),
         LexError::UnterminatedBlockComment => Diag::error("niezamkniety komentarz blokowy")
-            .with_suggestion("zamknij komentarz: `//  tresc  \\\\`"),
+        .with_suggestion("zamknij komentarz: `//  tresc  \\\\`"),
     }
 }
 
@@ -220,22 +236,22 @@ pub fn lint_gen(source: &str) -> Vec<Diag> {
     let (_gen, gen_err) = extract_gen(source);
     if let Some(err) = gen_err {
         diags.push(Diag::error(format!("nieprawidlowa deklaracja gena: {}", err))
-            .with_suggestion(format!("poprawna skladnia: `using <gen 2>`  (max gen: {})", HL_MAX_GEN)));
+        .with_suggestion(format!("poprawna skladnia: `using <gen 2>`  (max gen: {})", HL_MAX_GEN)));
         return diags;
     }
     let mut seen_code = false;
     for (idx, raw_line) in source.lines().enumerate() {
         let t = raw_line.trim();
         if t.starts_with("#!") || t.starts_with(";;") || t.starts_with("///") || t.starts_with("//") || t.is_empty() { continue; }
-        if t.starts_with("using") {
-            if seen_code {
-                diags.push(Diag::warning("deklaracja `using` po kodzie — gen moze nie byc uwzgledniony")
+            if t.starts_with("using") {
+                if seen_code {
+                    diags.push(Diag::warning("deklaracja `using` po kodzie — gen moze nie byc uwzgledniony")
                     .with_span(Span::new(idx+1, 1, t.len()))
                     .with_suggestion("umies `using <gen N>` na samym poczatku pliku"));
+                }
+                continue;
             }
-            continue;
-        }
-        seen_code = true;
+            seen_code = true;
     }
     diags
 }
