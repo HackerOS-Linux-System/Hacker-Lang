@@ -19,51 +19,71 @@ impl ExecResult {
     #[inline] pub fn is_ok(&self) -> bool { self.exit_code == 0 }
 }
 
-/// Sprawdz czy komenda to wbudowany exit
+// ── Wbudowany exit ────────────────────────────────────────────────────────────
 #[inline]
 fn try_builtin_exit(cmd: &str) -> Option<i32> {
     let t = cmd.trim();
     if t == "exit" { return Some(0); }
     if let Some(rest) = t.strip_prefix("exit ") {
-        let code = rest.trim().parse::<i32>().unwrap_or(1);
-        return Some(code);
+        return Some(rest.trim().parse::<i32>().unwrap_or(1));
     }
     None
 }
 
+// ── Sprawdz czy komenda wymaga powloki ────────────────────────────────────────
 #[inline]
 fn needs_shell(cmd: &str) -> bool {
-    cmd.contains("&&") || cmd.contains("||")
-    || cmd.contains(" | ") || cmd.starts_with("| ")
-    || cmd.contains(';')
-    || cmd.contains(" > ") || cmd.contains(" >> ") || cmd.contains(" < ")
-    || cmd.contains('`') || cmd.contains("$(")
-    || cmd.contains("$HOME") || cmd.contains("$USER") || cmd.contains("$PATH")
-    || cmd.contains("$1") || cmd.contains("$2") || cmd.contains("${")
-    || (cmd.contains('*') && !cmd.contains("://"))
+    // Szybka sciezka - scan jednym przebiegiem
+    let b = cmd.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'&' | b';' | b'`' => return true,
+            b'|' if i + 1 < b.len() && b[i+1] != b'>' => return true,
+            b'>' if i + 1 < b.len() && (b[i+1] == b'>' || b[i+1] == b' ') => return true,
+            b'<' if i + 1 < b.len() && b[i+1] == b' ' => return true,
+            b'$' if i + 1 < b.len() && b[i+1] == b'(' => return true,
+            b'*' if i + 1 < b.len() => {
+                // nie traktuj :// jako glob
+                if i + 2 < b.len() && b[i+1] != b'/' { return true; }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    // Zmienne srodowiskowe
+    cmd.contains("$HOME") || cmd.contains("$USER") || cmd.contains("$PATH")
+    || cmd.contains("$1") || cmd.contains("${")
 }
 
+// ── Podział na slowa (szybki, bez alokacji gdzie mozna) ──────────────────────
 #[inline]
 fn shell_words(s: &str) -> SmallVec<[String; 8]> {
     let mut words: SmallVec<[String; 8]> = SmallVec::new();
-    let mut cur  = String::with_capacity(32);
+    let mut cur   = String::with_capacity(32);
     let (mut in_s, mut in_d) = (false, false);
+    // Sladz czy bylismy w cudzyslowie (zeby zachowac puste stringy "")
+    let mut had_quote = false;
     for c in s.chars() {
         match c {
-            '\'' if !in_d => in_s = !in_s,
-            '"'  if !in_s => in_d = !in_d,
+            '\'' if !in_d => { in_s = !in_s; had_quote = true; }
+            '"'  if !in_s => { in_d = !in_d; had_quote = true; }
             ' ' | '\t' if !in_s && !in_d => {
-                if !cur.is_empty() { words.push(std::mem::take(&mut cur)); cur = String::with_capacity(32); }
+                // Zachowaj puste slowo jesli bylo w cudzyslowie (np. "" lub '')
+                if !cur.is_empty() || had_quote {
+                    words.push(std::mem::take(&mut cur));
+                    cur = String::with_capacity(32);
+                    had_quote = false;
+                }
             }
             _ => cur.push(c),
         }
     }
-    if !cur.is_empty() { words.push(cur); }
+    if !cur.is_empty() || had_quote { words.push(cur); }
     words
 }
 
 fn run_command(raw: &str, sudo: bool, isolated: bool, interpolate: bool, env: &mut Env, capture: bool) -> Result<ExecResult> {
-    // Interpoluj jesli potrzeba (>> albo explicite)
     let expanded = if interpolate || raw.contains('@') {
         env.interpolate(raw)
     } else {
@@ -72,7 +92,6 @@ fn run_command(raw: &str, sudo: bool, isolated: bool, interpolate: bool, env: &m
     let trimmed = expanded.trim();
     debug!("run: {}", trimmed);
 
-    // Wbudowany exit
     if let Some(code) = try_builtin_exit(trimmed) {
         std::process::exit(code);
     }
@@ -84,13 +103,11 @@ fn run_command(raw: &str, sudo: bool, isolated: bool, interpolate: bool, env: &m
 }
 
 fn run_via_shell(cmd: &str, sudo: bool, isolated: bool, capture: bool) -> Result<ExecResult> {
-    let sh_args  = vec!["-c".to_string(), cmd.to_string()];
-    let iso_args = vec!["--mount".to_string(),"--pid".into(),"--net".into(),"--fork".into(),"--".into(),"sh".into(),"-c".into(),cmd.to_string()];
     let (prog, args): (String, Vec<String>) = match (sudo, isolated) {
-        (false, false) => ("sh".into(), sh_args),
-        (true,  false) => ("sudo".into(), { let mut a = vec!["sh".into(),"-c".into()]; a.push(cmd.to_string()); a }),
-        (false, true)  => ("unshare".into(), iso_args),
-        (true,  true)  => ("sudo".into(), { let mut a = vec!["unshare".into()]; a.extend(iso_args); a }),
+        (false, false) => ("sh".into(), vec!["-c".into(), cmd.into()]),
+        (true,  false) => ("sudo".into(), vec!["sh".into(), "-c".into(), cmd.into()]),
+        (false, true)  => ("unshare".into(), vec!["--mount".into(),"--pid".into(),"--net".into(),"--fork".into(),"--".into(),"sh".into(),"-c".into(),cmd.into()]),
+        (true,  true)  => ("sudo".into(), vec!["unshare".into(),"--mount".into(),"--pid".into(),"--net".into(),"--fork".into(),"--".into(),"sh".into(),"-c".into(),cmd.into()]),
     };
     exec_process(prog, args, capture)
 }
@@ -110,13 +127,11 @@ fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecRe
     cmd.args(&args).stdin(Stdio::inherit());
     if capture {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let out  = cmd.output()?;
-        let code = out.status.code().unwrap_or(1);
-        return Ok(ExecResult { exit_code: code, stdout: Some(String::from_utf8_lossy(&out.stdout).into_owned()) });
+        let out = cmd.output()?;
+        return Ok(ExecResult { exit_code: out.status.code().unwrap_or(1), stdout: Some(String::from_utf8_lossy(&out.stdout).into_owned()) });
     }
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    let code = cmd.status()?.code().unwrap_or(1);
-    Ok(ExecResult { exit_code: code, stdout: None })
+    Ok(ExecResult { exit_code: cmd.status()?.code().unwrap_or(1), stdout: None })
 }
 
 fn resolve_export_value(val: &ExportValue, env: &mut Env) -> String {
@@ -126,6 +141,8 @@ fn resolve_export_value(val: &ExportValue, env: &mut Env) -> String {
     }
 }
 
+// ── Glowna petla wykonania ─────────────────────────────────────────────────────
+// Iteracyjna zamiast rekurencyjnej - eliminuje przepelnienie stosu dla duzych skryptow
 pub fn exec_nodes(nodes: &[Node], env: &mut Env) -> Result<ExecResult> {
     let mut last = ExecResult::ok();
     for node in nodes {
@@ -141,8 +158,17 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         Node::LineComment(_) | Node::DocComment(_) | Node::BlockComment(_) => Ok(ExecResult::ok()),
 
         Node::Print { parts } => {
-            let msg = env.resolve_string_parts(parts);
-            println!("{}", msg);
+            // Szybka sciezka dla literalow bez interpolacji
+            let has_vars = parts.iter().any(|p| matches!(p, StringPart::Var(_)));
+            if has_vars {
+                println!("{}", env.resolve_string_parts(parts));
+            } else {
+                // Tylko literaly - laczymy bez alokacji posrednich
+                let total: usize = parts.iter().map(|p| if let StringPart::Literal(s) = p { s.len() } else { 0 }).sum();
+                let mut out = String::with_capacity(total);
+                for p in parts { if let StringPart::Literal(s) = p { out.push_str(s); } }
+                println!("{}", out);
+            }
             Ok(ExecResult::ok())
         }
 
@@ -150,16 +176,10 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
 
         Node::Command { raw, mode, .. } => {
             let trimmed = raw.trim();
-
-            // Wbudowany exit (np. > exit 1)
-            if let Some(code) = try_builtin_exit(trimmed) {
-                std::process::exit(code);
-            }
-
+            if let Some(code) = try_builtin_exit(trimmed) { std::process::exit(code); }
             if trimmed.starts_with("echo ") || trimmed == "echo" {
                 bail!("'echo' jest zabroniony. Uzyj '~>'.");
             }
-
             let (sudo, isolated, interpolate) = match mode {
                 CommandMode::Plain            => (false, false, false),
                 CommandMode::Sudo             => (true,  false, false),
@@ -174,9 +194,8 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
 
         Node::HshCommand { raw } => {
             let expanded = env.interpolate(raw);
-            let cmd = expanded.trim();
             let status = Command::new("hsh")
-            .args(["-c", cmd])
+            .args(["-c", expanded.trim()])
             .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
             .status()
             .map_err(|e| anyhow::anyhow!("hsh nie znaleziony: {}", e))?;
@@ -211,11 +230,8 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
                 bail!("Import: plik nie istnieje: '{}'", expanded);
             }
             let src = std::fs::read_to_string(&expanded)?;
-            if let Some(d) = detail {
-                env.set_var("_import_detail", Value::String(d.clone()));
-            }
-            let nodes = hl_parser::parse_source(&src)?;
-            exec_nodes(&nodes, env)
+            if let Some(d) = detail { env.set_var("_import_detail", Value::String(d.clone())); }
+            exec_nodes(&hl_parser::parse_source(&src)?, env)
         }
 
         Node::Goroutine { name, body } => {
@@ -223,9 +239,7 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             let name_str   = name.clone().unwrap_or_else(|| "<goroutine>".to_string());
             let mut thread_env = Env::new();
             for (k, v) in &env.vars { thread_env.vars.insert(k.clone(), v.clone()); }
-            std::thread::spawn(move || {
-                let _ = exec_nodes(&body_clone, &mut thread_env);
-            });
+            std::thread::spawn(move || { let _ = exec_nodes(&body_clone, &mut thread_env); });
             eprintln!("\x1b[35m[hl :*] goroutine '{}' uruchomiona\x1b[0m", name_str);
             Ok(ExecResult::ok())
         }
@@ -238,8 +252,8 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         Node::ChannelOp { name, value } => {
             let chan_var = format!("__chan_{}", name);
             if let Some(parts) = value {
-                let val = env.resolve_string_parts(parts);
-                env.set_var(&chan_var, Value::String(val));
+                let resolved = env.resolve_string_parts(parts);
+                env.set_var(&chan_var, Value::String(resolved));
             } else {
                 println!("{}", env.get_var(&chan_var).to_string_val());
             }
@@ -247,35 +261,7 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         }
 
         Node::VarDecl { name, typ: _typ, value } => {
-            let val = match value {
-                VarValue::String(s)        => Value::String(s.clone()),
-                VarValue::Int(n)           => Value::Number(*n as f64),
-                VarValue::Float(n)         => Value::Number(*n),
-                VarValue::Number(n)        => Value::Number(*n),
-                VarValue::Bool(b)          => Value::Bool(*b),
-                VarValue::Interpolated(p)  => Value::String(env.resolve_string_parts(p)),
-                VarValue::CmdOutput(cmd)   => {
-                    let r = run_command(cmd, false, false, true, env, true)?;
-                    Value::String(r.stdout.unwrap_or_default().trim().to_string())
-                }
-                VarValue::Arithmetic(expr) => {
-                    let expanded = env.interpolate(expr);
-                    let result   = eval_arithmetic(&expanded, env)?;
-                    Value::String(result)
-                }
-                VarValue::List(items) => {
-                    let parts: Vec<Value> = items.iter().map(|v| match v {
-                        VarValue::String(s)  => Value::String(s.clone()),
-                                                             VarValue::Int(n)     => Value::Number(*n as f64),
-                                                             VarValue::Float(n)   => Value::Number(*n),
-                                                             VarValue::Number(n)  => Value::Number(*n),
-                                                             VarValue::Bool(b)    => Value::Bool(*b),
-                                                             _                    => Value::Nil,
-                    }).collect();
-                    Value::List(parts)
-                }
-                VarValue::Map(_) => Value::String(String::new()),
-            };
+            let val = eval_var_value(value, env)?;
             env.set_var(name, val);
             Ok(ExecResult::ok())
         }
@@ -337,14 +323,14 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
 
         Node::WhileLoop { condition, body } => {
             let mut iterations = 0usize;
-            const MAX_ITER: usize = 100_000;
+            const MAX_ITER: usize = 1_000_000;
             loop {
                 if iterations >= MAX_ITER {
                     bail!("Petla while: przekroczono limit {} iteracji", MAX_ITER);
                 }
                 iterations += 1;
                 let cond_str = env.resolve_string_parts(condition);
-                if !eval_condition(&cond_str, env)? { break; }
+                if !eval_condition_fast(&cond_str, env)? { break; }
                 let r = exec_nodes(body, env)?;
                 env.last_exit = r.exit_code;
             }
@@ -354,23 +340,19 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         Node::MatchExpr { subject, arms } => {
             let subj = env.resolve_string_parts(subject);
             let mut matched = false;
-            for arm in arms {
+            let mut wildcard_idx = None;
+            for (i, arm) in arms.iter().enumerate() {
                 let pattern = arm.pattern.trim();
-                let pat_resolved = env.interpolate(pattern);
-                let matches_pat = pattern == "*" || pat_resolved == subj || pattern == subj;
-                if matches_pat {
+                if pattern == "*" { wildcard_idx = Some(i); continue; }
+                if pattern == subj || env.interpolate(pattern) == subj {
                     exec_nodes(&arm.body, env)?;
                     matched = true;
-                    if pattern != "*" { break; }
+                    break;
                 }
             }
-            // Jesli nic nie dopasowano, uruchom wildcard *
             if !matched {
-                for arm in arms {
-                    if arm.pattern.trim() == "*" {
-                        exec_nodes(&arm.body, env)?;
-                        break;
-                    }
+                if let Some(idx) = wildcard_idx {
+                    exec_nodes(&arms[idx].body, env)?;
                 }
             }
             Ok(ExecResult::ok())
@@ -378,7 +360,8 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
 
         Node::Arithmetic { expr, assign_to } => {
             let expanded = env.interpolate(expr);
-            let result   = eval_arithmetic(&expanded, env)?;
+            let result   = eval_arithmetic_fast(&expanded);
+            let result = result.unwrap_or_else(|| eval_arithmetic_shell(&expanded));
             if let Some(var) = assign_to {
                 env.set_var(var, Value::String(result.clone()));
             } else {
@@ -388,12 +371,10 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         }
 
         Node::PipeToVar { command, mode, var_name } => {
-            // Interpoluj polecenie (zawsze — bo |> sluzy do pobierania danych)
-            let interpolate = matches!(mode, CommandMode::WithVars | CommandMode::WithVarsSudo | CommandMode::WithVarsIsolated);
-            let sudo = matches!(mode, CommandMode::Sudo | CommandMode::IsolatedSudo | CommandMode::WithVarsSudo);
+            let interpolate = true; // PipeToVar zawsze interpoluje
+            let sudo     = matches!(mode, CommandMode::Sudo | CommandMode::IsolatedSudo | CommandMode::WithVarsSudo);
             let isolated = matches!(mode, CommandMode::Isolated | CommandMode::IsolatedSudo | CommandMode::WithVarsIsolated);
-
-            let r = run_command(command, sudo, isolated, interpolate || true, env, true)?;
+            let r = run_command(command, sudo, isolated, interpolate, env, true)?;
             let output = r.stdout.unwrap_or_default().trim().to_string();
             env.set_var(var_name, Value::String(output));
             Ok(ExecResult { exit_code: r.exit_code, stdout: None })
@@ -403,113 +384,222 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
             let bin = tool.binary_name();
             let args_str = env.resolve_string_parts(args);
             let args_str = args_str.trim();
-
             if which::which(bin).is_err() {
                 eprintln!("\x1b[33m[hl ||]\x1b[0m Narzedzie '{}' nie jest zainstalowane.", bin);
-                eprintln!("        Zainstaluj przez: hpkg install {} lub lpm install {}", bin, bin);
                 return Ok(ExecResult::err(127));
             }
-
-            debug!("hackeros-api: {} {}", bin, args_str);
-
-            let r = if args_str.is_empty() {
-                run_command(bin, false, false, false, env, false)
-            } else {
-                run_command(&format!("{} {}", bin, args_str), false, false, false, env, false)
-            }?;
-            Ok(r)
+            let cmd = if args_str.is_empty() { bin.to_string() } else { format!("{} {}", bin, args_str) };
+            run_command(&cmd, false, false, false, env, false)
         }
 
         Node::Block(nodes) => exec_nodes(nodes, env),
     }
 }
 
-// ── Arytmetyka ────────────────────────────────────────────────────────────────
-fn eval_arithmetic(expr: &str, env: &mut Env) -> Result<String> {
-    let expanded = env.interpolate(expr);
-    let expr_clean = expanded.trim();
+// ── Ewaluacja wartosci zmiennej ───────────────────────────────────────────────
+fn eval_var_value(value: &VarValue, env: &mut Env) -> Result<Value> {
+    Ok(match value {
+        VarValue::String(s)       => Value::String(s.clone()),
+       VarValue::Int(n)          => Value::Number(*n as f64),
+       VarValue::Float(n)        => Value::Number(*n),
+       VarValue::Number(n)       => Value::Number(*n),
+       VarValue::Bool(b)         => Value::Bool(*b),
+       VarValue::Interpolated(p) => Value::String(env.resolve_string_parts(p)),
+       VarValue::CmdOutput(cmd)  => {
+           let r = run_command(cmd, false, false, true, env, true)?;
+           Value::String(r.stdout.unwrap_or_default().trim().to_string())
+       }
+       VarValue::Arithmetic(expr) => {
+           let expanded = env.interpolate(expr);
+           let result = eval_arithmetic_fast(&expanded)
+           .unwrap_or_else(|| eval_arithmetic_shell(&expanded));
+           Value::String(result)
+       }
+       VarValue::List(items) => {
+           Value::List(items.iter().map(|v| match v {
+               VarValue::String(s) => Value::String(s.clone()),
+                                        VarValue::Int(n)    => Value::Number(*n as f64),
+                                        VarValue::Float(n)  => Value::Number(*n),
+                                        VarValue::Number(n) => Value::Number(*n),
+                                        VarValue::Bool(b)   => Value::Bool(*b),
+                                        _                   => Value::Nil,
+           }).collect())
+       }
+       VarValue::Map(_) => Value::String(String::new()),
+    })
+}
 
-    // Prosta arytmetyka liczb calkowitych bez wywolania powloki
-    if let Some(result) = try_simple_arithmetic(expr_clean) {
-        return Ok(result);
-    }
+// ── NATYWNA ARYTMETYKA (bez powloki) — GLOWNA OPTYMALIZACJA ──────────────────
+//
+// Obsluguje: +, -, *, /, %, ** z nawiasami i zmiennymi @var
+// Zwraca None jesli wyrazenie zbyt skomplikowane (fallback do sh)
+pub fn eval_arithmetic_fast(expr: &str) -> Option<String> {
+    let e = expr.trim();
+    if e.is_empty() { return Some("0".to_string()); }
 
-    let sh_expr = format!("echo $(( {} ))", expr_clean);
-    let out = Command::new("sh")
-    .args(["-c", &sh_expr])
-    .output()
-    .map_err(|e| anyhow::anyhow!("Arytmetyka: {}", e))?;
-
-    if out.status.success() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !s.is_empty() { return Ok(s); }
-    }
-
-    // Fallback python3
-    let py_expr = format!("python3 -c \"print({})\"", expr_clean);
-    let out2 = Command::new("sh").args(["-c", &py_expr]).output();
-    match out2 {
-        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
-        _ => bail!("Nie mozna obliczyc wyrazenia: {}", expr_clean),
+    // Prosta ewaluacja przez wbudowany parser
+    match eval_expr(e) {
+        Some(v) => {
+            if v.fract() == 0.0 && v.abs() < 1e15 {
+                Some(format!("{}", v as i64))
+            } else {
+                Some(format!("{}", v))
+            }
+        }
+        None => None,
     }
 }
 
-/// Prosta arytmetyka bez wywolania powloki — dla wydajnosci
-fn try_simple_arithmetic(expr: &str) -> Option<String> {
-    let expr = expr.trim();
-    // a op b
-    for op in &['+', '-', '*', '/'] {
-        if let Some(pos) = expr.rfind(*op) {
-            if pos == 0 { continue; }
-            let left  = expr[..pos].trim();
-            let right = expr[pos+1..].trim();
-            let l: f64 = left.parse().ok()?;
-            let r: f64 = right.parse().ok()?;
-            let result = match op {
-                '+' => l + r,
-                '-' => l - r,
-                '*' => l * r,
-                '/' => { if r == 0.0 { return None; } l / r }
-                _   => return None,
-            };
-            if result.fract() == 0.0 {
-                return Some(format!("{}", result as i64));
+// Rekurencyjny descent parser dla wyrazen arytmetycznych
+// Obsluguje: +, -, *, /, %, nawiasy, liczby, zmienne juz rozwiazane
+fn eval_expr(s: &str) -> Option<f64> {
+    let s = s.trim();
+    eval_additive(s, &mut 0)
+}
+
+fn eval_additive(s: &str, _: &mut usize) -> Option<f64> {
+    let bytes = s.as_bytes();
+    // Znajdz ostatni + lub - poza nawiasami (dla lewostronnosci)
+    let mut depth = 0i32;
+    let mut last_add = None;
+    let mut last_sub = None;
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' => depth -= 1,
+            b'+' if depth == 0 && i > 0 => { last_add = Some(i); break; }
+            b'-' if depth == 0 && i > 0 && bytes[i-1] != b'*' && bytes[i-1] != b'/' => {
+                last_sub = Some(i); break;
             }
-            return Some(format!("{}", result));
+            _ => {}
         }
     }
+
+    // Wybierz ostatni operator + lub -
+    let split_at = match (last_add, last_sub) {
+        (Some(a), Some(b)) => Some(if a > b { (a, '+') } else { (b, '-') }),
+        (Some(a), None)    => Some((a, '+')),
+        (None, Some(b))    => Some((b, '-')),
+        _                  => None,
+    };
+
+    if let Some((pos, op)) = split_at {
+        let left  = eval_multiplicative(s[..pos].trim())?;
+        let right = eval_multiplicative(s[pos+1..].trim())?;
+        return Some(if op == '+' { left + right } else { left - right });
+    }
+
+    eval_multiplicative(s)
+}
+
+fn eval_multiplicative(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut split = None;
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' => depth -= 1,
+            b'*' if depth == 0 && i + 1 < bytes.len() && bytes[i+1] != b'*' => {
+                split = Some((i, '*')); break;
+            }
+            b'/' if depth == 0 => { split = Some((i, '/')); break; }
+            b'%' if depth == 0 => { split = Some((i, '%')); break; }
+            _ => {}
+        }
+    }
+
+    if let Some((pos, op)) = split {
+        let left  = eval_unary(s[..pos].trim())?;
+        let right = eval_unary(s[pos+1..].trim())?;
+        return Some(match op {
+            '*' => left * right,
+            '/' => if right == 0.0 { 0.0 } else { left / right },
+            '%' => if right == 0.0 { 0.0 } else { (left as i64 % right as i64) as f64 },
+                    _   => 0.0,
+        });
+    }
+
+    eval_unary(s)
+}
+
+fn eval_unary(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.starts_with('-') {
+        return Some(-eval_atom(s[1..].trim())?);
+    }
+    eval_atom(s)
+}
+
+fn eval_atom(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() { return None; }
+
+    // Nawiasy
+    if s.starts_with('(') && s.ends_with(')') {
+        return eval_expr(&s[1..s.len()-1]);
+    }
+
+    // Liczba
+    if let Ok(n) = s.parse::<f64>() { return Some(n); }
+
     None
 }
 
-// ── Warunek while ─────────────────────────────────────────────────────────────
-fn eval_condition(cond: &str, env: &mut Env) -> Result<bool> {
+// Fallback do powloki gdy wyrazenie zbyt skomplikowane
+fn eval_arithmetic_shell(expr: &str) -> String {
+    let sh_expr = format!("echo $(( {} ))", expr);
+    if let Ok(out) = Command::new("sh").args(["-c", &sh_expr]).output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() && s != "0" || expr.trim() == "0" { return s; }
+        }
+    }
+    "0".to_string()
+}
+
+// ── WARUNEK WHILE — NAPRAWIONY ────────────────────────────────────────────────
+//
+// KLUCZOWA POPRAWKA: operatory wieloznakowe (>=, <=, ==, !=)
+// muszą byc sprawdzone PRZED jednoznakowymi (>, <)
+// Poprzednia implementacja: find(">") trafialo na ">" w ">=" -> right = "= 3" -> bug!
+fn eval_condition_fast(cond: &str, env: &mut Env) -> Result<bool> {
     let cond = env.interpolate(cond);
     let cond = cond.trim();
 
     if cond.is_empty() { return Ok(false); }
+    if cond == "true"  { return Ok(true);  }
+    if cond == "false" { return Ok(false); }
 
-    // Operatory porownania — sprawdz od dluzszych do krotszych
-    for op in &["==", "!=", ">=", "<=", ">", "<"] {
-        if let Some(pos) = cond.find(op) {
-            let left  = cond[..pos].trim().trim_start_matches('@');
-            let right = cond[pos+op.len()..].trim().trim_matches('"');
-            let lv = env.get_var(left).to_string_val();
-            let rv = right.to_string();
+    // KOLEJNOSC: najpierw dwuznakowe, potem jednoznakowe!
+    // Unikamy: find(">") trafiajacego na ">" z ">="
+    const OPS: &[&str] = &["==", "!=", ">=", "<=", ">", "<"];
+
+    for op in OPS {
+        // Szukaj operatora NIE bedacego czescia dluzszego operatora
+        if let Some(pos) = find_operator(cond, op) {
+            let left_raw  = cond[..pos].trim();
+            let right_raw = cond[pos + op.len()..].trim().trim_matches('"');
+
+            let lv = if left_raw.starts_with('@') {
+                env.get_var(&left_raw[1..]).to_string_val()
+            } else {
+                left_raw.to_string()
+            };
+
             return Ok(match *op {
-                "==" => lv == rv,
-                "!=" => lv != rv,
-                ">=" => lv.parse::<f64>().unwrap_or(0.0) >= rv.parse::<f64>().unwrap_or(0.0),
-                      "<=" => lv.parse::<f64>().unwrap_or(0.0) <= rv.parse::<f64>().unwrap_or(0.0),
-                      ">"  => lv.parse::<f64>().unwrap_or(0.0) >  rv.parse::<f64>().unwrap_or(0.0),
-                      "<"  => lv.parse::<f64>().unwrap_or(0.0) <  rv.parse::<f64>().unwrap_or(0.0),
+                "==" => lv == right_raw,
+                "!=" => lv != right_raw,
+                ">=" => lv.parse::<f64>().unwrap_or(0.0) >= right_raw.parse::<f64>().unwrap_or(0.0),
+                      "<=" => lv.parse::<f64>().unwrap_or(0.0) <= right_raw.parse::<f64>().unwrap_or(0.0),
+                      ">"  => lv.parse::<f64>().unwrap_or(0.0) >  right_raw.parse::<f64>().unwrap_or(0.0),
+                      "<"  => lv.parse::<f64>().unwrap_or(0.0) <  right_raw.parse::<f64>().unwrap_or(0.0),
                       _    => false,
             });
         }
     }
 
-    if cond == "true"  { return Ok(true);  }
-    if cond == "false" { return Ok(false); }
-
+    // @var — truthy check
     if cond.starts_with('@') {
         let val = env.get_var(&cond[1..]).to_string_val();
         return Ok(!val.is_empty() && val != "false" && val != "0");
@@ -517,4 +607,26 @@ fn eval_condition(cond: &str, env: &mut Env) -> Result<bool> {
 
     // Fallback: komenda shell
     Ok(Command::new("sh").args(["-c", cond]).status().map(|s| s.success()).unwrap_or(false))
+}
+
+/// Znajdz operator w stringu, ale nie jako czesc dluzszego operatora
+/// Np. szukajac ">" w "@a >= 3" NIE trafia na ">" z ">="
+fn find_operator(s: &str, op: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let op_b = op.as_bytes();
+    let op_len = op_b.len();
+    let mut i = 0;
+    while i + op_len <= b.len() {
+        if &b[i..i+op_len] == op_b {
+            // Sprawdz czy nie jest czescia dluzszego operatora
+            let ok = match op {
+                ">" => i + 1 >= b.len() || b[i+1] != b'=',
+                "<" => i + 1 >= b.len() || b[i+1] != b'=',
+                _   => true, // dla ==, !=, >=, <= nie ma dluzszych wariantow
+            };
+            if ok { return Some(i); }
+        }
+        i += 1;
+    }
+    None
 }
