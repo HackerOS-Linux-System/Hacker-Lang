@@ -610,3 +610,5 @@ Hacker Lang jest częścią projektu HackerOS.
 * Autorzy: HackerOS Team <hackeros068@gmail.com>
 * Repozytorium: https://github.com/HackerOS-Linux-System/Hacker-Lang
 * HackerOS: https://github.com/HackerOS-Linux-System
+
+Library index for Hacker Lang is bit.io: https://github.com/bit-io
