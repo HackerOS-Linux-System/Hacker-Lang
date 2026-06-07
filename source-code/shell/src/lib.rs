@@ -4,7 +4,7 @@ pub mod prompt;
 
 use anyhow::Result;
 use colored::Colorize;
-use hl_core::diagnostics::{parse_error_to_diag, DiagRenderer, DiagSummary, lint_source};
+use hl_core::diagnostics::{parse_error_to_diag, DiagRenderer, DiagSummary, lint_source, lint_gen};
 use hl_core::env::Env;
 use hl_core::{check_source, run_source};
 use rustyline::error::ReadlineError;
@@ -29,8 +29,8 @@ pub fn run_as_shell(config: Option<&Path>, env: &mut Env) -> Result<()> {
         dirs::home_dir().unwrap_or_default().join(HLRC_FILE)
     });
     if rc_path.exists() {
-        let rc_src  = std::fs::read_to_string(&rc_path).unwrap_or_default();
-        let fname   = rc_path.to_string_lossy().into_owned();
+        let rc_src = std::fs::read_to_string(&rc_path).unwrap_or_default();
+        let fname  = rc_path.to_string_lossy().into_owned();
         execute_source(&rc_src, &fname, env);
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -42,10 +42,10 @@ pub fn run_as_shell(config: Option<&Path>, env: &mut Env) -> Result<()> {
 
 fn run_editor_loop(env: &mut Env, ctx: &str, show_hint: bool) -> Result<()> {
     let config = Config::builder()
-        .history_ignore_space(true)
-        .completion_type(CompletionType::List)
-        .edit_mode(EditMode::Emacs)
-        .build();
+    .history_ignore_space(true)
+    .completion_type(CompletionType::List)
+    .edit_mode(EditMode::Emacs)
+    .build();
 
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(HlCompleter::new()));
@@ -117,9 +117,10 @@ pub fn execute_source(source: &str, filename: &str, env: &mut Env) {
         BuiltinResult::NotBuiltin    => {}
     }
 
+    // Szybki linter - O(n) dzieki HashSet
     let renderer = DiagRenderer::new(filename, source);
     let mut lint_diags = lint_source(source);
-    lint_diags.extend(hl_core::lint_gen(source));
+    lint_diags.extend(lint_gen(source));
     if !lint_diags.is_empty() {
         renderer.emit_all(&lint_diags);
         let sum = DiagSummary::from_diags(&lint_diags);
@@ -142,13 +143,16 @@ pub fn execute_source(source: &str, filename: &str, env: &mut Env) {
     }
 }
 
+/// Kluczowa funkcja: run_file bez O(n^2) lintera
+/// Uzywa nowego lint_source z HashSet (O(n))
 pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
     let source   = std::fs::read_to_string(path)?;
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("<unknown>");
     let renderer = DiagRenderer::new(filename, &source);
 
+    // O(n) linter - bez O(n^2) z oryginalnego kodu
     let mut lint_diags = lint_source(&source);
-    lint_diags.extend(hl_core::lint_gen(&source));
+    lint_diags.extend(lint_gen(&source));
     if !lint_diags.is_empty() {
         renderer.emit_all(&lint_diags);
         let sum = DiagSummary::from_diags(&lint_diags);
@@ -164,33 +168,29 @@ pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
         Ok(r)  => Ok(r.exit_code),
         Err(e) => {
             let d = hl_core::Diag::error(e.to_string())
-                .with_note(format!("blad runtime w '{}'", filename));
+            .with_note(format!("blad runtime w '{}'", filename));
             renderer.emit(&d); Ok(1)
         }
     }
 }
 
-/// Wykryj poczatek bloku (wiele linii) — gen 1 + gen 2
 fn is_block_start(line: &str) -> bool {
-    // gen 1
     let is_func_def = line.starts_with(':') && !line.starts_with("::") && !line.starts_with(":*") && line.ends_with("def");
     let is_goroutine = line.starts_with(":*");
     let is_cond = line.starts_with("? ok") || line.starts_with("? err");
-    // gen 2
     let is_for_in  = line.starts_with('@') && line.contains(" in ");
     let is_while   = line.starts_with("?~");
     let is_switch  = line.starts_with("? switch");
-
     is_func_def || is_goroutine || is_cond || is_for_in || is_while || is_switch
 }
 
 fn print_banner() {
     println!("{}", r#"
-  ██╗  ██╗ █████╗  ██████╗██╗  ██╗███████╗██████╗
-  ██║  ██║██╔══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗
-  ███████║███████║██║     █████╔╝ █████╗  ██████╔╝
-  ██╔══██║██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
-  ██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
-  ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-  L A N G  gen 2  --  REPL"#.bright_cyan().bold());
+    ██╗  ██╗ █████╗  ██████╗██╗  ██╗███████╗██████╗
+    ██║  ██║██╔══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗
+    ███████║███████║██║     █████╔╝ █████╗  ██████╔╝
+    ██╔══██║██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
+    ██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
+    ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
+    L A N G  gen 2  --  REPL"#.bright_cyan().bold());
 }
