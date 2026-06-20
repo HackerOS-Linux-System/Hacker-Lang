@@ -115,21 +115,20 @@ impl Lowerer {
             }
 
             Node::Command { raw, mode, .. } => {
-                let cmd_reg = self.alloc_reg();
-                let cmd_idx = self.module.consts.add_str(raw.as_str());
-                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                // Interpoluj @VAR w komendzie — parse_string_parts rozbija na literały i zmienne
+                let parts = hl_parser::ast::parse_string_parts(raw);
+                let cmd_reg = self.lower_string_parts(&parts);
                 let dst = self.alloc_reg();
                 let mode = lower_cmd_mode(mode);
                 self.emit(Instruction::ExecCmd { cmd: cmd_reg, mode, dst });
-                // exit code trafia do last_exit przez SetVar
                 let le_idx = self.module.consts.add_str("_last_exit_code");
                 self.emit(Instruction::SetVar { name: le_idx, src: dst });
             }
 
             Node::PipeToVar { command, mode, var_name } => {
-                let cmd_reg = self.alloc_reg();
-                let cmd_idx = self.module.consts.add_str(command.as_str());
-                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                // Interpoluj @VAR w komendzie
+                let parts = hl_parser::ast::parse_string_parts(command);
+                let cmd_reg = self.lower_string_parts(&parts);
                 let dst_ec  = self.alloc_reg();
                 let dst_out = self.alloc_reg();
                 let mode = lower_cmd_mode(mode);
@@ -301,11 +300,15 @@ impl Lowerer {
             }
 
             Node::HshCommand { raw } => {
-                // hsh -c "cmd" — traktuj jak zwykłą komendę z trybem Plain
-                let cmd_str = format!("hsh -c {}", raw);
+                // Interpoluj @VAR, dodaj prefix hsh -c
+                let inner_parts = hl_parser::ast::parse_string_parts(raw);
+                let inner_reg = self.lower_string_parts(&inner_parts);
+                // Prefix "hsh -c "
+                let prefix_idx = self.module.consts.add_str("hsh -c ");
+                let prefix_reg = self.alloc_reg();
+                self.emit(Instruction::LoadStr { dst: prefix_reg, idx: prefix_idx });
                 let cmd_reg = self.alloc_reg();
-                let cmd_idx = self.module.consts.add_str(&cmd_str);
-                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                self.emit(Instruction::Concat { dst: cmd_reg, parts: vec![prefix_reg, inner_reg] });
                 let dst = self.alloc_reg();
                 self.emit(Instruction::ExecCmd { cmd: cmd_reg, mode: CmdMode::Plain, dst });
                 let le_idx = self.module.consts.add_str("_last_exit_code");
@@ -313,27 +316,43 @@ impl Lowerer {
             }
 
             Node::Background { raw } => {
-                let cmd_str = format!("& {}", raw);
+                // Interpoluj @VAR, dodaj prefix &
+                let inner_parts = hl_parser::ast::parse_string_parts(raw);
+                let inner_reg = self.lower_string_parts(&inner_parts);
+                let prefix_idx = self.module.consts.add_str("& ");
+                let prefix_reg = self.alloc_reg();
+                self.emit(Instruction::LoadStr { dst: prefix_reg, idx: prefix_idx });
                 let cmd_reg = self.alloc_reg();
-                let cmd_idx = self.module.consts.add_str(&cmd_str);
-                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                self.emit(Instruction::Concat { dst: cmd_reg, parts: vec![prefix_reg, inner_reg] });
                 let dst = self.alloc_reg();
                 self.emit(Instruction::ExecCmd { cmd: cmd_reg, mode: CmdMode::Plain, dst });
             }
 
             Node::FileImport { path, .. } => {
-                // Inline import — w kompilatorze oznaczamy placeholder
-                // Runtime JIT obsługuje FileImport bezpośrednio
-                let cmd_str = format!("__hl_import__ {}", path);
+                // Interpoluj @VAR w ścieżce importu
+                let inner_parts = hl_parser::ast::parse_string_parts(path);
+                let inner_reg = self.lower_string_parts(&inner_parts);
+                let prefix_idx = self.module.consts.add_str("__hl_import__ ");
+                let prefix_reg = self.alloc_reg();
+                self.emit(Instruction::LoadStr { dst: prefix_reg, idx: prefix_idx });
                 let cmd_reg = self.alloc_reg();
-                let cmd_idx = self.module.consts.add_str(&cmd_str);
-                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                self.emit(Instruction::Concat { dst: cmd_reg, parts: vec![prefix_reg, inner_reg] });
                 let dst = self.alloc_reg();
                 self.emit(Instruction::ExecCmd { cmd: cmd_reg, mode: CmdMode::Plain, dst });
             }
 
             Node::Import { .. } | Node::Dependency { .. } => {
                 // Resolved at load-time przez JIT runtime
+            }
+
+            // <* katalog — resolved at load-time (jak FileImport)
+            Node::DirImport { path } => {
+                let cmd_str = format!("__hl_dirimport__ {}", path);
+                let cmd_reg = self.alloc_reg();
+                let cmd_idx = self.module.consts.add_str(&cmd_str);
+                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                let dst = self.alloc_reg();
+                self.emit(Instruction::ExecCmd { cmd: cmd_reg, mode: CmdMode::Plain, dst });
             }
 
             Node::Goroutine { name: _, body } => {
@@ -466,9 +485,9 @@ impl Lowerer {
                 self.lower_arithmetic(expr)
             }
             VarValue::CmdOutput(cmd) => {
-                let cmd_reg = self.alloc_reg();
-                let cmd_idx = self.module.consts.add_str(cmd.as_str());
-                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: cmd_idx });
+                // Interpoluj @VAR w komendzie
+                let parts = hl_parser::ast::parse_string_parts(cmd);
+                let cmd_reg = self.lower_string_parts(&parts);
                 let dst_ec  = self.alloc_reg();
                 let dst_out = self.alloc_reg();
                 self.emit(Instruction::ExecCapture {
