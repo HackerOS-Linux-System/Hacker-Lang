@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 [dependencies]
 hl-parser            = { path = "../parser" }
 hl-compiler          = { path = "../compiler" }
+hl-core              = { path = "../core" }
 anyhow.workspace     = true
 thiserror.workspace  = true
 tracing.workspace    = true
@@ -26,3 +27,4 @@ cranelift-module.workspace   = true
 cranelift-native.workspace   = true
 bincode.workspace    = true
 memmap2.workspace    = true
+
