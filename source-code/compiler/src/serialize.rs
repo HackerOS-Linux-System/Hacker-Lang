@@ -3,7 +3,7 @@ use crate::bytecode::{HlBcHeader, HlModule};
 use std::path::Path;
 
 pub const BC_MAGIC: &[u8; 4] = b"HLBC";
-pub const BC_VERSION: u32 = 2;
+pub const BC_VERSION: u32 = 3; // bump: fix @VAR interpolation in commands
 
 /// Shebang dla pliku .bc — `hl run` uruchamia bytecode przez JIT
 const BC_SHEBANG: &str = "#!/usr/bin/env -S /usr/bin/hl run\n";
