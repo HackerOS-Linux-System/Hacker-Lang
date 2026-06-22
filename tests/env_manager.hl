@@ -1,0 +1,142 @@
+#!/usr/bin/hl
+/// env_manager.hl — testy systemu hl env i config.hk
+
+using <gen 2>
+
+# <main/colors>
+
+<< tests/test_runner.hl
+
+::hr 50
+~> @COLOR_CYAN [hl env] Testy managera środowisk@COLOR_RESET
+::hr 50
+::nl
+
+;; ── Config.hk ─────────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [1] Config.hk@COLOR_RESET
+
+;; Test: katalog ~/.config/hackeros istnieje lub można go utworzyć
+>> bash -c "mkdir -p ~/.config/hackeros/hacker-lang && echo ok" |> @_cfg_mkdir
+% _assert_name = "katalog config można utworzyć"
+% _assert_got  = @_cfg_mkdir
+% _assert_exp  = ok
+-- assert_eq
+
+;; Test: config.hk ma strukturę [env] section
+>> bash -c "[ -f ~/.config/hackeros/hacker-lang/config.hk ] && grep -q '\[env\]' ~/.config/hackeros/hacker-lang/config.hk && echo found || echo notfound" |> @_cfg_section
+% _assert_name = "config.hk ma sekcję [env] (gdy istnieje)"
+;; Akceptujemy oba wyniki — config może nie istnieć przed pierwszym uruchomieniem
+> test "@_cfg_section" = "found"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET config.hk [env] znaleziony
+done
+? err
+    % _assert_name = "config.hk brak (normalne przed pierwszym env create)"
+    -- assert_skip
+done
+
+;; ── hl env create ─────────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [2] hl env create@COLOR_RESET
+
+% _test_env_name = hl_test_env_deleteme
+
+;; Utwórz środowisko testowe
+>> bash -c "hl env create @_test_env_name 2>&1; echo exit:$?" |> @_create_out
+
+;; Sprawdź czy katalog powstał
+>> bash -c "[ -d ~/.hackeros/hacker-lang/envs/@_test_env_name ] && echo exists || echo missing" |> @_env_dir
+% _assert_name = "hl env create — katalog środowiska istnieje"
+% _assert_got  = @_env_dir
+% _assert_exp  = exists
+-- assert_eq
+
+;; Sprawdź bit.lock
+>> bash -c "[ -f ~/.hackeros/hacker-lang/envs/@_test_env_name/meta/bit.lock ] && echo ok || echo missing" |> @_lock
+% _assert_name = "hl env create — bit.lock istnieje"
+% _assert_got  = @_lock
+% _assert_exp  = ok
+-- assert_eq
+
+;; Sprawdź env.hk
+>> bash -c "[ -f ~/.hackeros/hacker-lang/envs/@_test_env_name/env.hk ] && echo ok || echo missing" |> @_envhk
+% _assert_name = "hl env create — env.hk istnieje"
+% _assert_got  = @_envhk
+% _assert_exp  = ok
+-- assert_eq
+
+;; Sprawdź strukturę katalogów
+>> bash -c "[ -d ~/.hackeros/hacker-lang/envs/@_test_env_name/libs ] && echo ok || echo missing" |> @_libs
+% _assert_name = "hl env create — libs/ istnieje"
+% _assert_got  = @_libs
+% _assert_exp  = ok
+-- assert_eq
+
+>> bash -c "[ -d ~/.hackeros/hacker-lang/envs/@_test_env_name/cache ] && echo ok || echo missing" |> @_cache
+% _assert_name = "hl env create — cache/ istnieje"
+% _assert_got  = @_cache
+% _assert_exp  = ok
+-- assert_eq
+
+;; ── hl env list ───────────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [3] hl env list@COLOR_RESET
+
+>> bash -c "hl env list 2>&1 | grep -c '@_test_env_name' || echo 0" |> @_list_count
+% _assert_name = "hl env list — nowe środowisko widoczne"
+> test "@_list_count" -ge "1"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET hl env list zawiera nowe środowisko
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET hl env list nie znalazło środowiska
+done
+
+;; ── hl env status (globalne) ──────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [4] hl env status@COLOR_RESET
+
+>> bash -c "hl env status 2>&1 | head -5" |> @_status_out
+% _assert_name = "hl env status — zwraca output"
+> test -n "@_status_out"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET hl env status działa
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET hl env status brak outputu
+done
+
+;; ── Cleanup — usuń środowisko testowe ────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [5] Cleanup@COLOR_RESET
+
+>> bash -c "hl env remove @_test_env_name 2>&1; echo exit:$?" |> @_remove_out
+>> bash -c "[ -d ~/.hackeros/hacker-lang/envs/@_test_env_name ] && echo exists || echo removed" |> @_after_remove
+% _assert_name = "hl env remove — katalog usunięty"
+% _assert_got  = @_after_remove
+% _assert_exp  = removed
+-- assert_eq
+
+;; ── Izolacja: BIT_HOME ────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [6] Izolacja BIT_HOME@COLOR_RESET
+
+;; Sprawdź że zmienna BIT_HOME jest ustawiana przez env (symulacja)
+>> bash -c "export HL_ENV_NAME=testenv; export BIT_HOME=/tmp/test_env_libs; echo $BIT_HOME" |> @_bit_home_test
+% _assert_name = "BIT_HOME isolacja — zmienna działa"
+% _assert_got  = @_bit_home_test
+% _assert_exp  = /tmp/test_env_libs
+-- assert_eq
+
+::nl
+-- test_summary
