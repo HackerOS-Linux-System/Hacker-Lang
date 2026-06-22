@@ -1,0 +1,143 @@
+#!/usr/bin/hl
+/// Testy systemu importów modułów (gen 2)
+;;; << plik (bez końcówki) i <* katalog
+
+using <gen 2>
+
+% pass = 0
+% fail = 0
+
+: chk def
+    > test "@_got" = "@_exp"
+    ? ok
+        $(@pass + 1) -> @pass
+        ::green PASS — @_name
+    done
+    ? err
+        $(@fail + 1) -> @fail
+        ::red FAIL — @_name  got=[@_got]  exp=[@_exp]
+    done
+done
+
+::hr 50
+::cyan Testy importow modulow (gen 2)
+::hr 50
+::nl
+
+;; ── Przygotowanie struktury katalogów ────────────────────────────────────────
+> bash -c "mkdir -p /tmp/hl_mod_test/utils"
+
+;; Utwórz moduł utils/math.hl
+> bash -c "printf 'using <gen 2>\n% MATH_PI = 3\n% MATH_E = 2\n: add def\n    \$(@_a + @_b) -> @_sum\ndone\n' > /tmp/hl_mod_test/utils/math.hl"
+
+;; Utwórz moduł utils/str_utils.hl
+> bash -c "printf 'using <gen 2>\n% STR_EMPTY = \"\"\n: greet def\n    ~> Hello @_who\ndone\n' > /tmp/hl_mod_test/utils/str_utils.hl"
+
+;; Utwórz utils/imports.hl (odpowiednik mod.rs)
+> bash -c "printf 'using <gen 2>\n;; utils/imports.hl — lista modulow w tym katalogu\n<< math.hl\n<< str_utils.hl\n' > /tmp/hl_mod_test/utils/imports.hl"
+
+;; Utwórz plik pomocniczy do testu << bez końcówki
+> bash -c "printf 'using <gen 2>\n% HELPER_LOADED = true\n% HELPER_VALUE = from_helper\n' > /tmp/hl_mod_test/helper.hl"
+
+::nl
+
+;; ── Test 1: << plik.hl (z rozszerzeniem — klasyczny) ─────────────────────────
+::bold [1] << plik.hl (z rozszerzeniem)
+
+<< /tmp/hl_mod_test/helper.hl
+
+% _name = "<< z rozszerzeniem"
+% _got = @HELPER_LOADED
+% _exp = true
+-- chk
+
+% _name = "<< wartosc zaladowana"
+% _got = @HELPER_VALUE
+% _exp = from_helper
+-- chk
+
+;; ── Test 2: << plik (bez rozszerzenia — gen 2) ───────────────────────────────
+::bold [2] << plik (bez rozszerzenia)
+
+;; Reset zmiennych
+% HELPER_LOADED = false
+% HELPER_VALUE = empty
+
+<< /tmp/hl_mod_test/helper
+
+% _name = "<< bez rozszerzenia"
+% _got = @HELPER_LOADED
+% _exp = true
+-- chk
+
+% _name = "<< bez .hl — wartosc"
+% _got = @HELPER_VALUE
+% _exp = from_helper
+-- chk
+
+;; ── Test 3: <* katalog z imports.hl ─────────────────────────────────────────
+::bold [3] <* katalog (imports.hl)
+
+<* /tmp/hl_mod_test/utils
+
+% _name = "<* katalog — math.hl zaladowany (MATH_PI)"
+% _got = @MATH_PI
+% _exp = 3
+-- chk
+
+% _name = "<* katalog — str_utils.hl zaladowany (STR_EMPTY)"
+% _got = @STR_EMPTY
+% _exp = ""
+-- chk
+
+;; ── Test 4: Funkcje z załadowanego modułu ────────────────────────────────────
+::bold [4] Funkcje z modulu
+
+% _a = 5
+% _b = 7
+-- add
+
+% _name = "funkcja add z math.hl: 5+7=12"
+% _got = @_sum
+% _exp = 12
+-- chk
+
+;; ── Test 5: _module_name jest ustawiony ──────────────────────────────────────
+::bold [5] Metadane modulu
+
+% _name = "_module_name ustawiony"
+% _got = @_module_name
+% _exp = utils
+-- chk
+
+;; ── Test 6: Błąd gdy brak imports.hl ────────────────────────────────────────
+::bold [6] Blad — brak imports.hl
+
+> bash -c "mkdir -p /tmp/hl_mod_no_imports"
+;; Ten import powinien zwrócić błąd (brak imports.hl)
+> bash -c "hl -c '<* /tmp/hl_mod_no_imports' 2>&1 | grep -c 'imports.hl'" |> @err_msg_found
+> test "@err_msg_found" = "1"
+? ok
+    $(@pass + 1) -> @pass
+    ::green PASS — blad brak imports.hl poprawnie zgloszony
+done
+? err
+    $(@fail + 1) -> @fail
+    ::red FAIL — blad brak imports.hl nie zgloszony
+done
+
+;; Sprzątanie
+> rm -rf /tmp/hl_mod_test /tmp/hl_mod_no_imports
+
+::nl
+::hr 50
+~> PASS: @pass  FAIL: @fail
+::hr 50
+
+> test "@fail" = "0"
+? ok
+    ::green Wszystkie testy importow przeszly!
+done
+? err
+    ::red Bledy importow: @fail
+done
