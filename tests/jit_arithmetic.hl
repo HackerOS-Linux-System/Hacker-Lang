@@ -1,0 +1,136 @@
+#!/usr/bin/hl
+/// Testy poprawności arytmetyki JIT
+
+using <gen 2>
+
+# <main/colors>
+
+% pass = 0
+% fail = 0
+
+: chk def
+    $(@pass + @fail + 1) -> @_total
+    > test "@_got" = "@_exp"
+    ? ok
+        $(@pass + 1) -> @pass
+        ~> @COLOR_GREEN  ✓@COLOR_RESET @_name
+    done
+    ? err
+        $(@fail + 1) -> @fail
+        ~> @COLOR_RED  ✗@COLOR_RESET @_name got=[@_got] exp=[@_exp]
+    done
+done
+
+::hr 50
+~> @COLOR_CYAN JIT — Arytmetyka@COLOR_RESET
+::hr 50
+::nl
+
+;; Podstawowa arytmetyka
+$(1 + 1) -> @_got
+% _exp = 2
+% _name = "1+1=2"
+-- chk
+
+$(5 - 3) -> @_got
+% _exp = 2
+% _name = "5-3=2"
+-- chk
+
+$(6 * 7) -> @_got
+% _exp = 42
+% _name = "6*7=42"
+-- chk
+
+$(15 / 3) -> @_got
+% _exp = 5
+% _name = "15/3=5"
+-- chk
+
+$(10 % 3) -> @_got
+% _exp = 1
+% _name = "10%3=1"
+-- chk
+
+;; Wyrażenia złożone
+$(2 + 3 * 4) -> @_got
+% _exp = 14
+% _name = "2+3*4=14 (bez nawiasów)"
+-- chk
+
+$((2 + 3) * 4) -> @_got
+% _exp = 20
+% _name = "(2+3)*4=20 (z nawiasami)"
+-- chk
+
+$(100 / 4 + 3) -> @_got
+% _exp = 28
+% _name = "100/4+3=28"
+-- chk
+
+;; Z zmiennymi
+% a: int = 10
+% b: int = 7
+
+$(@a + @b) -> @_got
+% _exp = 17
+% _name = "@a+@b=17"
+-- chk
+
+$(@a * @b) -> @_got
+% _exp = 70
+% _name = "@a*@b=70"
+-- chk
+
+$(@a - @b) -> @_got
+% _exp = 3
+% _name = "@a-@b=3"
+-- chk
+
+;; Akumulacja w pętli
+% acc = 0
+% i = 1
+?~ @i < 11
+    $(@acc + @i) -> @acc
+    $(@i + 1) -> @i
+done
+
+$(@acc + 0) -> @_got
+% _exp = 55
+% _name = "suma 1..10 = 55"
+-- chk
+
+;; Dzielenie ze resztą
+$(2 * 2 * 2 * 2) -> @_got
+% _exp = 16
+% _name = "2^4 = 16 (przez *)"
+-- chk
+
+;; Zero edge cases
+$(0 + 0) -> @_got
+% _exp = 0
+% _name = "0+0=0"
+-- chk
+
+$(42 * 0) -> @_got
+% _exp = 0
+% _name = "42*0=0"
+-- chk
+
+$(7 / 0) -> @_got
+% _exp = 0
+% _name = "7/0=0 (bezpieczne dzielenie)"
+-- chk
+
+::nl
+::hr 50
+~> @COLOR_GREEN PASS@COLOR_RESET: @pass  @COLOR_RED FAIL@COLOR_RESET: @fail
+::hr 50
+
+> test "@fail" = "0"
+? ok
+    ::green Wszystkie testy arytmetyki JIT przeszły!
+done
+? err
+    ::red Błędy arytmetyki JIT: @fail
+done
