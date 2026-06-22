@@ -1,0 +1,147 @@
+#!/usr/bin/hl
+/// extern_system.hl — testy systemu extern (shell/python/java/elf/so)
+
+using <gen 2>
+
+# <main/colors>
+
+<< tests/test_runner.hl
+
+::hr 50
+~> @COLOR_CYAN [extern] Testy systemu extern@COLOR_RESET
+::hr 50
+::nl
+
+;; ── Shell extern ──────────────────────────────────────────────────────────────
+~> @COLOR_BOLD [extern shell] Podstawowe@COLOR_RESET
+
+;; Test 1: Shell extern z echo
+_> echo [shell] def
+    % _arg_0 = hello_from_shell
+done
+
+% _assert_name = "extern shell echo — _extern_exit = 0"
+% _assert_got  = @_extern_exit
+% _assert_exp  = 0
+-- assert_eq
+
+;; Test 2: Shell — wywołanie skryptu inline (przez /bin/sh -c)
+_> /bin/echo [shell] def
+    % _arg_0 = test_arg
+done
+
+% _assert_name = "extern shell /bin/echo exit=0"
+> test "@_extern_exit" = "0"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name
+done
+
+;; Test 3: Shell — env variable pass-through
+_> /bin/sh [shell] def
+    % _arg_0 = -c
+    % _arg_1 = exit 0
+done
+
+% _assert_name = "extern shell exit 0"
+% _assert_got  = @_extern_exit
+% _assert_exp  = 0
+-- assert_eq
+
+;; ── Python extern ─────────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [extern python] Testy@COLOR_RESET
+
+;; Test 4: Python — sprawdź czy python3 istnieje
+::which python3
+? ok
+    _> /dev/null [python] def
+    done
+
+    % _assert_name = "extern python /dev/null — exit != crash"
+    > test "@_extern_exit" != "2"
+    ? ok
+        $(@_t_pass + 1) -> @_t_pass
+        $(@_t_total + 1) -> @_t_total
+        ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+    done
+    ? err
+        $(@_t_fail + 1) -> @_t_fail
+        $(@_t_total + 1) -> @_t_total
+        ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name
+    done
+done
+? err
+    % _assert_name = "extern python (python3 niedostępny — skip)"
+    -- assert_skip
+done
+
+;; ── ELF extern ────────────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [extern elf] Binarka systemowa@COLOR_RESET
+
+;; Test 5: ELF — /bin/true
+_> /bin/true [elf] def
+done
+
+% _assert_name = "extern elf /bin/true → exit=0"
+% _assert_got  = @_extern_exit
+% _assert_exp  = 0
+-- assert_eq
+
+;; Test 6: ELF — /bin/false
+_> /bin/false [elf] def
+done
+
+% _assert_name = "extern elf /bin/false → exit!=0"
+> test "@_extern_exit" != "0"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name
+done
+
+;; Test 7: ELF — binarka z PATH (uname)
+_> uname [elf] def
+    % _arg_0 = -s
+done
+
+% _assert_name = "extern elf uname -s → exit=0"
+% _assert_got  = @_extern_exit
+% _assert_exp  = 0
+-- assert_eq
+
+;; ── _extern_result ────────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [extern] Zmienne wynikowe@COLOR_RESET
+
+;; Test 8: @_extern_exit istnieje po wywołaniu
+_> /bin/true [elf] def
+done
+
+% _assert_name = "@_extern_exit zdefiniowany po extern"
+> test -n "@_extern_exit"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name
+done
+
+::nl
+-- test_summary
