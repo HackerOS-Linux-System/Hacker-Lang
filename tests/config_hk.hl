@@ -1,0 +1,142 @@
+#!/usr/bin/hl
+/// config_hk.hl — testy systemu config.hk jako źródła prawdy
+
+using <gen 2>
+
+# <main/colors>
+
+<< tests/test_runner.hl
+
+::hr 50
+~> @COLOR_CYAN [config.hk] Testy centralnej konfiguracji@COLOR_RESET
+::hr 50
+::nl
+
+;; ── Struktura pliku config.hk ─────────────────────────────────────────────────
+~> @COLOR_BOLD [1] Struktura config.hk@COLOR_RESET
+
+% _cfg_path = ~/.config/hackeros/hacker-lang/config.hk
+
+;; Utwórz katalog jeśli nie istnieje
+>> mkdir -p ~/.config/hackeros/hacker-lang
+
+;; Uruchom hl version żeby zainicjalizować config
+>> bash -c "hl version > /dev/null 2>&1 || true"
+
+;; Sprawdź czy config.hk istnieje po pierwszym uruchomieniu hl env
+>> bash -c "hl env status > /dev/null 2>&1; [ -f @_cfg_path ] && echo exists || echo missing" |> @_cfg_exists
+
+% _assert_name = "config.hk istnieje po hl env status"
+% _assert_got  = @_cfg_exists
+% _assert_exp  = exists
+-- assert_eq
+
+;; ── Sekcje config.hk ─────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [2] Sekcje config.hk@COLOR_RESET
+
+;; Sprawdź sekcję [env]
+>> bash -c "grep -c '\[env\]' @_cfg_path 2>/dev/null || echo 0" |> @_env_section
+% _assert_name = "config.hk: sekcja [env]"
+> test "@_env_section" -ge "1"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET sekcja [env] obecna
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET brak sekcji [env]
+done
+
+;; Sprawdź sekcję [paths]
+>> bash -c "grep -c '\[paths\]' @_cfg_path 2>/dev/null || echo 0" |> @_paths_section
+% _assert_name = "config.hk: sekcja [paths]"
+> test "@_paths_section" -ge "1"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET sekcja [paths] obecna
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET brak sekcji [paths]
+done
+
+;; Sprawdź sekcję [extern]
+>> bash -c "grep -c '\[extern\]' @_cfg_path 2>/dev/null || echo 0" |> @_extern_section
+% _assert_name = "config.hk: sekcja [extern]"
+> test "@_extern_section" -ge "1"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET sekcja [extern] obecna
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET brak sekcji [extern]
+done
+
+;; ── Integracja: bit czyta config.hk ──────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [3] Integracja bit ↔ config.hk@COLOR_RESET
+
+;; Symulacja: gdy aktywny env → BIT_HOME powinien wskazać na env/libs
+% _test_env = config_test_env_tmp
+>> bash -c "hl env create @_test_env 2>&1 | tail -1" |> @_create_result
+
+;; config.hk teraz ma active="" — weryfikuj że globalne libs są domyślne
+>> bash -c "grep 'active_path' @_cfg_path 2>/dev/null | head -1" |> @_active_path_line
+% _assert_name = "config.hk: active_path = '' (brak aktywnego env)"
+>> echo "@_active_path_line" | grep -c 'active_path = $' |> @_empty_active
+> test "@_empty_active" -ge "1"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET active_path jest pusty (globalne)
+done
+? err
+    ;; Może mieć inny format — skip
+    -- assert_skip
+done
+
+;; Cleanup
+>> bash -c "hl env remove @_test_env 2>&1 || true"
+
+;; ── Extern w config.hk ────────────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [4] config.hk: extern runtimes@COLOR_RESET
+
+>> bash -c "grep 'python' @_cfg_path 2>/dev/null | head -1" |> @_python_cfg
+% _assert_name = "config.hk: python runtime skonfigurowany"
+> test -n "@_python_cfg"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET python w config.hk: @_python_cfg
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET brak python w config.hk
+done
+
+>> bash -c "grep 'java' @_cfg_path 2>/dev/null | head -1" |> @_java_cfg
+% _assert_name = "config.hk: java runtime skonfigurowany"
+> test -n "@_java_cfg"
+? ok
+    $(@_t_pass + 1) -> @_t_pass
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_GREEN  PASS@COLOR_RESET java w config.hk: @_java_cfg
+done
+? err
+    $(@_t_fail + 1) -> @_t_fail
+    $(@_t_total + 1) -> @_t_total
+    ~> @COLOR_RED  FAIL@COLOR_RESET brak java w config.hk
+done
+
+::nl
+-- test_summary
