@@ -1,0 +1,103 @@
+#!/usr/bin/hl
+/// Testy pipeline kompilatora — kompilacja .hl → .bc → JIT
+
+using <gen 2>
+
+# <main/colors>
+
+::hr 50
+~> @COLOR_CYAN Testy pipeline kompilatora@COLOR_RESET
+::hr 50
+::nl
+
+;; ── Test 1: Kompilacja prostego skryptu ─────────────────────────────────────
+~> @COLOR_BOLD [1] Kompilacja hello world@COLOR_RESET
+
+% tmp_script = /tmp/_hl_test_hello.hl
+
+>> bash -c "cat > @tmp_script << 'HLEOF'
+using <gen 2>
+~> hello from bc
+HLEOF"
+
+> hl compile @tmp_script
+? ok
+    ::green PASS — kompilacja zakończona
+done
+? err
+    ::red FAIL — błąd kompilacji
+done
+
+;; Sprawdź czy .bc istnieje
+::exists /tmp/_hl_test_hello.bc
+? ok
+    ::green PASS — plik .bc istnieje
+done
+? err
+    ::red FAIL — brak pliku .bc
+done
+
+;; ── Test 2: Uruchomienie .bc ─────────────────────────────────────────────────
+~> @COLOR_BOLD [2] Uruchomienie .bc@COLOR_RESET
+
+> hl run /tmp/_hl_test_hello.bc |> @bc_output
+% trimmed = @bc_output
+
+> test "@trimmed" = "hello from bc"
+? ok
+    ::green PASS — wyjście .bc poprawne
+done
+? err
+    ::red FAIL — wyjście: [@trimmed]
+done
+
+;; ── Test 3: Cache .bc ────────────────────────────────────────────────────────
+~> @COLOR_BOLD [3] Cache .bc@COLOR_RESET
+
+;; Pierwsze uruchomienie — tworzy cache
+> hl run @tmp_script > /dev/null
+? ok
+    ::green PASS — pierwsze uruchomienie OK
+done
+? err
+    ::yellow WARN — pierwsze uruchomienie nie powiodło się
+done
+
+;; Sprawdź czy cache istnieje
+> ls ~/.hackeros/hacker-lang/cache/*.bc > /dev/null 2>&1
+? ok
+    ::green PASS — pliki .bc w cache istnieją
+done
+? err
+    ::yellow WARN — brak plików w cache (może być OK jeśli ścieżka systemowa)
+done
+
+;; ── Test 4: Czyszczenie cache ────────────────────────────────────────────────
+~> @COLOR_BOLD [4] Czyszczenie cache@COLOR_RESET
+
+> hl clean > /dev/null 2>&1
+? ok
+    ::green PASS — hl clean zakończone bez błędu
+done
+? err
+    ::yellow WARN — hl clean zwrócił błąd (może być OK gdy cache pusty)
+done
+
+;; ── Test 5: hl cache-info ────────────────────────────────────────────────────
+~> @COLOR_BOLD [5] hl cache-info@COLOR_RESET
+
+> hl cache-info > /dev/null 2>&1
+? ok
+    ::green PASS — hl cache-info działa
+done
+? err
+    ::red FAIL — hl cache-info błąd
+done
+
+;; ── Sprzątanie ───────────────────────────────────────────────────────────────
+> rm -f /tmp/_hl_test_hello.hl /tmp/_hl_test_hello.bc
+
+::nl
+::hr 50
+::green Testy pipeline zakończone.
+::hr 50
