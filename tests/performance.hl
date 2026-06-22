@@ -1,0 +1,127 @@
+#!/usr/bin/hl
+/// Testy wydajnościowe — JIT vs tree-walk interpreter
+
+using <gen 2>
+
+# <main/colors>
+
+::hr 50
+~> @COLOR_CYAN Hacker Lang — testy wydajności@COLOR_RESET
+::hr 50
+::nl
+
+;; ── 1. Arytmetyka intensywna (pętla 1000 iteracji) ──────────────────────────
+~> @COLOR_BOLD [1] Arytmetyka — 1000 iteracji@COLOR_RESET
+
+> date +%s%N |> @t_start
+
+% i: int = 0
+% sum: int = 0
+?~ @i < 1000
+    $(@sum + @i) -> @sum
+    $(@i + 1) -> @i
+done
+
+> date +%s%N |> @t_end
+
+~> Suma: @sum (oczekiwano: 499500)
+> test "@sum" = "499500"
+? ok
+    ::green PASS — wynik poprawny
+done
+? err
+    ::red FAIL — błędny wynik: @sum
+done
+
+~> Czas: pomiar przez date +%s%N
+
+;; ── 2. For-in 500 elementów ─────────────────────────────────────────────────
+~> @COLOR_BOLD [2] For-in — generacja listy@COLOR_RESET
+
+>> seq 1 500 |> @numbers_list
+
+% for_count = 0
+@ n in @numbers_list
+    $(@for_count + 1) -> @for_count
+done
+
+> test "@for_count" = "500"
+? ok
+    ::green PASS — for-in 500 elementów: @for_count
+done
+? err
+    ::red FAIL — for-in: @for_count (oczekiwano 500)
+done
+
+;; ── 3. Wywołania funkcji 100x ─────────────────────────────────────────────────
+~> @COLOR_BOLD [3] Wywołania funkcji — 100x@COLOR_RESET
+
+% call_count = 0
+
+: perf_fn def
+    $(@call_count + 1) -> @call_count
+done
+
+% k = 0
+?~ @k < 100
+    -- perf_fn
+    $(@k + 1) -> @k
+done
+
+> test "@call_count" = "100"
+? ok
+    ::green PASS — 100 wywołań funkcji
+done
+? err
+    ::red FAIL — wywołania: @call_count
+done
+
+;; ── 4. Interpolacja stringów ─────────────────────────────────────────────────
+~> @COLOR_BOLD [4] Interpolacja — 200 iteracji@COLOR_RESET
+
+% si = 0
+% last_str = ""
+?~ @si < 200
+    % last_str = prefix_@si_suffix
+    $(@si + 1) -> @si
+done
+
+~> Ostatni string: @last_str
+> test "@si" = "200"
+? ok
+    ::green PASS — interpolacja 200 iteracji
+done
+? err
+    ::red FAIL — interpolacja: @si
+done
+
+;; ── 5. Switch/case 50x ───────────────────────────────────────────────────────
+~> @COLOR_BOLD [5] Switch — 50 iteracji@COLOR_RESET
+
+% sw_hits = 0
+% sw_i = 0
+?~ @sw_i < 50
+    % sw_val = hack
+    ? switch @sw_val
+    | hack
+        $(@sw_hits + 1) -> @sw_hits
+    | other
+        ~> nieoczekiwane
+    | *
+        ~> wildcard
+    done
+    $(@sw_i + 1) -> @sw_i
+done
+
+> test "@sw_hits" = "50"
+? ok
+    ::green PASS — switch 50 trafień
+done
+? err
+    ::red FAIL — switch: @sw_hits
+done
+
+::nl
+::hr 50
+::green Testy wydajności zakończone.
+::hr 50
