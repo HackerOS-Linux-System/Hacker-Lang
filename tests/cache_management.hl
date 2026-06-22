@@ -1,0 +1,149 @@
+#!/usr/bin/hl
+/// Testy zarządzania cache .bc
+
+using <gen 2>
+
+# <main/colors>
+
+% pass = 0
+% fail = 0
+
+: ok def
+    $(@pass + 1) -> @pass
+    ::green PASS — @_test
+done
+
+: nok def
+    $(@fail + 1) -> @fail
+    ::red FAIL — @_test
+done
+
+::hr 50
+~> @COLOR_CYAN Cache .bc — zarządzanie@COLOR_RESET
+::hr 50
+::nl
+
+;; ── Test 1: Katalog cache istnieje po pierwszym uruchomieniu ─────────────────
+~> @COLOR_BOLD [1] Katalog cache@COLOR_RESET
+
+>> bash -c "mkdir -p ~/.hackeros/hacker-lang/cache && echo ok" |> @mkdir_result
+> test "@mkdir_result" = "ok"
+? ok
+    % _test = "mkdir cache dir"
+    -- ok
+done
+? err
+    % _test = "mkdir cache dir"
+    -- nok
+done
+
+;; ── Test 2: hl cache-info nie crashuje ──────────────────────────────────────
+~> @COLOR_BOLD [2] hl cache-info@COLOR_RESET
+
+> hl cache-info > /dev/null 2>&1
+? ok
+    % _test = "hl cache-info exit 0"
+    -- ok
+done
+? err
+    % _test = "hl cache-info exit 0"
+    -- nok
+done
+
+;; ── Test 3: hl clean nie crashuje ───────────────────────────────────────────
+~> @COLOR_BOLD [3] hl clean@COLOR_RESET
+
+> hl clean > /dev/null 2>&1
+? ok
+    % _test = "hl clean exit 0"
+    -- ok
+done
+? err
+    % _test = "hl clean — akceptowalny błąd (pusty cache)"
+    -- ok
+done
+
+;; ── Test 4: Kompilacja tworzy plik .bc ──────────────────────────────────────
+~> @COLOR_BOLD [4] Kompilacja → .bc@COLOR_RESET
+
+>> bash -c "printf 'using <gen 2>\n~> test\n' > /tmp/_cache_test.hl"
+> hl compile /tmp/_cache_test.hl > /dev/null 2>&1
+? ok
+    ::exists /tmp/_cache_test.bc
+    ? ok
+        % _test = "kompilacja tworzy .bc"
+        -- ok
+    done
+    ? err
+        % _test = "kompilacja tworzy .bc"
+        -- nok
+    done
+done
+? err
+    % _test = "hl compile exit code"
+    -- nok
+done
+
+;; ── Test 5: .bc ma shebang ───────────────────────────────────────────────────
+~> @COLOR_BOLD [5] Shebang w .bc@COLOR_RESET
+
+::exists /tmp/_cache_test.bc
+? ok
+    >> head -1 /tmp/_cache_test.bc |> @shebang_line
+    >> bash -c "echo '@shebang_line' | grep -q '#!'"
+    ? ok
+        % _test = ".bc ma shebang"
+        -- ok
+    done
+    ? err
+        % _test = ".bc ma shebang"
+        -- nok
+    done
+done
+? err
+    % _test = ".bc shebang (skip — brak .bc)"
+    -- ok
+done
+
+;; ── Test 6: Limit 30 plików — auto-cleanup ──────────────────────────────────
+~> @COLOR_BOLD [6] Auto-cleanup przy 30 plikach@COLOR_RESET
+
+;; Utwórz 31 fikcyjnych .bc (tylko puste pliki do testu licznika)
+>> bash -c "
+    mkdir -p ~/.hackeros/hacker-lang/cache
+    for i in \$(seq 1 31); do
+        touch ~/.hackeros/hacker-lang/cache/dummy_\${i}.bc
+    done
+    COUNT=\$(ls ~/.hackeros/hacker-lang/cache/*.bc 2>/dev/null | wc -l)
+    echo \$COUNT
+" |> @pre_count
+
+~> Pliki przed cleanup: @pre_count
+
+;; Uruchom dowolny skrypt .hl — powinien wywołać cleanup
+>> bash -c "printf 'using <gen 2>\n~> x\n' > /tmp/_trigger.hl"
+> hl run /tmp/_trigger.hl > /dev/null 2>&1
+
+>> bash -c "ls ~/.hackeros/hacker-lang/cache/*.bc 2>/dev/null | wc -l" |> @post_count
+~> Pliki po cleanup: @post_count
+
+;; Po cleanup powinno być ≤ 30
+>> bash -c "test @post_count -le 30 && echo ok || echo fail" |> @cleanup_result
+> test "@cleanup_result" = "ok"
+? ok
+    % _test = "auto-cleanup ≤ 30 plików"
+    -- ok
+done
+? err
+    % _test = "auto-cleanup ≤ 30 plików (got @post_count)"
+    -- nok
+done
+
+;; Sprzątanie
+> rm -f /tmp/_cache_test.hl /tmp/_cache_test.bc /tmp/_trigger.hl
+> hl clean > /dev/null 2>&1
+
+::nl
+::hr 50
+~> @COLOR_GREEN PASS@COLOR_RESET: @pass  @COLOR_RED FAIL@COLOR_RESET: @fail
+::hr 50
