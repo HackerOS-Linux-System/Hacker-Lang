@@ -1,0 +1,136 @@
+#!/usr/bin/hl
+/// rolling_gen.hl — testy trybu ROLLING i systemu genów
+
+using <ROLLING>
+
+# <main/colors>
+
+<< tests/test_runner.hl
+
+::hr 50
+~> @COLOR_CYAN [ROLLING] Testy trybu ROLLING@COLOR_RESET
+::hr 50
+::nl
+
+;; Ten plik używa using <ROLLING> — wszystkie funkcje zawsze najnowsze
+
+;; ── Test 1: ROLLING udostępnia gen 2 features ─────────────────────────────────
+~> @COLOR_BOLD [1] ROLLING — gen 2 features dostępne@COLOR_RESET
+
+;; For-in (gen 2)
+% _count = 0
+@ _x in 1 2 3 4 5
+    $(@_count + 1) -> @_count
+done
+
+% _assert_name = "ROLLING: for-in działa (gen 2)"
+% _assert_got  = @_count
+% _assert_exp  = 5
+-- assert_eq
+
+;; While (gen 2)
+% _w = 0
+?~ @_w < 3
+    $(@_w + 1) -> @_w
+done
+
+% _assert_name = "ROLLING: while działa (gen 2)"
+% _assert_got  = @_w
+% _assert_exp  = 3
+-- assert_eq
+
+;; Match/switch (gen 2)
+% _sw = hacker
+% _sw_res = none
+? switch @_sw
+| hacker
+    % _sw_res = hit
+| *
+    % _sw_res = miss
+done
+
+% _assert_name = "ROLLING: switch dopasowanie (gen 2)"
+% _assert_got  = @_sw_res
+% _assert_exp  = hit
+-- assert_eq
+
+;; ── Test 2: Typowane zmienne (gen 2) ──────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [2] ROLLING — typowane zmienne@COLOR_RESET
+
+% x:int   = 42
+% y:float = 3.14
+% z:bool  = true
+% s:str   = hackerlang
+
+% _assert_name = "ROLLING: int variable"
+% _assert_got  = @x
+% _assert_exp  = 42
+-- assert_eq
+
+% _assert_name = "ROLLING: bool variable"
+% _assert_got  = @z
+% _assert_exp  = true
+-- assert_eq
+
+% _assert_name = "ROLLING: str variable"
+% _assert_got  = @s
+% _assert_exp  = hackerlang
+-- assert_eq
+
+;; ── Test 3: Arytmetyka (gen 2) ────────────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [3] ROLLING — arytmetyka@COLOR_RESET
+
+$(100 * 2 + 50) -> @_arith
+% _assert_name = "ROLLING: 100*2+50=250"
+% _assert_got  = @_arith
+% _assert_exp  = 250
+-- assert_eq
+
+$(7 % 3) -> @_mod
+% _assert_name = "ROLLING: 7%3=1"
+% _assert_got  = @_mod
+% _assert_exp  = 1
+-- assert_eq
+
+;; ── Test 4: Arena functions (gen 2) ───────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [4] ROLLING — arena functions@COLOR_RESET
+
+% _arena_called = false
+:: arena_test_fn <4k> def
+    % _arena_called = true
+done
+
+:: arena_test_fn
+
+% _assert_name = "ROLLING: arena function wywołana"
+% _assert_got  = @_arena_called
+% _assert_exp  = true
+-- assert_eq
+
+;; ── Test 5: Pipe do zmiennej (gen 2) ─────────────────────────────────────────
+::nl
+~> @COLOR_BOLD [5] ROLLING — pipe |>@COLOR_RESET
+
+>> echo "rolling_works" |> @_pipe_val
+% _assert_name = "ROLLING: pipe |> działa"
+% _assert_got  = @_pipe_val
+% _assert_exp  = rolling_works
+-- assert_eq
+
+;; ── Test 6: Extern (gen 2+ / ROLLING) ───────────────────────────────────────
+::nl
+~> @COLOR_BOLD [6] ROLLING — extern system@COLOR_RESET
+
+_> /bin/true [elf] def
+done
+
+% _assert_name = "ROLLING: extern elf działa"
+% _assert_got  = @_extern_exit
+% _assert_exp  = 0
+-- assert_eq
+
+::nl
+-- test_summary
