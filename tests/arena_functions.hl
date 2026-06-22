@@ -1,0 +1,236 @@
+#!/usr/bin/hl
+/// Testy arena functions (gen 2) — :: nazwa <rozmiar> def
+
+using <gen 2>
+
+# <main/colors>
+
+% pass = 0
+% fail = 0
+
+: chk def
+    > test "@_got" = "@_exp"
+    ? ok
+        $(@pass + 1) -> @pass
+        ::green  ✓ @_name
+    done
+    ? err
+        $(@fail + 1) -> @fail
+        ::red  ✗ @_name  got=[@_got]  exp=[@_exp]
+    done
+done
+
+::hr 50
+~> @COLOR_CYAN Arena Functions — testy@COLOR_RESET
+::hr 50
+::nl
+
+;; ── 1. Podstawowa arena function ─────────────────────────────────────────────
+~> @COLOR_BOLD [1] Podstawowa arena function@COLOR_RESET
+
+:: hello_arena <4k> def
+    % _arena_result = hello_from_arena
+done
+
+:: hello_arena
+
+% _name = "arena function wykonana"
+% _got = @_arena_result
+% _exp = hello_from_arena
+-- chk
+
+;; ── 2. Arena function z arytmetyką ───────────────────────────────────────────
+~> @COLOR_BOLD [2] Arytmetyka w arenie@COLOR_RESET
+
+:: calc_arena <4k> def
+    $( 6 * 7 ) -> @_calc_result
+    $( @_calc_result + 2 ) -> @_calc_result2
+done
+
+:: calc_arena
+
+% _name = "arena: 6*7=42"
+% _got = @_calc_result
+% _exp = 42
+-- chk
+
+% _name = "arena: 42+2=44"
+% _got = @_calc_result2
+% _exp = 44
+-- chk
+
+;; ── 3. Arena function z pętlą ────────────────────────────────────────────────
+~> @COLOR_BOLD [3] Pętla w arenie@COLOR_RESET
+
+:: loop_arena <8k> def
+    % _loop_count = 0
+    % _j = 0
+    ?~ @_j < 10
+        $(@_loop_count + 1) -> @_loop_count
+        $(@_j + 1) -> @_j
+    done
+done
+
+:: loop_arena
+
+% _name = "arena: pętla 10 razy"
+% _got = @_loop_count
+% _exp = 10
+-- chk
+
+;; ── 4. Arena function widzi zmienne rodzica ───────────────────────────────────
+~> @COLOR_BOLD [4] Widoczność zmiennych rodzica@COLOR_RESET
+
+% parent_var = parent_value
+
+:: see_parent <4k> def
+    % _seen = @parent_var
+done
+
+:: see_parent
+
+% _name = "arena widzi zmienne rodzica"
+% _got = @_seen
+% _exp = parent_value
+-- chk
+
+;; ── 5. Zmiany w arenie propagują do rodzica ───────────────────────────────────
+~> @COLOR_BOLD [5] Propagacja zmian@COLOR_RESET
+
+% shared_counter = 0
+
+:: inc_counter <4k> def
+    $(@shared_counter + 1) -> @shared_counter
+done
+
+:: inc_counter
+:: inc_counter
+:: inc_counter
+
+% _name = "arena propaguje zmiany (3x)"
+% _got = @shared_counter
+% _exp = 3
+-- chk
+
+;; ── 6. Wiele aren jednocześnie ────────────────────────────────────────────────
+~> @COLOR_BOLD [6] Wiele aren@COLOR_RESET
+
+:: arena_a <4k> def
+    % _result_a = from_a
+done
+
+:: arena_b <8k> def
+    % _result_b = from_b
+done
+
+:: arena_a
+:: arena_b
+
+% _name = "arena_a wynik"
+% _got = @_result_a
+% _exp = from_a
+-- chk
+
+% _name = "arena_b wynik"
+% _got = @_result_b
+% _exp = from_b
+-- chk
+
+;; ── 7. Arena z różnymi rozmiarami ────────────────────────────────────────────
+~> @COLOR_BOLD [7] Rozmiary aren@COLOR_RESET
+
+;; 64k arena — dla większych danych
+:: big_arena <64k> def
+    % _big_result = big_arena_done
+done
+
+:: big_arena
+
+% _name = "64k arena działa"
+% _got = @_big_result
+% _exp = big_arena_done
+-- chk
+
+;; Domyślny rozmiar (bez <>) — 4096 bajtów
+:: default_arena def
+    % _default_result = default_done
+done
+
+:: default_arena
+
+% _name = "domyślna arena (4096B)"
+% _got = @_default_result
+% _exp = default_done
+-- chk
+
+;; ── 8. Arena function w pętli (stress test) ───────────────────────────────────
+~> @COLOR_BOLD [8] Arena w pętli (50 iteracji)@COLOR_RESET
+
+:: counter_arena <4k> def
+    $(@_stress_count + 1) -> @_stress_count
+done
+
+% _stress_count = 0
+% _si = 0
+?~ @_si < 50
+    :: counter_arena
+    $(@_si + 1) -> @_si
+done
+
+% _name = "arena w pętli 50x"
+% _got = @_stress_count
+% _exp = 50
+-- chk
+
+;; ── 9. Wbudowane quick-calls nadal działają ───────────────────────────────────
+~> @COLOR_BOLD [9] Wbudowane :: (kompatybilność)@COLOR_RESET
+
+% _name = "::upper kompatybilność"
+% _q = hello
+>> echo "@_q" | tr '[:lower:]' '[:upper:]' |> @_upper_result
+% _got = @_upper_result
+% _exp = HELLO
+-- chk
+
+::exists /tmp
+? ok
+    $(@pass + 1) -> @pass
+    ::green  ✓ ::exists /tmp
+done
+? err
+    $(@fail + 1) -> @fail
+    ::red  ✗ ::exists /tmp
+done
+
+;; ── 10. Arena function z switch ───────────────────────────────────────────────
+~> @COLOR_BOLD [10] Switch w arenie@COLOR_RESET
+
+:: switch_arena <4k> def
+    % _sw_in = test_val
+    ? switch @_sw_in
+    | test_val
+        % _sw_out = matched
+    | *
+        % _sw_out = wildcard
+    done
+done
+
+:: switch_arena
+
+% _name = "switch w arenie"
+% _got = @_sw_out
+% _exp = matched
+-- chk
+
+::nl
+::hr 50
+~> @COLOR_GREEN PASS@COLOR_RESET: @pass  @COLOR_RED FAIL@COLOR_RESET: @fail
+::hr 50
+
+> test "@fail" = "0"
+? ok
+    ::green Wszystkie testy arena functions przeszły!
+done
+? err
+    ::red Błędy arena functions: @fail
+done
