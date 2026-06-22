@@ -8,12 +8,30 @@ HackerOS Team <hackeros068@gmail.com>
 :lang: pl
 
 [.lead]
-Hacker Lang to natywny język skryptowy HackerOS — interpretowany, kompilowany do bytecode i ELF, z własną składnią operatorową, managerem pakietów *bit* i bezpośrednim dostępem do API HackerOS.
+Hacker Lang to natywny język skryptowy HackerOS — interpretowany przez pipeline JIT (AST → bytecode → kod maszynowy Cranelift), z własną składnią operatorową, managerem pakietów *bit* i bezpośrednim dostępem do API HackerOS.
 
 [WARNING]
 ====
 Hacker Lang działa **wyłącznie na HackerOS**. Binarka `hl` jest wbudowana w system.
 ====
+
+== Pipeline wykonania
+
+[source]
+----
+.hl source  ──parse──►  AST  ──lower──►  .bc bytecode  ──JIT──►  kod maszynowy
+                                              │
+                              ~/.hackeros/hacker-lang/cache/
+                              (max 30 plików, auto-cleanup)
+----
+
+Domyślnie `hl run plik.hl`:
+
+1. Parsuje `.hl` → AST
+2. Kompiluje AST → zoptymalizowany `.bc` (Cranelift IR bytecode)
+3. Cachuje `.bc` w `~/.hackeros/hacker-lang/cache/` (hash źródła + mtime)
+4. Uruchamia `.bc` przez interpreter bytecode + JIT engine (Cranelift)
+5. Gorące pętle/funkcje (≥50 wywołań) są kompilowane do natywnego kodu maszynowego
 
 == Składnia — gen 2 (domyślny)
 
@@ -21,7 +39,7 @@ Hacker Lang działa **wyłącznie na HackerOS**. Binarka `hl` jest wbudowana w s
 
 [source,hl]
 ----
-~> Tekst z interpolacja @zmiennej
+~> Tekst z interpolacją @zmiennej
 ----
 
 === Komendy
@@ -117,7 +135,7 @@ done
 [source,hl]
 ----
 _10 > hacker update
-_5  ~> powtorzenie
+_5  ~> powtórzenie
 _3  ::green OK
 ----
 
@@ -198,8 +216,8 @@ Dostępne narzędzia: `H#` `hco` `hacker` `hsh` `hpkg` `Blue-Environment`
 ;; komentarz liniowy
 /// komentarz dokumentacyjny (widoczny w hl search)
 // komentarz blokowy
-   moze byc wieloliniowy
-   konczy sie \\
+   może być wieloliniowy
+   kończy się \\
 ----
 
 === Zależności i importy
@@ -274,12 +292,11 @@ Stara składnia jest kompatybilna: `# <std/net>` → `main/net`,
 
 [source,bash]
 ----
-hl plik.hl                  # uruchom skrypt
-hl run plik.hl              # jawna forma
-hl run plik.bc              # uruchom bytecode
-hl compile plik.hl          # .hl → plik.bc (bytecode)
-hl compile plik.bc          # .bc → binarka ELF
-hl compile --shared plik.bc # .bc → .so (biblioteka bit)
+hl plik.hl                  # uruchom skrypt (JIT pipeline)
+hl run plik.hl              # jawna forma (JIT pipeline)
+hl run plik.bc              # uruchom bytecode bezpośrednio przez JIT
+hl run --no-jit plik.hl     # wymuś tree-walk interpreter (debug)
+hl compile plik.hl          # .hl → plik.bc (bytecode, do katalogu źródłowego)
 hl check plik.hl            # sprawdź składnię + linter
 hl check --meta plik.hl     # + gen i shebang
 hl ast plik.hl              # AST jako JSON
@@ -290,28 +307,82 @@ hl search fraza             # szukaj skryptów systemowych
 hl search all               # wylistuj wszystkie
 hl gen-info plik.hl         # gen + shebang + węzły AST
 hl docs                     # dokumentacja TUI
-hl clean                    # wyczyść cache
+hl clean                    # wyczyść cache .bc + bibliotek
+hl cache-info               # statystyki cache .bc
 hl version                  # informacje o wersji
 hl -c "~> Hej!"             # kod inline
 ----
 
-== Kompilacja — pipeline dwuetapowy
+== Bytecode — format .bc
+
+Pliki `.bc` to zoptymalizowany bytecode Hacker Lang (binarny):
+
+[source]
+----
+[magic: "HLBC"]  [wersja: u32]  [len nagłówka: u64]
+[nagłówek JSON: gen, źródło, timestamp]
+[moduł bincode: instrukcje IR + pula stałych + tablica funkcji]
+----
+
+Pliki `.bc` mają automatycznie dodany shebang `#!/usr/bin/env -S /usr/bin/hl run`
+i bit wykonywalny — można je uruchamiać bezpośrednio.
+
+=== Cache bytecode
+
+Cache: `~/.hackeros/hacker-lang/cache/`
+
+* Klucz cache: hash(zawartość źródła + ścieżka + mtime)
+* Limit: **30 plików** `.bc`
+* Auto-cleanup: przy uruchamianiu 31. skryptu usuwa najstarsze pliki
+* Ręczne czyszczenie: `hl clean`
+* Podgląd: `hl cache-info`
+
+=== JIT engine
+
+JIT kompiluje gorące ścieżki do natywnego kodu maszynowego (x86_64/aarch64) przez Cranelift:
+
+* Próg: **50 wywołań** funkcji/pętli → kompilacja do kodu maszynowego
+* Kwalifikują się: czyste pętle arytmetyczne, funkcje bez wywołań systemowych
+* Reszta (I/O, komendy systemowe): zawsze przez interpreter bytecode
+* Wyłączenie JIT: `hl run --no-jit plik.hl` lub `HL_NO_JIT=1 hl run plik.hl`
+
+== Kompilacja — pipeline
 
 [source,bash]
 ----
-hl compile skrypt.hl    # Etap 1: .hl → skrypt.bc (bytecode JSON + shebang)
-./skrypt.bc             # uruchom .bc bezpośrednio (ma shebang)
-hl run skrypt.bc        # lub przez hl run
-
-hl compile skrypt.bc    # Etap 2: .bc → binarka ELF x86_64
-./skrypt                # uruchom binkarkę
+hl run skrypt.hl        # Automatyczny: .hl → cache .bc → JIT execute
+hl compile skrypt.hl    # Jawna: .hl → skrypt.bc (w katalogu źródłowym)
+hl run skrypt.bc        # Uruchom .bc bezpośrednio
+./skrypt.bc             # Lub przez shebang (ma bit wykonywalny)
 ----
 
 [TIP]
 ====
-Pliki `.bc` mają automatycznie dodany shebang `#!/usr/bin/env -S /usr/bin/hl run`
-i bit wykonywalny — można je uruchamiać bezpośrednio.
+`hl run plik.hl` jest szybsze niż Ruby YJIT dla typowych skryptów systemowych
+dzięki lekkiemu bytecode i zero-overhead cache (bincode deserializacja).
 ====
+
+== Struktura projektu (Cargo workspace)
+
+[source]
+----
+source-code/
+├── parser/    -- Lexer, Parser, AST, Gen, Shebang
+├── core/      -- Executor (tree-walk), Env, Quick Functions, Diagnostics
+├── compiler/  -- Bytecode compiler: AST → HlModule (.bc)
+│   ├── bytecode.rs   -- IR instrukcji (HlModule, Instruction, ConstPool)
+│   ├── lower.rs      -- Lowering AST → HlModule
+│   ├── optimize.rs   -- Optymalizator: constant folding, DCE, peephole
+│   ├── serialize.rs  -- Format .bc: magic + bincode
+│   └── cache.rs      -- Cache ~/.hackeros/hacker-lang/cache/
+├── jit/       -- JIT engine: interpreter bytecode + Cranelift hot-path
+│   ├── interpreter.rs -- Interpreter bytecode (cold path)
+│   ├── jit_engine.rs  -- Cranelift JIT (warm path, ≥50 wywołań)
+│   ├── runtime.rs     -- RuntimeState, RtVal
+│   └── runner.rs      -- Główny entry point: run_hl_file / run_bc_file
+├── shell/     -- REPL, Shell, Completion, Prompt
+└── cli/       -- Binarka `hl` (clap)
+----
 
 == Manager pakietów `bit`
 
@@ -591,7 +662,7 @@ brakujące deklaracje `//` dla narzędzi sieciowych.
 |Kod źródłowy Hacker Lang
 
 |`.bc`
-|Bytecode HL (JSON AST + shebang, wykonywalny)
+|Bytecode HL (binarny IR + shebang, wykonywalny bezpośrednio)
 
 |`.hlrc`
 |Konfiguracja powłoki (`~/.hlrc`)
@@ -602,6 +673,29 @@ brakujące deklaracje `//` dla narzędzi sieciowych.
 |`.hacker`
 |Format metadanych HackerOS v1/v2/v3 (parsowany przez `main/hacker`)
 |===
+
+== Testy
+
+[source,bash]
+----
+# Uruchom wszystkie testy
+hl run tests/test_runner.hl
+
+# Testy bytecode/JIT
+hl run tests/bytecode_basics.hl
+
+# Testy arytmetyki JIT
+hl run tests/jit_arithmetic.hl
+
+# Testy wydajności
+hl run tests/performance.hl
+
+# Testy pipeline kompilatora
+hl run tests/compiler_pipeline.hl
+
+# Testy zarządzania cache
+hl run tests/cache_management.hl
+----
 
 == Licencja i autorzy
 
