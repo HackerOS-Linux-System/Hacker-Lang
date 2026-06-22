@@ -1,0 +1,178 @@
+#!/usr/bin/hl
+/// Testy podstawowe — pipeline bytecode/JIT
+
+using <gen 2>
+
+# <main/colors>
+
+% _t_pass  = 0
+% _t_fail  = 0
+% _t_total = 0
+
+: assert_eq def
+    $(@_t_total + 1) -> @_t_total
+    > test "@_assert_got" = "@_assert_exp"
+    ? ok
+        $(@_t_pass + 1) -> @_t_pass
+        ~> @COLOR_GREEN  PASS@COLOR_RESET @_assert_name
+    done
+    ? err
+        $(@_t_fail + 1) -> @_t_fail
+        ~> @COLOR_RED  FAIL@COLOR_RESET @_assert_name
+        ~>        got: [@_assert_got]
+        ~>        exp: [@_assert_exp]
+    done
+done
+
+: test_summary def
+    ::nl
+    ::hr 50
+    ~> Wyniki:
+    ~>   @COLOR_GREEN PASS@COLOR_RESET: @_t_pass
+    ~>   @COLOR_RED FAIL@COLOR_RESET: @_t_fail
+    ~>   Łącznie: @_t_total
+    ::hr 50
+    > test "@_t_fail" = "0"
+    ? ok
+        ::green Wszystkie testy przeszły!
+    done
+    ? err
+        ::red Błędy: @_t_fail
+    done
+done
+
+::hr 50
+~> @COLOR_CYAN Bytecode/JIT — testy podstawowe@COLOR_RESET
+::hr 50
+::nl
+
+;; ── 1. Arytmetyka kompilowana do bytecode ────────────────────────────────────
+~> @COLOR_BOLD [1] Arytmetyka BC@COLOR_RESET
+
+$(2 + 2) -> @r
+% _assert_name = "BC: 2+2=4"
+% _assert_got = @r
+% _assert_exp = 4
+-- assert_eq
+
+$(10 - 3) -> @r
+% _assert_name = "BC: 10-3=7"
+% _assert_got = @r
+% _assert_exp = 7
+-- assert_eq
+
+$(3 * 4) -> @r
+% _assert_name = "BC: 3*4=12"
+% _assert_got = @r
+% _assert_exp = 12
+-- assert_eq
+
+$(100 / 4) -> @r
+% _assert_name = "BC: 100/4=25"
+% _assert_got = @r
+% _assert_exp = 25
+-- assert_eq
+
+$(17 % 5) -> @r
+% _assert_name = "BC: 17%5=2"
+% _assert_got = @r
+% _assert_exp = 2
+-- assert_eq
+
+;; ── 2. Zmienne w bytecode ────────────────────────────────────────────────────
+~> @COLOR_BOLD [2] Zmienne BC@COLOR_RESET
+
+% x: int = 42
+% _assert_name = "BC: zmienna int"
+% _assert_got = @x
+% _assert_exp = 42
+-- assert_eq
+
+% s: str = hackeros
+% _assert_name = "BC: zmienna str"
+% _assert_got = @s
+% _assert_exp = hackeros
+-- assert_eq
+
+% flag: bool = true
+% _assert_name = "BC: zmienna bool"
+% _assert_got = @flag
+% _assert_exp = true
+-- assert_eq
+
+;; ── 3. Pętla for-in w bytecode ───────────────────────────────────────────────
+~> @COLOR_BOLD [3] For-in BC@COLOR_RESET
+
+% count = 0
+@ item in a b c d e
+    $(@count + 1) -> @count
+done
+
+% _assert_name = "BC: for-in liczy 5"
+% _assert_got = @count
+% _assert_exp = 5
+-- assert_eq
+
+;; ── 4. While w bytecode ──────────────────────────────────────────────────────
+~> @COLOR_BOLD [4] While BC@COLOR_RESET
+
+% w: int = 0
+?~ @w < 5
+    $(@w + 1) -> @w
+done
+
+% _assert_name = "BC: while do 5"
+% _assert_got = @w
+% _assert_exp = 5
+-- assert_eq
+
+;; ── 5. Switch w bytecode ─────────────────────────────────────────────────────
+~> @COLOR_BOLD [5] Switch BC@COLOR_RESET
+
+% sw = hl
+% sw_result = unknown
+? switch @sw
+| hl
+    % sw_result = matched
+| *
+    % sw_result = wildcard
+done
+
+% _assert_name = "BC: switch match"
+% _assert_got = @sw_result
+% _assert_exp = matched
+-- assert_eq
+
+;; ── 6. Funkcje w bytecode ────────────────────────────────────────────────────
+~> @COLOR_BOLD [6] Funkcje BC@COLOR_RESET
+
+% fn_called = false
+: bc_test_fn def
+    % fn_called = true
+done
+-- bc_test_fn
+
+% _assert_name = "BC: wywołanie funkcji"
+% _assert_got = @fn_called
+% _assert_exp = true
+-- assert_eq
+
+;; ── 7. Pipe do zmiennej w bytecode ───────────────────────────────────────────
+~> @COLOR_BOLD [7] Pipe |> BC@COLOR_RESET
+
+> echo "jit-test" |> @pipe_result
+% _assert_name = "BC: pipe |>"
+% _assert_got = @pipe_result
+% _assert_exp = jit-test
+-- assert_eq
+
+;; ── 8. Quick functions w bytecode ────────────────────────────────────────────
+~> @COLOR_BOLD [8] Quick Functions BC@COLOR_RESET
+
+% _assert_name = "BC: ::upper"
+>> echo "hello" | tr '[:lower:]' '[:upper:]' |> @qf_result
+% _assert_got = @qf_result
+% _assert_exp = HELLO
+-- assert_eq
+
+-- test_summary
