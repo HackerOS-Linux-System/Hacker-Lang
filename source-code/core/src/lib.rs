@@ -4,6 +4,10 @@ pub mod env;
 pub mod executor;
 pub mod libs;
 pub mod quick;
+pub mod arena;
+pub mod config;
+pub mod env_manager;
+pub mod extern_runner;
 
 pub use hl_parser::{
     ast, lexer, parser, gen, shebang,
@@ -14,6 +18,9 @@ pub use hl_parser::{
     ShebangInfo, PreprocessResult, preprocess,
     ParseMeta,
 };
+
+// Re-export ArenaSize z parsera
+pub use hl_parser::ast::ArenaSize;
 
 use anyhow::Result;
 use env::Env;
@@ -47,3 +54,15 @@ pub use executor::ExecResult;
 pub use diagnostics::{Diag, DiagLevel, DiagRenderer, DiagSummary, Span, lint_source};
 pub use libs::{cmd_lib_list, cmd_lib_install, cmd_lib_remove, cmd_clean_cache};
 pub use diagnostics::lint_gen;
+pub use arena::{Arena, ArenaContext, ArenaStats};
+pub use config::{
+    HlConfig, load_config, save_config, config_path,
+    set_active_env, clear_active_env, get_active_env,
+    envs_base_dir, global_libs_dir,
+};
+pub use env_manager::{
+    HlEnv,
+    cmd_env_create, cmd_env_enter, cmd_env_exit,
+    cmd_env_remove, cmd_env_list, cmd_env_status, cmd_env_help,
+};
+pub use extern_runner::exec_extern_def;
