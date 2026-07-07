@@ -4,6 +4,11 @@ members = [
     "source-code/parser",
     "source-code/shell",
     "source-code/cli",
+    "source-code/compiler",
+    "source-code/jit",
+]
+exclude = [
+    "source-code/vendor/hk-parser",
 ]
 resolver = "2"
 
@@ -27,6 +32,15 @@ smallvec      = "1"
 which         = "6"
 nix           = { version = "0.29", features = ["user"] }
 thiserror     = "1.0"
+cranelift-codegen  = { version = "0.132.2", features = ["all-arch"] }
+cranelift-frontend = "0.132.2"
+cranelift-jit      = "0.132.2"
+cranelift-module   = "0.132.2"
+cranelift-native   = "0.132.2"
+bincode            = "1"
+memmap2            = "0.9"
+indexmap           = "=2.1.0"
+hk-parser          = "0.3.0"
 
 [profile.release]
 lto           = true
