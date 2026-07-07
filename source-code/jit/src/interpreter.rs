@@ -78,12 +78,14 @@ impl<'a> BytecodeInterpreter<'a> {
                 let target = *offset as usize;
                 if target < pc {
                     // Pętla wsteczna — kandydat do trace JIT
+                    // Guard: kompiluj tylko małe pętle (<= 64 instrukcji)
+                    let loop_size = pc - target;
                     let count = self.exec_counts.get_mut(pc).map(|c| { *c += 1; *c }).unwrap_or(0);
-                    if count == TRACE_THRESHOLD {
+                    if count == TRACE_THRESHOLD && loop_size <= 64 {
                         // Próbuj skompilować pętlę [target..pc+1]
                         if let Ok(trace) = self.try_compile_trace(target as u32, pc as u32) {
                             self.compiled_traces.insert(target as u32, trace);
-                            tracing::debug!("[trace jit] skompilowano pętle @ {}", target);
+                            tracing::debug!("[trace jit] skompilowano pętle @ {} (size={})", target, loop_size);
                         }
                     }
                     // Jeśli pętla jest skompilowana — wykonaj natywnie
@@ -184,6 +186,22 @@ impl<'a> BytecodeInterpreter<'a> {
             Instruction::GetVar { dst, name } => {
                 // Inline cache hot path — O(1)
                 let val = self.state.get_var(name);
+                self.state.set_reg(dst, val);
+                Ok(ExecSignal::Next)
+            }
+            // GetVarDyn: @{arg@_i} — dynamiczna nazwa zmiennej z rejestru
+            // Rejestr `name` zawiera string (nazwę zmiennej), np. "arg0".
+            // Rozdzielamy borrow: najpierw kopiujemy string (owned), potem internujemy i robimy lookup.
+            Instruction::GetVarDyn { dst, name } => {
+                // 1. Pobierz wartość rejestru name → string (owned, by uniknąć borrow conflict)
+                let name_str: String = {
+                    let name_val = self.state.get_reg(name);
+                    name_val.to_str_val(&self.state.interner)
+                };
+                // 2. Intern string → idx (wymaga &mut interner — osobny blok)
+                let name_idx = self.state.interner.intern(&name_str);
+                // 3. Lookup zmiennej przez idx
+                let val = self.state.get_var(name_idx);
                 self.state.set_reg(dst, val);
                 Ok(ExecSignal::Next)
             }
@@ -600,7 +618,14 @@ fn exec_quick_fn(name: &str, arg: &str, state: &mut RuntimeState) -> String {
         "isdir"    => { let e = std::path::Path::new(arg).is_dir();  e.to_string() }
         "isfile"   => { let e = std::path::Path::new(arg).is_file(); e.to_string() }
         "which"    => which::which(arg).map(|p| p.display().to_string()).unwrap_or_default(),
-        "env"      => std::env::var(arg).unwrap_or_default(),
+        "env" | "getenv" => std::env::var(arg).unwrap_or_default(),
+        // ::env-path — ścieżka aktywnego środowiska z config.hk, zero subprocess
+        "env-path" => {
+            use hl_core::config::get_active_env;
+            get_active_env()
+                .map(|(_n, p)| p.display().to_string())
+                .unwrap_or_default()
+        }
         "read"     => std::fs::read_to_string(arg).unwrap_or_default(),
         "set"      => {
             if let Some((name, val)) = arg.splitn(2, ' ').collect::<Vec<_>>().as_slice().split_first() {
