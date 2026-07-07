@@ -12,6 +12,8 @@ path = "src/main.rs"
 hl-parser    = { path = "../parser" }
 hl-core      = { path = "../core" }
 hl-shell     = { path = "../shell" }
+hl-compiler  = { path = "../compiler" }
+hl-jit       = { path = "../jit" }
 anyhow.workspace          = true
 thiserror.workspace       = true
 tracing.workspace         = true
