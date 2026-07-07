@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::gen::{GenError, extract_gen};
+use crate::extern_spec::ExternRuntime;
 use crate::shebang::preprocess;
 use crate::lexer::{LexError, Lexer, Token, CommentKind, PipeCmdMode};
 use crate::ParseMeta;
@@ -7,27 +8,35 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
-    #[error("Blad leksera: {0}")]
+    #[error("Błąd leksera: {0}")]
     Lex(#[from] LexError),
     #[error("Nieoczekiwany token na pozycji {0}: {1}")]
     UnexpectedToken(usize, String),
-    #[error("Brakujace 'done' — blok nie jest zamkniety")]
+    #[error("Brakujące 'done' — blok nie jest zamknięty")]
     MissingDone,
-    #[error("Brakujace 'def' po nazwie funkcji")]
+    #[error("Brakujące 'def' po nazwie funkcji")]
     MissingDef,
-    #[error("Brakujace ']' — lista eksportu nie jest zamknieta")]
+    #[error("Brakujące ']' — lista eksportu nie jest zamknięta")]
     MissingExportListEnd,
-    #[error("Blad deklaracji gena: {0}")]
+    #[error("Błąd deklaracji gena: {0}")]
     Gen(#[from] GenError),
 }
 
 pub struct Parser {
     tokens: Vec<Token>,
     pos:    usize,
+    /// Nazwy zdefiniowanych arena functions — do rozróżnienia wywołań `:: nazwa`
+    arena_funcs: std::collections::HashSet<String>,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0 } }
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            arena_funcs: std::collections::HashSet::new(),
+        }
+    }
 
     #[inline] fn peek(&self) -> &Token { self.tokens.get(self.pos).unwrap_or(&Token::Eof) }
 
@@ -53,7 +62,6 @@ impl Parser {
             "str" | "string" => { return VarValue::String(value.trim_matches('"').to_string()); }
             _ => {}
         }
-
         if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
             let inner = &value[1..value.len()-1];
             let parts = parse_string_parts(inner);
@@ -69,7 +77,6 @@ impl Parser {
         if let Ok(n) = value.parse::<f64>() { return VarValue::Number(n); }
         if value == "true"  { return VarValue::Bool(true);  }
         if value == "false" { return VarValue::Bool(false); }
-
         let parts = parse_string_parts(value);
         if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
             VarValue::Interpolated(parts)
@@ -133,9 +140,48 @@ impl Parser {
             }
 
             Token::Print(msg)             => { self.advance(); Ok(Some(Node::Print { parts: parse_string_parts(&msg) })) }
-            Token::QuickCall { name, args }=> { self.advance(); Ok(Some(Node::QuickCall { name, args: parse_string_parts(&args) })) }
             Token::Background(raw)        => { self.advance(); Ok(Some(Node::Background { raw })) }
             Token::HshCmd(raw)            => { self.advance(); Ok(Some(Node::HshCommand { raw })) }
+
+            // ── :: operator ──────────────────────────────────────────────────
+            //
+            // QuickCall { name, args } z leksera:
+            //   - jeśli name jest w arena_funcs → ArenaFuncCall (gen 2, wydajne)
+            //   - w przeciwnym razie → QuickCall (wbudowane + gen 1 kompatybilność)
+            //
+            // ArenaFuncDef z leksera → Node::ArenaFuncDef (rejestruje nazwę)
+            Token::QuickCall { name, args } => {
+                self.advance();
+                if self.arena_funcs.contains(&name) {
+                    Ok(Some(Node::ArenaFuncCall {
+                        name,
+                        args: parse_string_parts(&args),
+                    }))
+                } else {
+                    Ok(Some(Node::QuickCall { name, args: parse_string_parts(&args) }))
+                }
+            }
+            // :: name args |> @var  — QuickCall z przechwyceniem wyjścia do zmiennej
+            Token::QuickPipeToVar { name, args, var_name } => {
+                self.advance();
+                Ok(Some(Node::QuickPipeToVar {
+                    name,
+                    args:     parse_string_parts(&args),
+                    var_name,
+                }))
+            }
+
+            Token::ArenaFuncDef { name, arena_size } => {
+                self.advance();
+                // Zarejestruj nazwę areny żeby przyszłe `:: nazwa` były ArenaFuncCall
+                self.arena_funcs.insert(name.clone());
+                let size = ArenaSize::parse(&arena_size);
+                Ok(Some(Node::ArenaFuncDef {
+                    name,
+                    arena_size: size,
+                    body: self.parse_block()?,
+                }))
+            }
 
             Token::RepeatN(n) => {
                 self.advance();
@@ -145,6 +191,8 @@ impl Parser {
             }
 
             Token::FileImport { path, detail } => { self.advance(); Ok(Some(Node::FileImport { path, detail })) }
+
+            Token::DirImport { path } => { self.advance(); Ok(Some(Node::DirImport { path })) }
 
             Token::GoroutineStart { name } => {
                 self.advance();
@@ -168,7 +216,6 @@ impl Parser {
 
             Token::Arithmetic { expr, assign_to } => { self.advance(); Ok(Some(Node::Arithmetic { expr, assign_to })) }
 
-            // CmdPipeToVar — obsluguje > |>, >> |>, ^> |>, ^>> |>
             Token::CmdPipeToVar { cmd, mode, var_name } => {
                 self.advance();
                 let cmd_mode = match mode {
@@ -212,7 +259,7 @@ impl Parser {
             }
             Token::ExportListItem(_) | Token::ExportListEnd => { self.advance(); Ok(None) }
 
-            Token::Dependency(dep)        => { self.advance(); Ok(Some(Node::Dependency { name: dep })) }
+            Token::Dependency(name, apt_package) => { self.advance(); Ok(Some(Node::Dependency { name, apt_package })) }
             Token::Import { lib, detail } => { self.advance(); Ok(Some(Node::Import { lib, detail })) }
 
             Token::FuncDef(name) => {
@@ -223,6 +270,17 @@ impl Parser {
 
             Token::IfOk  => { self.advance(); Ok(Some(Node::Conditional { condition: ConditionKind::Ok,  body: self.parse_block()? })) }
             Token::IfErr => { self.advance(); Ok(Some(Node::Conditional { condition: ConditionKind::Err, body: self.parse_block()? })) }
+
+            Token::ExternStart { file, runtime: rt_str } => {
+                self.advance();
+                let runtime = ExternRuntime::from_str(&rt_str)
+                    .unwrap_or(ExternRuntime::Elf);
+                Ok(Some(Node::ExternDef {
+                    file,
+                    runtime,
+                    body: self.parse_block()?,
+                }))
+            }
 
             Token::SwitchArm { .. }                              => { self.advance(); Ok(None) }
             Token::Bool(_) | Token::Number(_) | Token::Ident(_) |
@@ -287,18 +345,40 @@ mod tests {
     }
 
     #[test]
-    fn test_pipe_to_var_with_vars() {
-        let src = ">> jq -r '.version' /tmp/x.json | awk '{print $1}' |> @LOCAL_VERSION";
+    fn test_arena_func_def_and_call() {
+        let src = ":: my_fn <4k> def\n~> hello\ndone\n:: my_fn";
         let nodes = parse_source(src).unwrap();
-        assert!(nodes.iter().any(|n| matches!(n, Node::PipeToVar { .. })));
+        let has_def  = nodes.iter().any(|n| matches!(n, Node::ArenaFuncDef { name, .. } if name == "my_fn"));
+        let has_call = nodes.iter().any(|n| matches!(n, Node::ArenaFuncCall { name, .. } if name == "my_fn"));
+        assert!(has_def,  "Powinno być ArenaFuncDef");
+        assert!(has_call, "Powinno być ArenaFuncCall");
     }
 
     #[test]
-    fn test_pipe_to_var_in_quotes_ignored() {
-        // |> wewnatrz cudzyslowow nie jest pipeToVar
-        let src = r#">> bash -c "echo hello" |> @out"#;
+    fn test_arena_func_def_no_size() {
+        // Bez rozmiaru → domyślny 4096
+        let src = ":: my_fn def\n~> hello\ndone";
         let nodes = parse_source(src).unwrap();
-        assert!(nodes.iter().any(|n| matches!(n, Node::PipeToVar { .. })));
+        assert!(nodes.iter().any(|n| matches!(n, Node::ArenaFuncDef {
+            arena_size: ArenaSize(4096), ..
+        })));
+    }
+
+    #[test]
+    fn test_arena_func_size_suffix() {
+        let src = ":: buf_fn <64k> def\ndone";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::ArenaFuncDef {
+            arena_size: ArenaSize(65536), ..
+        })));
+    }
+
+    #[test]
+    fn test_quick_call_builtin_unchanged() {
+        // Wbudowane quick-calls (nie zdefiniowane jako arena) → QuickCall
+        let src = ":: green hello world";
+        let nodes = parse_source(src).unwrap();
+        assert!(nodes.iter().any(|n| matches!(n, Node::QuickCall { name, .. } if name == "green")));
     }
 
     #[test]
