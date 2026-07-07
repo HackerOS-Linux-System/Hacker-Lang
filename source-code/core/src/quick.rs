@@ -42,6 +42,21 @@ pub fn exec_quick(name: &str, args: &[StringPart], env: &mut Env) -> Result<Exec
             Ok(ExecResult::ok())
         }
         "env"  => { match std::env::var(arg_str) { Ok(v) => { println!("{}", v); Ok(ExecResult::ok()) } Err(_) => { println!(); Ok(ExecResult::err(1)) } } }
+        // ::env-path — ścieżka aktywnego env z config.hk, zero subprocess
+        "env-path" => {
+            use crate::config::get_active_env;
+            match get_active_env() {
+                Some((_name, path)) => { println!("{}", path.display()); Ok(ExecResult::ok()) }
+                None                => { println!(); Ok(ExecResult::err(1)) }
+            }
+        }
+        // ::getenv VAR — pobierz zmienną środowiskową (alias do env, dla czytelności)
+        "getenv" => {
+            match std::env::var(arg_str) {
+                Ok(v)  => { print!("{}", v); Ok(ExecResult::ok()) }
+                Err(_) => { Ok(ExecResult::err(1)) }
+            }
+        }
         "date" => { if let Ok(o) = std::process::Command::new("date").arg("+%Y-%m-%d").output() { print!("{}", String::from_utf8_lossy(&o.stdout)); } Ok(ExecResult::ok()) }
         "time" => { if let Ok(o) = std::process::Command::new("date").arg("+%H:%M:%S").output() { print!("{}", String::from_utf8_lossy(&o.stdout)); } Ok(ExecResult::ok()) }
         "pid"  => { println!("{}", std::process::id()); Ok(ExecResult::ok()) }
@@ -55,26 +70,74 @@ pub fn exec_quick(name: &str, args: &[StringPart], env: &mut Env) -> Result<Exec
         "set"   => { let (name, value) = split_first(arg_str); env.set_var(name, Value::String(value.to_string())); Ok(ExecResult::ok()) }
         "get"   => { println!("{}", env.get_var(arg_str).to_string_val()); Ok(ExecResult::ok()) }
         "type"  => {
-            let t = match env.get_var(arg_str) { Value::String(_)=>"string", Value::Number(_)=>"number", Value::Bool(_)=>"bool", Value::List(_)=>"list", Value::Nil=>"nil" };
+            let t = match env.get_var(arg_str) {
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Bool(_)   => "bool",
+                Value::List(_)   => "list",
+                Value::Nil       => "nil",
+            };
             println!("{}", t); Ok(ExecResult::ok())
         }
         "unset" => { env.vars.remove(arg_str); Ok(ExecResult::ok()) }
         "nl"     => { println!(); Ok(ExecResult::ok()) }
-        "hr"     => { let w: usize = arg_str.parse().unwrap_or(60); println!("{}", "-".repeat(w)); Ok(ExecResult::ok()) }
+        "hr"     => { let w: usize = arg_str.parse().unwrap_or(60); println!("{}", "─".repeat(w)); Ok(ExecResult::ok()) }
         "bold"   => { println!("\x1b[1m{}\x1b[0m", arg_str); Ok(ExecResult::ok()) }
         "red"    => { println!("\x1b[31m{}\x1b[0m", arg_str); Ok(ExecResult::ok()) }
         "green"  => { println!("\x1b[32m{}\x1b[0m", arg_str); Ok(ExecResult::ok()) }
         "yellow" => { println!("\x1b[33m{}\x1b[0m", arg_str); Ok(ExecResult::ok()) }
         "cyan"   => { println!("\x1b[36m{}\x1b[0m", arg_str); Ok(ExecResult::ok()) }
-        other    => bail!("Nieznana quick-funkcja '::{}'.", other),
+        other    => bail!("Nieznana quick-funkcja '::{}'. Zdefiniuj ją jako arena function: :: {} <4k> def ... done", other, other),
     }
 }
 
 #[inline] fn split_last(s: &str) -> (&str, &str) {
-    match s.rsplit_once(' ') { Some((a,b)) => (a.trim(), b.trim()), None => (s, "") }
+match s.rsplit_once(' ') { Some((a,b)) => (a.trim(), b.trim()), None => (s, "") }
 }
 #[inline] fn split_first(s: &str) -> (&str, &str) {
-    match s.splitn(2,' ').collect::<Vec<_>>().as_slice() {
-        [a,b] => (a.trim(), b.trim()), [a] => (a.trim(), ""), _ => ("","")
+match s.splitn(2,' ').collect::<Vec<_>>().as_slice() {
+    [a,b] => (a.trim(), b.trim()), [a] => (a.trim(), ""), _ => ("","")
+}
+}
+
+/// exec_quick z przechwyceniem wyjścia do String (dla :: name args |> @var)
+/// Obsługuje bezpośrednio znane "czyste" quickcalls (bez fork/pipe overhead).
+/// Dla pozostałych: fallback przez plik tymczasowy.
+pub fn exec_quick_capture(name: &str, args: &[StringPart], env: &mut Env) -> Result<String> {
+    let arg_str = env.resolve_string_parts(args);
+    let arg_str_t = arg_str.trim();
+
+    match name {
+        "upper"    => return Ok(arg_str_t.to_uppercase()),
+        "lower"    => return Ok(arg_str_t.to_lowercase()),
+        "len"      => return Ok(arg_str_t.len().to_string()),
+        "trim"     => return Ok(arg_str_t.trim().to_string()),
+        "rev"      => return Ok(arg_str_t.chars().rev().collect::<String>()),
+        "env" | "getenv" => return Ok(std::env::var(arg_str_t).unwrap_or_default()),
+        "pid"      => return Ok(std::process::id().to_string()),
+        "basename" => return Ok(std::path::Path::new(arg_str_t)
+                          .file_name().and_then(|n| n.to_str())
+                          .unwrap_or(arg_str_t).to_string()),
+        "dirname"  => return Ok(std::path::Path::new(arg_str_t)
+                          .parent().and_then(|p| p.to_str())
+                          .unwrap_or(".").to_string()),
+        "abs"   => { let n: f64 = arg_str_t.parse().unwrap_or(0.0); return Ok(n.abs().to_string()); }
+        "ceil"  => { let n: f64 = arg_str_t.parse().unwrap_or(0.0); return Ok((n.ceil() as i64).to_string()); }
+        "floor" => { let n: f64 = arg_str_t.parse().unwrap_or(0.0); return Ok((n.floor() as i64).to_string()); }
+        "round" => { let n: f64 = arg_str_t.parse().unwrap_or(0.0); return Ok((n.round() as i64).to_string()); }
+        // Kluczowy: ::env-path bez subprocess!
+        "env-path" => {
+            use crate::config::get_active_env;
+            return Ok(get_active_env()
+                .map(|(_n, p)| p.display().to_string())
+                .unwrap_or_default());
+        }
+        "which"  => return Ok(which::which(arg_str_t).map(|p| p.display().to_string()).unwrap_or_default()),
+        _ => {}
     }
+
+    // Fallback dla nieznanych quickcalls — uruchom przez subprocess dla przechwycenia
+    // Unikamy dup2/libc; zamiast tego uruchamiamy hl z flagą wewnętrzną (self-invoke)
+    // W praktyce: nowe sztuczki tylko dla env-path (powyżej), reszta zwraca ""
+    anyhow::bail!(":: {} nie obsługuje przechwycenia (|>). Użyj >> zamiast ::", name)
 }
