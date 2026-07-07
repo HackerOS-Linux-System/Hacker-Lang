@@ -4,7 +4,15 @@ use crate::import_spec::parse_import_line;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Print(String),
+    // Wbudowane quick-call (gen 1 + gen 2 fallback): :: nazwa args
     QuickCall { name: String, args: String },
+    /// :: nazwa args |> @var  — QuickCall z przechwyceniem stdout do zmiennej
+    QuickPipeToVar { name: String, args: String, var_name: String },
+    // Arena function DEFINICJA (gen 2): :: nazwa <rozmiar> def
+    ArenaFuncDef { name: String, arena_size: String },
+    // Arena function WYWOŁANIE (gen 2): :: nazwa args
+    // Rozróżnienie od QuickCall następuje w parserze (sprawdza czy nazwa zdefiniowana)
+    // W lekserze emitujemy QuickCall — parser decyduje co to jest
     CmdIsolatedSudo(String),
     CmdWithVarsSudo(String),
     CmdWithVarsIsolated(String),
@@ -22,9 +30,13 @@ pub enum Token {
     ExportListStart(String),
     ExportListItem(String),
     ExportListEnd,
-    Dependency(String),
+    /// // narzedzie [pakiet-apt]
+    /// Pole 0: nazwa binarka (np. "ninja"), pole 1: apt package (np. Some("ninja-build"))
+    Dependency(String, Option<String>),
     Import { lib: String, detail: Option<String> },
     FileImport { path: String, detail: Option<String> },
+    // <* katalog — import katalogu (gen 2)
+    DirImport  { path: String },
     FuncDef(String),
     FuncCall(String),
     IfOk,
@@ -39,6 +51,8 @@ pub enum Token {
     GoroutineStart { name: Option<String> },
     ChannelDecl(String),
     ChannelOp(String),
+    // _> plik [runtime] — extern system
+    ExternStart { file: String, runtime: String },
     RepeatN(u64),
     Comments(CommentKind, String),
     Ident(String),
@@ -59,9 +73,9 @@ pub enum CommentKind { Line, Doc, Block }
 pub enum LexError {
     #[error("Nieoczekiwany znak '{0}' w linii {1}:{2}")]
     UnexpectedChar(char, usize, usize),
-    #[error("Niezamkniety string w linii {0}")]
+    #[error("Niezamknięty string w linii {0}")]
     UnterminatedString(usize),
-    #[error("Niezamkniety komentarz blokowy")]
+    #[error("Niezamknięty komentarz blokowy")]
     UnterminatedBlockComment,
 }
 
@@ -155,10 +169,35 @@ impl Lexer {
 
     fn read_cmd(&mut self) -> String { self.skip_ws(); self.read_line() }
 
-    /// Sprawdz czy linia zawiera |> @var (pipe do zmiennej)
-    /// Zwraca (cmd_part, var_name) albo None
+    /// Rozdziel `args |> @var` dla QuickCall (:: name args |> @var)
+    /// Zwraca (args_before_pipe, var_name) lub None jeśli brak |>
+    fn split_quick_pipe(line: &str) -> Option<(String, String)> {
+        let b = line.as_bytes();
+        let mut in_s = false;
+        let mut in_d = false;
+        let mut i = 0;
+        while i + 1 < b.len() {
+            match b[i] {
+                b'\'' if !in_d => in_s = !in_s,
+                b'"'  if !in_s => in_d = !in_d,
+                b'|' if !in_s && !in_d && b[i+1] == b'>' => {
+                    let args_part = line[..i].trim().to_string();
+                    let rest      = line[i+2..].trim();
+                    let var_name  = rest.strip_prefix('@')
+                        .map(|v| v.split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .next().unwrap_or("").to_string())
+                        .unwrap_or_default();
+                    if var_name.is_empty() { return None; }
+                    return Some((args_part, var_name));
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
     fn split_pipe_to_var(line: &str) -> Option<(String, String)> {
-        // Szukaj |> poza cudzyslowami
         let bytes = line.as_bytes();
         let mut in_sq = false;
         let mut in_dq = false;
@@ -170,15 +209,46 @@ impl Lexer {
                 b'|' if !in_sq && !in_dq && bytes[i+1] == b'>' => {
                     let cmd = line[..i].trim().to_string();
                     let var = line[i+2..].trim().trim_start_matches('@').to_string();
-                    if !var.is_empty() && !cmd.is_empty() {
-                        return Some((cmd, var));
-                    }
+                    if !var.is_empty() && !cmd.is_empty() { return Some((cmd, var)); }
                 }
                 _ => {}
             }
             i += 1;
         }
         None
+    }
+
+    // ── Parsowanie rozmiaru areny: <4k>, <1m>, <4096> ────────────────────────
+    fn try_read_arena_size(&mut self) -> Option<String> {
+        // Spójrz czy po skip_ws jest '<'
+        let saved_pos  = self.pos;
+        let saved_line = self.line;
+        let saved_col  = self.col;
+
+        self.skip_ws();
+        if self.peek() != Some('<') {
+            // Cofnij
+            self.pos  = saved_pos;
+            self.line = saved_line;
+            self.col  = saved_col;
+            return None;
+        }
+        self.advance(); // '<'
+        let mut size_str = String::new();
+        loop {
+            match self.peek() {
+                Some('>') => { self.advance(); break; }
+                Some('\n') | None => {
+                    // Niezamknięty '<' — cofnij i traktuj jako brak rozmiaru
+                    self.pos  = saved_pos;
+                    self.line = saved_line;
+                    self.col  = saved_col;
+                    return None;
+                }
+                Some(c) => { size_str.push(c); self.advance(); }
+            }
+        }
+        Some(size_str.trim().to_string())
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
@@ -296,11 +366,62 @@ impl Lexer {
                     tokens.push(Token::GoroutineStart { name });
                 }
 
-                // ── :: quick call ─────────────────────────────────────────────
+                // ── :: arena function DEF lub QuickCall ───────────────────────
+                //
+                // Reguła rozróżnienia w lekserze:
+                //   :: nazwa <rozmiar> def  → ArenaFuncDef
+                //   :: nazwa [args...]      → QuickCall (parser rozróżni czy to wywołanie areny)
                 ':' if self.peek_at(1) == Some(':') => {
                     self.skip_n(2); self.skip_ws();
-                    let name = self.read_ident(); self.skip_ws();
-                    tokens.push(Token::QuickCall { name, args: self.read_line() });
+                    let name = self.read_ident_full();
+                    self.skip_ws();
+
+                    // Próbuj rozpoznać def areny: <rozmiar> def  LUB  def
+                    let saved = self.pos;
+                    let saved_line = self.line;
+                    let saved_col = self.col;
+
+                    // Sprawdź czy następne to <rozmiar> def lub samo def
+                    let arena_size_str = self.try_read_arena_size();
+                    self.skip_ws();
+                    let is_def = {
+                        let mut tmp_pos = self.pos;
+                        let mut kw = String::new();
+                        while tmp_pos < self.source.len()
+                            && self.source[tmp_pos].is_alphabetic()
+                            {
+                                kw.push(self.source[tmp_pos]);
+                                tmp_pos += 1;
+                            }
+                            kw == "def"
+                    };
+
+                    if is_def {
+                        // Pochłoń "def" i resztę linii
+                        self.read_ident(); // "def"
+                        self.read_line();
+                        let size = arena_size_str.unwrap_or_default();
+                        tokens.push(Token::ArenaFuncDef { name, arena_size: size });
+                    } else {
+                        // Cofnij po read_arena_size (jeśli było) i traktuj jako QuickCall
+                        if arena_size_str.is_some() {
+                            self.pos  = saved;
+                            self.line = saved_line;
+                            self.col  = saved_col;
+                            self.skip_ws();
+                        }
+                        // Sprawdź czy linia zawiera |> @var (QuickPipeToVar)
+                        let line = self.read_line();
+                        if let Some((cmd_part, var_part)) = Self::split_quick_pipe(&line) {
+                            tokens.push(Token::QuickPipeToVar {
+                                name,
+                                args:     cmd_part,
+                                var_name: var_part,
+                            });
+                        } else {
+                            tokens.push(Token::QuickCall { name, args: line });
+                        }
+                    }
                 }
 
                 ':' => {
@@ -323,7 +444,7 @@ impl Lexer {
                     tokens.push(Token::Comments(CommentKind::Doc, self.read_line()));
                 }
 
-                // ── // zaleznosc lub blok ─────────────────────────────────────
+                // ── // zależność lub blok ─────────────────────────────────────
                 '/' if self.matches_seq(&['/', '/']) => {
                     self.skip_n(2); self.skip_ws();
                     let rest: String = self.source[self.pos..].iter().collect();
@@ -332,11 +453,30 @@ impl Lexer {
                         self.skip_n(end + 2);
                         tokens.push(Token::Comments(CommentKind::Block, content));
                     } else {
-                        tokens.push(Token::Dependency(self.read_line()));
+                        // Parsuj: "// narzedzie [pakiet-apt]" lub "// narzedzie"
+                        let raw_dep = self.read_line();
+                        let raw_dep = raw_dep.trim();
+                        // Rozdziel na bin_name i opcjonalny [apt-package]
+                        let (bin_name, apt_pkg) = if let (Some(lb), Some(rb)) = (raw_dep.find('['), raw_dep.rfind(']')) {
+                            let name = raw_dep[..lb].trim().to_string();
+                            let pkg  = raw_dep[lb+1..rb].trim().to_string();
+                            (name, if pkg.is_empty() { None } else { Some(pkg) })
+                        } else {
+                            (raw_dep.to_string(), None)
+                        };
+                        tokens.push(Token::Dependency(bin_name, apt_pkg));
                     }
                 }
 
                 // ── << file import ────────────────────────────────────────────
+                // ── <* dir import (gen 2) ────────────────────────────────────────────────
+                // <* katalog — ładuje katalog/imports.hl (odpowiednik mod.rs)
+                '<' if self.peek_at(1) == Some('*') => {
+                    self.skip_n(2); self.skip_ws();
+                    let path = self.read_line().trim().to_string();
+                    tokens.push(Token::DirImport { path });
+                }
+
                 '<' if self.peek_at(1) == Some('<') => {
                     self.skip_n(2); self.skip_ws();
                     let rest = self.read_line();
@@ -367,85 +507,104 @@ impl Lexer {
                     }
                 }
 
-                // ── ^-> izolacja sudo ─────────────────────────────────────────
                 '^' if self.matches_seq(&['^', '-', '>']) => { self.skip_n(3); tokens.push(Token::CmdIsolatedSudo(self.read_cmd())); }
-
-                // ── ^>> sudo z vars ───────────────────────────────────────────
                 '^' if self.matches_seq(&['^', '>', '>']) => {
                     self.skip_n(3);
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
                         tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
-                    } else {
-                        tokens.push(Token::CmdWithVarsSudo(line));
-                    }
+                    } else { tokens.push(Token::CmdWithVarsSudo(line)); }
                 }
-
-                // ── ^> sudo ───────────────────────────────────────────────────
                 '^' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2);
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
                         tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::Sudo, var_name: var });
-                    } else {
-                        tokens.push(Token::CmdSudo(line));
-                    }
+                    } else { tokens.push(Token::CmdSudo(line)); }
                 }
                 '^' => { self.advance(); }
 
-                // ── ->> izolacja z vars ───────────────────────────────────────
                 '-' if self.matches_seq(&['-', '>', '>']) => {
                     self.skip_n(3);
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
                         tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
-                    } else {
-                        tokens.push(Token::CmdWithVarsIsolated(line));
-                    }
+                    } else { tokens.push(Token::CmdWithVarsIsolated(line)); }
                 }
-
-                // ── -> izolacja ───────────────────────────────────────────────
                 '-' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdIsolated(self.read_cmd())); }
 
-                // ── >> komenda z vars ─────────────────────────────────────────
                 '>' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2);
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
                         tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
-                    } else {
-                        tokens.push(Token::CmdWithVars(line));
-                    }
+                    } else { tokens.push(Token::CmdWithVars(line)); }
                 }
-
-                // ── > komenda ─────────────────────────────────────────────────
                 '>' => {
                     self.advance();
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
                         tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::Plain, var_name: var });
+                    } else { tokens.push(Token::Cmd(line)); }
+                }
+
+                '&' => { self.advance(); self.skip_ws(); tokens.push(Token::Background(self.read_line())); }
+
+                // ── _> extern ─────────────────────────────────────────────────
+                // _> plik.sh [shell] def ... done
+                // _> binarka [elf] def ... done
+                '_' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2); self.skip_ws();
+                    // Czytaj ścieżkę pliku (do pierwszego białego znaku lub '[')
+                    let mut file = String::new();
+                    while let Some(c) = self.peek() {
+                        if c == ' ' || c == '\t' || c == '[' || c == '\n' { break; }
+                        file.push(c); self.advance();
+                    }
+                    self.skip_ws();
+                    // Czytaj [runtime]
+                    let runtime = if self.peek() == Some('[') {
+                        self.advance();
+                        let mut rt = String::new();
+                        while let Some(c) = self.peek() {
+                            if c == ']' { self.advance(); break; }
+                            if c == '\n' { break; }
+                            rt.push(c); self.advance();
+                        }
+                        rt.trim().to_string()
                     } else {
-                        tokens.push(Token::Cmd(line));
+                        // Próbuj zgadnąć runtime z rozszerzenia pliku
+                        let ext = file.rsplit('.').next().unwrap_or("").to_lowercase();
+                        match ext.as_str() {
+                            "sh" | "bash"  => "shell".to_string(),
+                            "py"           => "python".to_string(),
+                            "jar"          => "java".to_string(),
+                            "so"           => "so".to_string(),
+                            _              => "elf".to_string(),
+                        }
+                    };
+                    self.skip_ws();
+                    // Pochłoń "def"
+                    let kw = self.read_ident();
+                    if kw != "def" {
+                        // Cofnij — traktuj jako VarRef ze specjalną obsługą
+                        tokens.push(Token::ExternStart { file, runtime });
+                    } else {
+                        self.read_line();
+                        tokens.push(Token::ExternStart { file, runtime });
                     }
                 }
 
-                // ── & background ──────────────────────────────────────────────
-                '&' => { self.advance(); self.skip_ws(); tokens.push(Token::Background(self.read_line())); }
-
-                // ── *-- channel op ────────────────────────────────────────────
                 '*' if self.matches_seq(&['*', '-', '-']) => {
                     self.skip_n(3); self.skip_ws();
                     tokens.push(Token::ChannelOp(self.read_ident_full()));
                     self.read_line();
                 }
-
-                // ── *> hsh ────────────────────────────────────────────────────
                 '*' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2); self.skip_ws();
                     tokens.push(Token::HshCmd(self.read_line()));
                 }
 
-                // ── _N repeat lub _var VarRef ─────────────────────────────────
                 '_' => {
                     self.advance();
                     let mut num_str = String::new();
@@ -473,7 +632,6 @@ impl Lexer {
                     }
                 }
 
-                // ── @ var lub @ item in lista ─────────────────────────────────
                 '@' => {
                     self.advance();
                     let name = self.read_ident_full();
@@ -496,7 +654,6 @@ impl Lexer {
                     }
                 }
 
-                // ── % zmienna ─────────────────────────────────────────────────
                 '%' => {
                     self.advance(); self.skip_ws();
                     let name = self.read_ident_full(); self.skip_ws();
@@ -513,7 +670,6 @@ impl Lexer {
                     }
                 }
 
-                // ── ? ok / ? err / ?~ while / ? switch ───────────────────────
                 '?' => {
                     self.advance(); self.skip_ws();
                     if self.peek() == Some('~') {
@@ -530,7 +686,6 @@ impl Lexer {
                     }
                 }
 
-                // ── # import ─────────────────────────────────────────────────
                 '#' => {
                     self.advance();
                     if self.peek() == Some('!') {
@@ -574,8 +729,6 @@ impl Lexer {
 
                 '=' => { self.advance(); }
 
-                // '.' — moze pojawic sie w sciezkach (np. ./main.hl)
-                // traktujemy jako poczatek sciezki/identyfikatora
                 '.' => {
                     let mut path = String::from(".");
                     self.advance();
