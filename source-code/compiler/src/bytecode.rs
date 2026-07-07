@@ -12,39 +12,60 @@ pub type FuncIdx = u32;
 /// Offset instrukcji (do skoków)
 pub type InsnOff = u32;
 
-/// Pula stałych — wszystkie literały stringów, liczb, boolów
+/// Pula stałych z O(1) deduplikacją przez HashMap.
+/// Poprzednia implementacja używała iter().position() = O(n) per insert → O(n²) ogółem.
+/// Dla bit.hl (836 linii, ~500 unikalnych stringów) powodowało 8s+ kompilacji.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConstPool {
-    pub strings:  Vec<String>,
-    pub numbers:  Vec<f64>,
-    pub bools:    Vec<bool>,
+    pub strings:      Vec<String>,
+    pub numbers:      Vec<f64>,
+    pub bools:        Vec<bool>,
+    // Indeksy do szybkiej deduplikacji — nie serializowane (rebuilt przy load)
+    #[serde(skip)]
+    str_index:    std::collections::HashMap<String, ConstIdx>,
+    #[serde(skip)]
+    num_index:    std::collections::HashMap<u64, ConstIdx>,
 }
 
 impl ConstPool {
+    /// Dodaj lub zdeduplikuj string — O(1) amortyzowane
     pub fn add_str(&mut self, s: impl Into<String>) -> ConstIdx {
         let s = s.into();
-        if let Some(i) = self.strings.iter().position(|x| x == &s) {
-            return i as ConstIdx;
+        if let Some(&i) = self.str_index.get(&s) {
+            return i;
         }
         let i = self.strings.len() as ConstIdx;
+        self.str_index.insert(s.clone(), i);
         self.strings.push(s);
         i
     }
 
+    /// Dodaj lub zdeduplikuj f64 — O(1) przez bit-pattern hash
     pub fn add_num(&mut self, n: f64) -> ConstIdx {
-        // Deduplikacja przez bit-pattern (NaN nie jest problemem w HL)
         let bits = n.to_bits();
-        if let Some(i) = self.numbers.iter().position(|x| x.to_bits() == bits) {
-            return i as ConstIdx;
+        if let Some(&i) = self.num_index.get(&bits) {
+            return i;
         }
         let i = self.numbers.len() as ConstIdx;
+        self.num_index.insert(bits, i);
         self.numbers.push(n);
         i
     }
 
     pub fn add_bool(&mut self, b: bool) -> ConstIdx {
-        // tylko 2 wartości — 0 = false, 1 = true
         b as ConstIdx
+    }
+
+    /// Odbuduj indeksy po deserializacji (serde skip → puste HashMap)
+    pub fn rebuild_index(&mut self) {
+        self.str_index.clear();
+        for (i, s) in self.strings.iter().enumerate() {
+            self.str_index.insert(s.clone(), i as ConstIdx);
+        }
+        self.num_index.clear();
+        for (i, n) in self.numbers.iter().enumerate() {
+            self.num_index.insert(n.to_bits(), i as ConstIdx);
+        }
     }
 }
 
@@ -134,7 +155,9 @@ pub enum Instruction {
 
     // ── Zmienne ─────────────────────────────────────────────────
     /// dst = env[name_idx]  (czytaj zmienną)
-    GetVar   { dst: Reg, name: ConstIdx },
+    GetVar    { dst: Reg, name: ConstIdx },
+    /// dst = env[name_reg]  (dynamiczna nazwa zmiennej — @{arg@_i})
+    GetVarDyn { dst: Reg, name: Reg },
     /// env[name_idx] = src
     SetVar   { name: ConstIdx, src: Reg },
     /// env[name_idx] = src  (export do std::env)
