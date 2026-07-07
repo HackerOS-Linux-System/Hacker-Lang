@@ -8,6 +8,9 @@ struct Lowerer {
     reg_alloc: u32,
 }
 
+/// Maksymalna liczba rejestrów — zapobiega przepełnieniu przy dużych skryptach
+const MAX_REGS: u32 = 65536;
+
 impl Lowerer {
     fn new(source_path: &str, gen: u32) -> Self {
         Self {
@@ -18,7 +21,10 @@ impl Lowerer {
 
     fn alloc_reg(&mut self) -> Reg {
         let r = self.reg_alloc;
-        self.reg_alloc += 1;
+        // Jeśli przekroczono limit — recykluj rejestry (nie rośniemy w nieskończoność)
+        if self.reg_alloc < MAX_REGS {
+            self.reg_alloc += 1;
+        }
         r
     }
 
@@ -253,10 +259,22 @@ impl Lowerer {
             }
 
             Node::QuickCall { name, args } => {
-                let arg_reg = self.lower_string_parts(args);
-                let dst     = self.alloc_reg();
+                let arg_reg  = self.lower_string_parts(args);
+                let dst      = self.alloc_reg();
                 let name_idx = self.module.consts.add_str(name.as_str());
                 self.emit(Instruction::CallQuick { name: name_idx, arg: arg_reg, dst });
+            }
+
+            // :: name args |> @var — QuickCall z przechwyceniem do zmiennej
+            Node::QuickPipeToVar { name, args, var_name } => {
+                let arg_reg  = self.lower_string_parts(args);
+                let dst      = self.alloc_reg();
+                let name_idx = self.module.consts.add_str(name.as_str());
+                let var_idx  = self.module.consts.add_str(var_name.as_str());
+                self.emit(Instruction::CallQuick { name: name_idx, arg: arg_reg, dst });
+                // Po wykonaniu: wynik quickcall jest w dst (jako string z captured output)
+                // Zapisz do zmiennej
+                self.emit(Instruction::SetVar { name: var_idx, src: dst });
             }
 
             Node::HackerOsApi { tool, args } => {
@@ -410,6 +428,38 @@ impl Lowerer {
                 let name_idx = self.module.consts.add_str(&fn_name);
                 self.emit(Instruction::CallFunc { name: name_idx });
             }
+
+            // ExternDef — zewnętrzne runtimes (shell/python/java/elf/so)
+            // Kompilator emituje ExecCapture z komendą zbudowaną z pliku i args.
+            // Właściwa dyspozycja runtime odbywa się w interpreterze/executorze.
+            Node::ExternDef { file, runtime, body } => {
+                // Najpierw skompiluj ciało bloku (ustawia _arg_N / _env_KEY)
+                self.lower_nodes(body);
+
+                // Zbuduj string komendy: "__extern__:<runtime>:<file>"
+                // Interpreter rozpoznaje ten prefix i przekazuje do extern_runner
+                let dispatch = format!("__extern__:{}:{}", runtime.name(), file);
+                let dispatch_idx = self.module.consts.add_str(&dispatch);
+                let cmd_reg = self.alloc_reg();
+                self.emit(Instruction::LoadStr { dst: cmd_reg, idx: dispatch_idx });
+
+                let dst_ec  = self.alloc_reg();
+                let dst_out = self.alloc_reg();
+                self.emit(Instruction::ExecCapture {
+                    cmd: cmd_reg,
+                    mode: CmdMode::Plain,
+                    dst_ec,
+                    dst_out,
+                });
+
+                // Zapisz exit code do _extern_exit
+                let key_exit = self.module.consts.add_str("_extern_exit");
+                self.emit(Instruction::SetVar { name: key_exit, src: dst_ec });
+
+                // Zapisz output do _extern_result
+                let key_res = self.module.consts.add_str("_extern_result");
+                self.emit(Instruction::SetVar { name: key_res, src: dst_out });
+            }
         }
     }
 
@@ -446,6 +496,16 @@ impl Lowerer {
                 let dst = self.alloc_reg();
                 let name_idx = self.module.consts.add_str(name.as_str());
                 self.emit(Instruction::GetVar { dst, name: name_idx });
+                let str_dst = self.alloc_reg();
+                self.emit(Instruction::ToString { dst: str_dst, src: dst });
+                str_dst
+            }
+            // DynVar: @{arg@_i} — rozwiąż wewnętrzne części → sklejona nazwa
+            // → GetVarDyn pobiera zmienną o dynamicznej nazwie z rejestru
+            StringPart::DynVar(inner_parts) => {
+                let name_reg = self.lower_string_parts(inner_parts);
+                let dst = self.alloc_reg();
+                self.emit(Instruction::GetVarDyn { dst, name: name_reg });
                 let str_dst = self.alloc_reg();
                 self.emit(Instruction::ToString { dst: str_dst, src: dst });
                 str_dst
