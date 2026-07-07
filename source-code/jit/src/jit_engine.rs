@@ -1,4 +1,3 @@
-
 use anyhow::{bail, Result};
 use cranelift_codegen::ir::{
     types, AbiParam, Function, InstBuilder, Signature, UserFuncName,
@@ -316,8 +315,9 @@ fn compile_insn(
             let v = builder.ins().f64const(0.0);
             dv!(*dst, v);
         }
-        Instruction::GetVar { dst, .. } => { let _ = dst; }
-        Instruction::SetVar { src, .. }    => { let _ = src; }
+        Instruction::GetVar    { dst, .. }      => { let _ = dst; }
+        Instruction::GetVarDyn { dst, name }    => { let _ = (dst, name); }
+        Instruction::SetVar    { src, .. }      => { let _ = src; }
 
         Instruction::Add { dst, a, b } => {
             let va = gv!(*a); let vb = gv!(*b);
@@ -372,8 +372,9 @@ fn insn_regs(insn: &Instruction) -> Vec<u32> {
         Instruction::LoadNum  { dst, .. } => vec![*dst],
         Instruction::LoadBool { dst, .. } => vec![*dst],
         Instruction::LoadNil  { dst }     => vec![*dst],
-        Instruction::GetVar   { dst, .. } => vec![*dst],
-        Instruction::SetVar   { src, .. } => vec![*src],
+        Instruction::GetVar    { dst, .. } => vec![*dst],
+        Instruction::GetVarDyn { dst, name } => vec![*dst, *name],
+        Instruction::SetVar    { src, .. } => vec![*src],
         Instruction::Add { dst, a, b } |
         Instruction::Sub { dst, a, b } |
         Instruction::Mul { dst, a, b } |
