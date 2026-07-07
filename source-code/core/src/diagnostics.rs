@@ -86,13 +86,25 @@ pub fn lint_source(source: &str) -> Vec<Diag> {
     // ── OPTYMALIZACJA: jednorazowy pre-pass dla deklaracji narzedzi ────────────
     // Poprzednio: O(n^2) - dla kazdej linii komendy iterowalo wszystkie linie
     // Teraz: O(n) - jeden HashSet zbierany na poczatku
+    // Parsuj "// narzedzie" i "// narzedzie [pakiet-apt]" → zbierz nazwy binarek
     let declared_tools: HashSet<&str> = source.lines()
     .filter_map(|l| {
         let t = l.trim();
-        // linia // narzedzie (nie ///, nie blok komentarz z \\)
+        // Linia // narzedzie (nie ///, nie blok komentarz z \\)
         if t.starts_with("//") && !t.starts_with("///") && !t.ends_with("\\\\") {
-            let tool = t[2..].trim();
-            if !tool.is_empty() && !tool.contains(' ') { Some(tool) } else { None }
+            let raw = t[2..].trim();
+            if raw.is_empty() { return None; }
+            // Wyciągnij nazwę binarki: przed " [" lub całość jeśli brak []
+            let bin_name = if let Some(bracket_pos) = raw.find(" [") {
+                raw[..bracket_pos].trim()
+            } else if let Some(bracket_pos) = raw.find('[') {
+                raw[..bracket_pos].trim()
+            } else {
+                // Bez [] — całość to nazwa binarki (nie może zawierać spacji)
+                if raw.contains(' ') { return None; }
+                raw
+            };
+            if !bin_name.is_empty() { Some(bin_name) } else { None }
         } else { None }
     })
     .collect();
@@ -159,9 +171,12 @@ fn check_missing_dep_fast(line: &str, line_no: usize, declared: &HashSet<&str>, 
     let first_word = cmd_content.trim().split_whitespace().next().unwrap_or("");
     if let Some(&tool) = WATCHED.iter().find(|&&t| t == first_word) {
         if !declared.contains(tool) {
-            diags.push(Diag::hint(format!("narzedzie `{}` uzyte bez `// {}`", tool, tool))
+            diags.push(Diag::hint(format!("narzedzie `{}` uzyte bez deklaracji `// {}`", tool, tool))
             .with_span(Span::new(line_no, 1, line.len()))
-            .with_suggestion(format!("dodaj: `// {}`", tool)));
+            .with_suggestion(format!(
+                "dodaj: `// {tool}` lub `// {tool} [pakiet-apt]` jesli nazwa pakietu inna niz binarka
+                  Przyklady: `// ninja [ninja-build]`  `// rg [ripgrep]`  `// fd [fd-find]`"
+            )));
         }
     }
 }
