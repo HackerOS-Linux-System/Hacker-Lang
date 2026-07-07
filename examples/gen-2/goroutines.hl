@@ -1,0 +1,63 @@
+#!/usr/bin/hl
+
+using <gen 2>
+
+::bold ═══ Goroutines & Concurrency ═══
+::hr 42
+::nl
+
+;; ── 1. Background task (&) ────────────────────────────────────────────────────
+::bold 1. Background task:
+& sleep 1 && echo "Zadanie tła zakończone (PID=\$_bg_pid)"
+~> Wątek główny kontynuuje...
+> sleep 0
+
+;; ── 2. Goroutine — równoległy blok ───────────────────────────────────────────
+::bold 2. Goroutine:
+:* worker_a
+    > sleep 1
+    ::green   [A] Worker A gotowy
+done
+
+:* worker_b
+    > sleep 1
+    ::cyan    [B] Worker B gotowy
+done
+
+~> Uruchomiono worker_a i worker_b równolegle
+> sleep 2
+
+;; ── 3. Channel — komunikacja między wątkami ───────────────────────────────────
+::bold 3. Channel:
+:** result_chan
+:* producer
+    > sleep 0
+    :**: result_chan = dane_z_producenta
+done
+> sleep 1
+~> Odebrano z kanału: :::** result_chan
+:: nl
+
+;; ── 4. Parallel download simulation ──────────────────────────────────────────
+::bold 4. Równoległe pobieranie (symulacja):
+
+:* download_a
+    > sleep 1
+    ::green   [OK] Pobrano: plik_a.tar.gz
+done
+
+:* download_b
+    > sleep 1
+    ::green   [OK] Pobrano: plik_b.tar.gz
+done
+
+:* download_c
+    > sleep 1
+    ::green   [OK] Pobrano: plik_c.tar.gz
+done
+
+~> Czekam na zakończenie pobrań...
+> sleep 2
+
+::nl
+::bold Wszystkie wątki ukończone.
