@@ -1,0 +1,54 @@
+#!/usr/bin/hl
+
+using <gen 2>
+
+;; Arena function do sumowania liczb w zakresie
+;; Argumenty przez @_arena_args
+:: sum_range <4k> def
+    >> echo "@_arena_args" | cut -d' ' -f1 |> @_from
+    >> echo "@_arena_args" | cut -d' ' -f2 |> @_to
+    % _sum = 0
+    % _i   = @_from
+    ?~ @_i <= @_to
+        $(@_sum + @_i) -> @_sum
+        $(@_i + 1)     -> @_i
+    done
+    ~> Suma od @_from do @_to = @_sum
+    % _arena_result = @_sum
+done
+
+;; Arena function do odwracania listy słów
+:: reverse_words <8k> def
+    >> echo "@_arena_args" | tr ' ' '\n' | tac | tr '\n' ' ' |> @_reversed
+    ~> Odwrócono: @_reversed
+    % _arena_result = @_reversed
+done
+
+;; Arena function — liczenie słów w stringu
+:: word_count <2k> def
+    >> echo "@_arena_args" | wc -w | tr -d ' ' |> @_wc
+    ~> Słów: @_wc
+    % _arena_result = @_wc
+done
+
+;; ── MAIN ──────────────────────────────────────────────────────────────────────
+::bold ═══ Arena Functions Demo ═══
+::hr 40
+::nl
+
+::bold Sumowanie zakresów (arena 4k):
+:: sum_range 1 100
+:: sum_range 1 10
+:: sum_range 50 60
+
+::nl
+::bold Odwracanie słów (arena 8k):
+:: reverse_words jeden dwa trzy cztery pięć
+:: reverse_words hacker lang jest super
+
+::nl
+::bold Liczenie słów (arena 2k):
+:: word_count the quick brown fox jumps over the lazy dog
+
+::nl
+::bold Done! Wszystkie areny zwolnione.
