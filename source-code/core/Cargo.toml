@@ -21,3 +21,5 @@ dirs.workspace       = true
 rustc-hash.workspace = true
 smallvec.workspace   = true
 nix.workspace        = true
+hk-parser.workspace  = true
+indexmap.workspace   = true
