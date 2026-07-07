@@ -5,6 +5,11 @@ use hl_core::diagnostics::{parse_error_to_diag, DiagRenderer, DiagSummary, lint_
 use hl_core::env::Env;
 use hl_core::{check_source, run_source, cmd_clean_cache};
 use hl_core::{HL_MAX_GEN, HL_DEFAULT_GEN, parse_source_with_meta};
+use hl_core::{
+    cmd_env_create, cmd_env_enter, cmd_env_exit,
+    cmd_env_remove, cmd_env_list, cmd_env_status, cmd_env_help,
+    load_config, config_path, get_active_env,
+};
 use hl_shell::{run_interactive, run_as_shell};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -147,6 +152,31 @@ enum Commands {
 
     /// Informacje o genie i shebangu pliku .hl
     GenInfo { file: PathBuf },
+
+    /// Manager izolowanych środowisk
+    #[command(subcommand_required = false)]
+    Env {
+        #[command(subcommand)]
+        action: Option<EnvAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum EnvAction {
+    /// Utwórz nowe środowisko
+    Create { name: String },
+    /// Wejdź do środowiska (uruchamia subshell)
+    Enter  { name: Option<String> },
+    /// Opuść aktywne środowisko
+    Exit,
+    /// Usuń środowisko
+    Remove { name: String },
+    /// Lista wszystkich środowisk
+    List,
+    /// Status aktywnego środowiska
+    Status,
+    /// Pomoc
+    Help,
 }
 
 #[derive(Subcommand, Debug)]
@@ -184,6 +214,50 @@ fn main() -> Result<()> {
         Some(Commands::Docs) => run_docs(),
 
         Some(Commands::Version) => print_version(),
+
+        Some(Commands::Env { action }) => {
+            match action {
+                None | Some(EnvAction::Help) => {
+                    cmd_env_help();
+                }
+                Some(EnvAction::Create { name }) => {
+                    if let Err(e) = cmd_env_create(&name) {
+                        eprintln!("{} {}", "BŁĄD".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+                Some(EnvAction::Enter { name }) => {
+                    if let Err(e) = cmd_env_enter(name.as_deref()) {
+                        eprintln!("{} {}", "BŁĄD".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+                Some(EnvAction::Exit) => {
+                    if let Err(e) = cmd_env_exit() {
+                        eprintln!("{} {}", "BŁĄD".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+                Some(EnvAction::Remove { name }) => {
+                    if let Err(e) = cmd_env_remove(&name) {
+                        eprintln!("{} {}", "BŁĄD".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+                Some(EnvAction::List) => {
+                    if let Err(e) = cmd_env_list() {
+                        eprintln!("{} {}", "BŁĄD".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+                Some(EnvAction::Status) => {
+                    if let Err(e) = cmd_env_status() {
+                        eprintln!("{} {}", "BŁĄD".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
 
         Some(Commands::GenInfo { file }) => {
             let source = std::fs::read_to_string(&file)?;
