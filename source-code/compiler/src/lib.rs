@@ -57,41 +57,48 @@ pub fn compile_source_to_bc(
 /// Kompiluj do cache (~/.hackeros/hacker-lang/cache/<hash>.bc)
 /// Zwraca ścieżkę do pliku cache.
 pub fn compile_to_cache(source: &str, source_path: &Path) -> Result<std::path::PathBuf> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     ensure_cache_dir()?;
     cache_cleanup_if_needed()?;
 
-    // Hash: zawartość + ścieżka + mtime
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    source_path.hash(&mut hasher);
-    if let Ok(meta) = std::fs::metadata(source_path) {
-        if let Ok(mtime) = meta.modified() {
-            mtime.hash(&mut hasher);
-        }
-    }
-    let hash = hasher.finish();
-
+    // Hash jakości produkcyjnej: FNV-1a zamiast DefaultHasher (stabilny między procesami)
+    let hash = fnv1a_hash_source(source, source_path);
     let cache_path = bc_cache_path(&format!("{:016x}", hash));
 
-    // Jeśli cache trafiony i plik aktualny — zwróć od razu
+    // Jeśli cache trafiony i plik .bc nowszy niż źródło — zwróć od razu
     if cache_path.exists() {
-        if let Ok(bc_meta) = std::fs::metadata(&cache_path) {
-            if let (Ok(src_m), Ok(bc_m)) = (
-                std::fs::metadata(source_path).and_then(|m| m.modified()),
-                                            bc_meta.modified(),
-            ) {
-                if bc_m >= src_m {
-                    tracing::debug!("cache hit: {:?}", cache_path);
-                    return Ok(cache_path);
-                }
+        let src_mtime  = std::fs::metadata(source_path).ok()
+            .and_then(|m| m.modified().ok());
+        let bc_mtime   = std::fs::metadata(&cache_path).ok()
+            .and_then(|m| m.modified().ok());
+        if let (Some(src_m), Some(bc_m)) = (src_mtime, bc_mtime) {
+            if bc_m >= src_m {
+                tracing::debug!("cache hit: {:?}", cache_path);
+                return Ok(cache_path);
             }
+        } else if cache_path.exists() {
+            // Brak mtime (np. FAT) — ufaj cache
+            tracing::debug!("cache hit (no mtime): {:?}", cache_path);
+            return Ok(cache_path);
         }
     }
 
     tracing::debug!("cache miss, kompiluje: {:?}", source_path);
     compile_source_to_bc(source, source_path, Some(&cache_path))?;
     Ok(cache_path)
+}
+
+/// FNV-1a hash — stabilny między procesami, szybszy niż sha256 dla małych danych
+fn fnv1a_hash_source(source: &str, path: &Path) -> u64 {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME:  u64 = 1099511628211;
+    let mut hash = FNV_OFFSET;
+    for byte in source.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for byte in path.as_os_str().as_encoded_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
