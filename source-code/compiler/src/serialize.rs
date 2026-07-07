@@ -101,8 +101,11 @@ pub fn parse_bc_bytes(raw: &[u8], path: &Path) -> Result<HlModule> {
     pos += header_len;
 
     // Bincode module
-    let module: HlModule = bincode::deserialize(&raw[pos..])
+    let mut module: HlModule = bincode::deserialize(&raw[pos..])
     .context("Deserializacja modułu .bc")?;
+
+    // Odbuduj indeksy HashMap w ConstPool (pola z #[serde(skip)] są puste po deserializacji)
+    module.consts.rebuild_index();
 
     Ok(module)
 }
