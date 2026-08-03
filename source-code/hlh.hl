@@ -1,1 +1,220 @@
 #!/usr/bin/hl
+/// hlh — Hacker Lang Helper (gen 2)
+/// Narzędzie do generowania dokumentacji ze skryptów .hl oraz "tłumaczenia"
+/// (objaśniania) terse-składni Hacker Lang na czytelny, komentowany opis —
+/// linia po linii — dla osób uczących się języka lub przeglądających cudzy kod.
+///
+/// Użycie:
+///   hlh doc       <plik.hl>              — wygeneruj dokumentację Markdown
+///   hlh doc       <plik.hl> -o <out.md>  — jw., zapisz do pliku
+///   hlh translate <plik.hl>              — "przetłumacz" każdą linię kodu
+///   hlh translate <plik.hl> -o <out.txt> — jw., zapisz do pliku
+///   hlh help                             — ta pomoc
+
+using <gen 2>
+
+// bash
+// grep
+// awk
+// sed
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; HELP
+;; ═══════════════════════════════════════════════════════════════════════════════
+: hlh_help def
+    ::bold hlh — Hacker Lang Helper (gen 2)
+    ::nl
+    ~> Generator dokumentacji i "tłumacz" składni dla plików .hl
+    ::nl
+    ::bold Komendy:
+    ~>   hlh doc       <plik.hl>              — dokumentacja Markdown (na stdout)
+    ~>   hlh doc       <plik.hl> -o <out.md>  — jw., zapisz do pliku
+    ~>   hlh translate <plik.hl>              — objaśnienie każdej linii kodu
+    ~>   hlh translate <plik.hl> -o <out.txt> — jw., zapisz do pliku
+    ~>   hlh help                             — ta pomoc
+    ::nl
+    ::bold Przykład:
+    ~>   hlh doc source-code/bit.hl -o bit.md
+    ~>   hlh translate tests/performance.hl
+done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; DOC — wyciąga /// komentarze, using<gen>, importy << <* i % stałe → Markdown
+;; ═══════════════════════════════════════════════════════════════════════════════
+: hlh_doc def
+    > test -f "@_hlh_file"
+    ;; sprawdz
+    ? err
+        ::red Plik nie istnieje: @_hlh_file
+        > exit 1
+    done
+
+    >> bash -c "
+        f='@_hlh_file'
+        out='@_hlh_out_path'
+        if [ \"\$out\" != \"NONE\" ]; then exec > \"\$out\"; fi
+        name=\$(basename \"\$f\")
+        gen=\$(grep -m1 -oE 'using[[:space:]]*<gen[[:space:]]*[0-9]+>' \"\$f\" | grep -oE '[0-9]+')
+        [ -z \"\$gen\" ] && gen='?'
+        shebang='(brak)'
+        head -n1 \"\$f\" | grep -q '^#!' && shebang=\$(head -n1 \"\$f\")
+
+        echo \"# \$name\"
+        echo
+        echo \"- **Gen:** gen \$gen\"
+        echo \"- Shebang: \$shebang\"
+        echo
+
+        echo '## Opis modułu'
+        echo
+        awk '/^\/\/\// { sub(/^\/\/\/[ \t]?/, \"\"); print; next } NR>3 { exit }' \"\$f\"
+        echo
+
+        echo '## Importy'
+        echo
+        grep -nE '^[[:space:]]*(<<|<\*)[[:space:]]' \"\$f\" | sed -E 's/^([0-9]+):[[:space:]]*/- linia \1: /'
+        echo
+
+        echo '## Stałe (top-level %)'
+        echo
+        grep -nE '^%[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' \"\$f\" | sed -E 's/^([0-9]+):[[:space:]]*/- linia \1: /'
+        echo
+
+        echo '## Funkcje (: nazwa def)'
+        echo
+        grep -noE '^:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+def' \"\$f\" | sed -E 's/^([0-9]+):[[:space:]]*:[[:space:]]+/- linia \1: /; s/[[:space:]]+def$//'
+        echo
+
+        echo '## Areny (:: nazwa <rozmiar> def)'
+        echo
+        grep -noE '^::[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]+<[0-9]+[kKmM]?>)?[[:space:]]+def' \"\$f\" | sed -E 's/^([0-9]+):[[:space:]]*/- linia \1: /'
+    " |> @_hlh_doc_out
+
+    > test "@_hlh_out_path" = "NONE"
+    ;; sprawdz
+    ? ok
+        ~> @_hlh_doc_out
+    done
+    ? err
+        ::green Zapisano dokumentację: @_hlh_out_path
+    done
+done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; TRANSLATE — dla każdej linii kodu doklej po prawej "polskie" objaśnienie
+;; konstrukcji Hacker Lang (heurystyka wzorców, nie pełny parser AST)
+;; ═══════════════════════════════════════════════════════════════════════════════
+: hlh_translate def
+    > test -f "@_hlh_file"
+    ;; sprawdz
+    ? err
+        ::red Plik nie istnieje: @_hlh_file
+        > exit 1
+    done
+
+    >> bash -c "
+        f='@_hlh_file'
+        out='@_hlh_out_path'
+        if [ \"\$out\" != \"NONE\" ]; then exec > \"\$out\"; fi
+        n=0
+        while IFS= read -r line; do
+            n=\$((n+1))
+            trimmed=\$(echo \"\$line\" | sed -E 's/^[[:space:]]+//')
+            expl='(kod / wartość)'
+            case \"\$trimmed\" in
+                'using <gen'*)                 expl='deklaracja wersji języka (gen)' ;;
+                '#!'*)                         expl='shebang — ścieżka do interpretera hl' ;;
+                ';;'*)                         expl='komentarz (linia)' ;;
+                '///'*)                        expl='komentarz dokumentacyjny (doc-comment)' ;;
+                '//'*)                         expl='deklaracja wymaganej zależności zewnętrznej' ;;
+                '<<'*)                         expl='import pojedynczego pliku modułu' ;;
+                '<\**)                         expl='import całego katalogu modułów' ;;
+                '%'*'='*)                      expl='deklaracja / przypisanie zmiennej (%%nazwa = wartość)' ;;
+                ':'*'def')                     expl='początek definicji funkcji (: nazwa def ... done)' ;;
+                '::'*'def')                    expl='początek definicji funkcji areny (:: nazwa <rozmiar> def)' ;;
+                '::'*)                         expl='wywołanie funkcji / areny / builtinu (::nazwa)' ;;
+                '?~'*)                         expl='pętla while (?~ warunek ... done)' ;;
+                '?'*'switch'*)                 expl='początek instrukcji switch (? switch @zmienna)' ;;
+                '?'*)                          expl='blok warunkowy (? ok / ? err ... done)' ;;
+                '|'*)                          expl='gałąź (case) instrukcji switch' ;;
+                '@'*'in'*)                     expl='pętla for-in (@ zmienna in lista ... done)' ;;
+                '\$('*)                        expl='wyrażenie arytmetyczne \$( ... ) -> @wynik' ;;
+                '~>'*)                         expl='wypisanie tekstu na stdout (interpolacja @zmienna)' ;;
+                '>>'*)                         expl='uruchomienie polecenia zewnętrznego (subprocess, fork+exec)' ;;
+                '/>'*)                         expl='uruchomienie wbudowanego narzędzia coreutils (bez forka)' ;;
+                '>'*)                          expl='uruchomienie polecenia zewnętrznego / test warunku' ;;
+                '&'*)                          expl='uruchomienie polecenia w tle (background)' ;;
+                '--'*)                         expl='wywołanie wcześniej zdefiniowanej funkcji (call)' ;;
+                'done')                        expl='koniec bloku (funkcji / pętli / switcha / if)' ;;
+                '')                            expl='' ;;
+                *)                             expl='(kod / wartość)' ;;
+            esac
+            if [ -z \"\$trimmed\" ]; then
+                printf '%4d | \n' \"\$n\"
+            elif [ -z \"\$expl\" ]; then
+                printf '%4d | %s\n' \"\$n\" \"\$line\"
+            else
+                printf '%4d | %-60s # %s\n' \"\$n\" \"\$line\" \"\$expl\"
+            fi
+        done < \"\$f\"
+    " |> @_hlh_tr_out
+
+    > test "@_hlh_out_path" = "NONE"
+    ;; sprawdz
+    ? ok
+        ~> @_hlh_tr_out
+    done
+    ? err
+        ::green Zapisano tłumaczenie: @_hlh_out_path
+    done
+done
+
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; MAIN
+;; ═══════════════════════════════════════════════════════════════════════════════
+% _hlh_cmd  = @arg0
+% _hlh_file = @arg1
+% _hlh_out_path = NONE
+
+;; Wykryj `-o <sciezka>` (zawsze na pozycji arg2/arg3: `hlh doc plik.hl -o out.md`)
+> test "@arg2" = "-o"
+;; sprawdz
+? ok
+    % _hlh_out_path = @arg3
+done
+
+> test "@argc" = "0"
+;; sprawdz
+? ok
+    -- hlh_help
+    > exit 0
+done
+
+? switch @_hlh_cmd
+| doc
+    > test "@argc" = "1"
+    ;; sprawdz
+    ? ok
+        ::red Podaj plik: hlh doc <plik.hl>
+        > exit 1
+    done
+    -- hlh_doc
+    > exit 0
+| translate
+    > test "@argc" = "1"
+    ;; sprawdz
+    ? ok
+        ::red Podaj plik: hlh translate <plik.hl>
+        > exit 1
+    done
+    -- hlh_translate
+    > exit 0
+| help
+    -- hlh_help
+    > exit 0
+| *
+    ::red Nieznana komenda: @_hlh_cmd
+    ~> Dostępne komendy: doc  translate  help
+    ~> Szczegóły: hlh help
+    > exit 1
+done
