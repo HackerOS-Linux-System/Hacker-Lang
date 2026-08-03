@@ -1,0 +1,83 @@
+#!/usr/bin/hl
+/// Demonstracja operacji na stringach i zmiennych w gen 2
+/// Pokazuje: interpolacja, zmienne, PipeToVar, ForIn, while, compound vars @{...}
+
+using <gen 2>
+
+::bold ═══ Strings Gen 2 ═══
+::nl
+
+;; ── 1. Interpolacja zmiennych ─────────────────────────────────────────────────
+::bold 1. Interpolacja:
+% _name    = Hacker Lang
+% _version = 2.0
+~> Witaj, @_name wersja @_version!
+
+;; ── 2. Arytmetyka i przypisanie ───────────────────────────────────────────────
+::bold 2. Arytmetyka:
+% _a = 10
+% _b = 7
+$(@_a + @_b) -> @_sum
+$(@_a * @_b) -> @_mul
+$(@_a - @_b) -> @_sub
+~>   @_a + @_b = @_sum
+~>   @_a * @_b = @_mul
+~>   @_a - @_b = @_sub
+
+;; ── 3. PipeToVar — przechwytywanie stdout ─────────────────────────────────────
+::bold 3. PipeToVar:
+>> echo "hello world" | tr 'a-z' 'A-Z' |> @_upper
+>> printf '%s' "Hacker Lang" | wc -c | tr -d ' ' |> @_len
+~>   uppercase: @_upper
+~>   długość "Hacker Lang": @_len
+
+;; ── 4. ForIn — iteracja po słowach ───────────────────────────────────────────
+::bold 4. ForIn:
+% _fruits = jabłko gruszka śliwka wiśnia
+@ _fruit in @_fruits
+    ~>   owoc: @_fruit
+done
+
+;; ── 5. Compound variable reference @{arg@_i} ─────────────────────────────────
+::bold 5. Compound var @{var@_i}:
+% _item0 = alfa
+% _item1 = beta
+% _item2 = gamma
+% _i     = 0
+?~ @_i < 3
+    ~>   item@_i = @{item@_i}
+    $(@_i + 1) -> @_i
+done
+
+;; ── 6. Switch / match ─────────────────────────────────────────────────────────
+::bold 6. Switch:
+% _day = Poniedziałek
+? switch @_day
+| Poniedziałek
+    ::yellow Tydzień się zaczyna!
+| Piątek
+    ::green Prawie weekend!
+| Sobota
+    ::green Weekend!
+| Niedziela
+    ::green Weekend!
+| *
+    ~> Zwykły dzień: @_day
+done
+
+;; ── 7. Conditional ok/err ─────────────────────────────────────────────────────
+::bold 7. Conditional:
+% _check = hello
+> test -n "@_check"
+? ok
+    ::green _check jest niepusty: @_check
+done
+% _empty = 
+>> printf '' |> @_empty
+> test -z "@_empty"
+? ok
+    ::yellow _empty jest pusty (test -z dziala)
+done
+
+::nl
+::bold Gotowe!
