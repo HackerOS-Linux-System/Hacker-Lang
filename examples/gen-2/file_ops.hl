@@ -1,0 +1,79 @@
+#!/usr/bin/hl
+/// Operacje na plikach — gen 2
+/// Demonstracja: PipeToVar, ForIn po plikach, conditional, mkdir/cp/mv/rm
+/// Bezpieczne operacje z ? ok / ? err
+
+using <gen 2>
+
+% _WORKDIR = /tmp/hl_file_ops_demo
+
+::bold ═══ File Operations Demo ═══
+::hr 40
+::nl
+
+;; ── Setup ─────────────────────────────────────────────────────────────────────
+::bold Przygotowanie katalogu roboczego: @_WORKDIR
+> rm -rf @_WORKDIR
+> mkdir -p @_WORKDIR
+> mkdir -p @_WORKDIR/src
+> mkdir -p @_WORKDIR/dst
+
+;; ── Tworzenie plików ──────────────────────────────────────────────────────────
+::bold Tworzenie plików testowych:
+% _i = 1
+?~ @_i <= 5
+    >> bash -c "echo 'Zawartość pliku @_i — Hacker Lang gen 2' > @_WORKDIR/src/plik@_i.txt" |> @_out
+    ::green   Utworzono: src/plik@_i.txt
+    $(@_i + 1) -> @_i
+done
+
+;; ── Listowanie ────────────────────────────────────────────────────────────────
+::nl
+::bold Pliki w src/:
+>> find @_WORKDIR/src -type f -name "*.txt" | sort |> @_file_list
+@ _fpath in @_file_list
+    >> basename @_fpath |> @_fname
+    >> wc -c < @_fpath | tr -d ' ' |> @_fsize
+    ~>   @_fname (@_fsize B)
+done
+
+;; ── Kopiowanie ────────────────────────────────────────────────────────────────
+::nl
+::bold Kopiowanie src/ → dst/:
+> cp @_WORKDIR/src/*.txt @_WORKDIR/dst/
+? ok
+    ::green Skopiowano wszystkie pliki.
+done
+? err
+    ::red Błąd kopiowania!
+done
+
+;; ── Sprawdzanie hash ──────────────────────────────────────────────────────────
+::nl
+::bold Sprawdzanie sha256 pliku plik1.txt:
+>> sha256sum @_WORKDIR/src/plik1.txt | cut -c1-16 |> @_hash
+~>   Hash (pierwsze 16 znaków): @_hash
+
+;; ── Wyszukiwanie ──────────────────────────────────────────────────────────────
+::nl
+::bold Szukanie "gen 2" w plikach:
+>> grep -rl "gen 2" @_WORKDIR/src/ |> @_matches
+> test -n "@_matches"
+? ok
+    @ _mfile in @_matches
+        >> basename @_mfile |> @_mname
+        ::yellow   Znaleziono: @_mname
+    done
+done
+? err
+    ~> Brak wyników.
+done
+
+;; ── Czyszczenie ───────────────────────────────────────────────────────────────
+::nl
+::bold Czyszczenie:
+> rm -rf @_WORKDIR
+::green Usunięto @_WORKDIR.
+
+::nl
+::bold Gotowe!
