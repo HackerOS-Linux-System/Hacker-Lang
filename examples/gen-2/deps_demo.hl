@@ -1,0 +1,87 @@
+#!/usr/bin/hl
+/// Demonstracja składni // narzędzie [pakiet-apt] — gen 2
+///
+/// Jak działa:
+///   // narzędzie          → szuka binarki `narzędzie`, apt install narzędzie
+///   // narzędzie [pakiet] → szuka binarki `narzędzie`, apt install pakiet
+///
+/// Przydatne gdy binarka ma inną nazwę niż pakiet apt:
+///   ninja binarka = "ninja", pakiet apt = "ninja-build"
+///   fd    binarka = "fd",    pakiet apt = "fd-find"
+///   bat   binarka = "bat",   pakiet apt = "bat" (tu tak samo)
+///   rg    binarka = "rg",    pakiet apt = "ripgrep"
+
+using <gen 2>
+
+// curl
+// git
+// ninja [ninja-build]
+// fd [fd-find]
+// rg [ripgrep]
+// bat
+// jq [jq]
+// python3 [python3]
+
+::bold ═══ Deps Demo — składnia // narzędzie [pakiet-apt] ═══
+::hr 50
+::nl
+
+::bold Sprawdzanie narzędzi:
+
+;; Każda linia // narzędzie [pakiet] uruchamia się przy starcie
+;; Jeśli narzędzie nie istnieje → apt install pakiet automatycznie
+;; Poniżej ręczna weryfikacja za pomocą ::which:
+
+::bold Narzędzia standardowe (binarka = pakiet):
+@ _tool in curl git jq python3 bat
+    ::which @_tool
+    ? ok
+        ::green   ✓ @_tool — dostępny
+    done
+    ? err
+        ::yellow   ✗ @_tool — niedostępny (sprawdź deklarację // @_tool)
+    done
+done
+
+::nl
+::bold Narzędzia z osobną nazwą pakietu:
+::nl
+~>   ninja    → binarki: ninja,     pakiet apt: ninja-build
+~>   fd       → binarka: fd,        pakiet apt: fd-find
+~>   rg       → binarka: rg,        pakiet apt: ripgrep
+
+@ _pair in "ninja:ninja-build" "fd:fd-find" "rg:ripgrep"
+    >> printf '%s\n' "@_pair" | cut -d':' -f1 |> @_bin
+    >> printf '%s\n' "@_pair" | cut -d':' -f2 |> @_pkg
+    ::which @_bin
+    ? ok
+        ::green   ✓ @_bin (pakiet: @_pkg) — dostępny
+    done
+    ? err
+        ::yellow   ✗ @_bin (pakiet: @_pkg) — niedostępny
+        ~>     Automatycznie: apt install @_pkg
+    done
+done
+
+::nl
+::bold Przykład użycia po deklaracji:
+>> ninja --version 2>/dev/null |> @_ninja_ver
+> test -n "@_ninja_ver"
+? ok
+    ~> ninja version: @_ninja_ver
+done
+? err
+    ~> ninja niedostępny (apt install ninja-build)
+done
+
+::nl
+::hr 50
+::bold Składnia [apt-package] kompletna:
+::nl
+~>   // curl                — binarka "curl",    pakiet apt "curl"
+~>   // ninja [ninja-build] — binarka "ninja",   pakiet apt "ninja-build"
+~>   // fd [fd-find]        — binarka "fd",      pakiet apt "fd-find"
+~>   // rg [ripgrep]        — binarka "rg",      pakiet apt "ripgrep"
+~>   // python3 [python3]   — jawne (obie nazwy takie same)
+::nl
+::bold Gotowe!
