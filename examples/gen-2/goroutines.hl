@@ -1,4 +1,6 @@
 #!/usr/bin/hl
+/// Goroutines — równoległe wykonanie w Hacker Lang gen 2
+/// Demonstracja: :* goroutine, ::** channel, & background task
 
 using <gen 2>
 
