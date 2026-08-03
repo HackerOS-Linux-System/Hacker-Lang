@@ -1,10 +1,12 @@
 #!/usr/bin/hl
+/// bit - Hacker Lang Package Manager (gen 2)
+/// Port 1:1 z bit.py - identyczna funkcjonalność
 
 using <gen 2>
 
 // curl
 // git
-// jq
+// jq [jq]
 
 ;; ── Stałe ─────────────────────────────────────────────────────────────────────
 % BIT_REPO_RAW  = https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json
@@ -18,11 +20,11 @@ using <gen 2>
 % BIT_LOCK_FILE = ~/.hackeros/hacker-lang/meta/bit.lock
 
 ;; ═══════════════════════════════════════════════════════════════════════════════
-;; RESOLVE PATHS — bez podprocesów, tylko bezpośredni odczyt zmiennych i config
+;; RESOLVE PATHS - bez podprocesów, tylko bezpośredni odczyt zmiennych i config
 ;; @BIT_HOME etc. już czyta std::env::var przez fallback w resolve_string_parts
 ;; ═══════════════════════════════════════════════════════════════════════════════
 : bit_resolve_paths def
-    ;; 1. Jeśli BIT_HOME ustawiony w env procesu — @BIT_HOME go odczyta bezpośrednio
+    ;; 1. Jeśli BIT_HOME ustawiony w env procesu - @BIT_HOME go odczyta bezpośrednio
     > test -n "@BIT_HOME"
     ? ok
         % BIT_HOME      = @BIT_HOME
@@ -63,7 +65,7 @@ done
 ;; ═══════════════════════════════════════════════════════════════════════════════
 : bit_header def
     ::hr 50
-    ::bold bit — Hacker Lang Package Manager (gen 2)
+    ::bold bit - Hacker Lang Package Manager (gen 2)
     ::hr 50
 done
 
@@ -386,7 +388,7 @@ done
         ? err
             > test "@_ver_pkg" != "@_pkg"
             ? ok
-                ;; pomijamy — nie ten pakiet
+                ;; pomijamy - nie ten pakiet
             done
         done
         ::isdir @BIT_HOME/@_ver_pkg/current
@@ -654,27 +656,57 @@ done
 ;; ═══════════════════════════════════════════════════════════════════════════════
 ;; HELP
 ;; ═══════════════════════════════════════════════════════════════════════════════
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; IO - otwiera stronę bit-io w domyślnej przeglądarce
+;; ═══════════════════════════════════════════════════════════════════════════════
+: bit_open_io def
+    % _io_url = https://bit-io.github.io/website/
+    ::bold Otwieram @_io_url w przeglądarce...
+    >> bash -c "
+        if command -v xdg-open >/dev/null 2>&1; then
+            xdg-open '@_io_url' >/dev/null 2>&1 &
+        elif command -v gio >/dev/null 2>&1; then
+            gio open '@_io_url' >/dev/null 2>&1 &
+        elif command -v open >/dev/null 2>&1; then
+            open '@_io_url' >/dev/null 2>&1 &
+        elif command -v wslview >/dev/null 2>&1; then
+            wslview '@_io_url' >/dev/null 2>&1 &
+        else
+            echo NOBROWSER
+        fi
+    " |> @_io_result
+    > test "@_io_result" = "NOBROWSER"
+    ? ok
+        ::yellow Nie znaleziono przeglądarki/otwieraka (xdg-open/gio/open/wslview).
+        ~> Otwórz ręcznie: @_io_url
+    done
+done
+
 : bit_help def
+
     -- bit_header
     ::nl
     ::bold Uruchamianie projektu:
-    ~>   bit run                    — znajdź + sprawdź + zależności + uruchom
+    ~>   bit run                    - znajdź + sprawdź + zależności + uruchom
     ::nl
     ::bold Manager pakietów:
-    ~>   bit install <nazwa> ...    — zainstaluj pakiet(y)
-    ~>   bit remove  <nazwa> ...    — usuń pakiet(y)
-    ~>   bit upgrade [nazwa]        — upgrade pakietu (lub wszystkich)
-    ~>   bit verify  [nazwa]        — weryfikuj integralność
-    ~>   bit list                   — lista pakietów z repo
-    ~>   bit installed              — zainstalowane biblioteki
-    ~>   bit search  <fraza>        — szukaj pakietu
-    ~>   bit search  all            — pokaż wszystkie pakiety
-    ~>   bit update                 — aktualizuj listę repo
-    ~>   bit info    <nazwa>        — info o pakiecie
-    ~>   bit clean                  — usuń stare wersje i cache
+    ~>   bit install <nazwa> ...    - zainstaluj pakiet(y)
+    ~>   bit remove  <nazwa> ...    - usuń pakiet(y)
+    ~>   bit upgrade [nazwa]        - upgrade pakietu (lub wszystkich)
+    ~>   bit verify  [nazwa]        - weryfikuj integralność
+    ~>   bit list                   - lista pakietów z repo
+    ~>   bit installed              - zainstalowane biblioteki
+    ~>   bit search  <fraza>        - szukaj pakietu
+    ~>   bit search  all            - pokaż wszystkie pakiety
+    ~>   bit update                 - aktualizuj listę repo
+    ~>   bit info    <nazwa>        - info o pakiecie
+    ~>   bit clean                  - usuń stare wersje i cache
+    ::nl
+    ::bold Narzędzia:
+    ~>   bit io                     - otwórz stronę bit-io w przeglądarce
     ::nl
     ::bold Projekt:
-    ~>   bit workspace              — info o projekcie i zainstalowanych libs
+    ~>   bit workspace              - info o projekcie i zainstalowanych libs
     ::nl
     ::bold Lokalizacje:
     ~>   Libs:   @BIT_HOME
@@ -693,7 +725,7 @@ done
 % _pkg  = @arg1
 % _pkg2 = @arg2
 
-;; Brak argumentu → pomoc
+;; Brak argumentu -> pomoc
 > test -z "@_cmd"
 ? ok
     -- bit_help
@@ -761,6 +793,9 @@ done
         $(@_i + 1) -> @_i
     done
     > exit 0
+| io
+    -- bit_open_io
+    > exit 0
 | clean
     -- bit_clean
     > exit 0
@@ -778,7 +813,7 @@ done
     ::nl
     ::red Nieznana komenda: @_cmd
     ::nl
-    ~> Dostępne komendy: install  remove  upgrade  verify  list  installed  search  update  info  clean  run  workspace  help
+    ~> Dostępne komendy: install  remove  upgrade  verify  list  installed  search  update  info  clean  run  workspace  io  help
     ~> Szczegóły: bit help
     > exit 1
 done
