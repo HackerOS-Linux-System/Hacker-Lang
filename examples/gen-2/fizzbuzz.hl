@@ -1,0 +1,44 @@
+#!/usr/bin/hl
+/// FizzBuzz — demonstracja: while loop, arytmetyka, switch/match, gen 2
+
+using <gen 2>
+
+: fizzbuzz def
+    % _i     = 1
+    % _limit = 30
+
+    > test -n "@arg0"
+    ? ok
+        % _limit = @arg0
+    done
+
+    ::bold FizzBuzz 1..@_limit
+    ::hr 30
+
+    ?~ @_i <= @_limit
+        $(@_i % 15) -> @_r15
+        $(@_i % 3)  -> @_r3
+        $(@_i % 5)  -> @_r5
+
+        ? switch @_r15
+        | 0
+            ~> @_i → FizzBuzz
+        | *
+            ? switch @_r3
+            | 0
+                ~> @_i → Fizz
+            | *
+                ? switch @_r5
+                | 0
+                    ~> @_i → Buzz
+                | *
+                    ~> @_i
+                done
+            done
+        done
+
+        $(@_i + 1) -> @_i
+    done
+done
+
+-- fizzbuzz
