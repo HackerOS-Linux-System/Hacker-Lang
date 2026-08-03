@@ -1,0 +1,136 @@
+#!/usr/bin/hl
+/// /> — Wbudowane coreutils Hacker Lang
+/// Zero zewnętrznych zależności — wszystko w Ruście.
+/// Składnia identyczna jak > ale używa wbudowanych implementacji.
+
+using <gen 2>
+
+::bold ═══ Coreutils Demo (/>)  ═══
+::hr 50
+::nl
+
+;; ── 1. echo ───────────────────────────────────────────────────────────────────
+::bold 1. echo
+/> echo Witaj z wbudowanego echo!
+/> echo -n "bez nowej linii"
+::nl
+/> echo -e "linia1\nlinia2\tlinia3"
+
+;; ── 2. cat ────────────────────────────────────────────────────────────────────
+::bold 2. cat + przechwycenie |>
+/> echo "linia A" > /tmp/hl_cu_test.txt
+/> echo "linia B" >> /tmp/hl_cu_test.txt
+/> cat /tmp/hl_cu_test.txt |> @_cat_result
+~> Przechwycono: @_cat_result
+
+;; ── 3. ls ─────────────────────────────────────────────────────────────────────
+::bold 3. ls
+/> ls /tmp |> @_ls_out
+>> printf '%s' "@_ls_out" | head -5 |> @_ls_head
+~> Pierwsze 5 plików w /tmp:
+~> @_ls_head
+
+;; ── 4. grep ───────────────────────────────────────────────────────────────────
+::bold 4. grep
+/> echo "linia A\nlinia B\nlinia C" > /tmp/hl_cu_grep.txt
+/> grep "linia B" /tmp/hl_cu_grep.txt |> @_grep_result
+~> grep wynik: @_grep_result
+/> grep -i "LINIA" /tmp/hl_cu_grep.txt |> @_grep_i
+~> grep -i wynik: @_grep_i
+
+;; ── 5. head / tail ────────────────────────────────────────────────────────────
+::bold 5. head + tail
+/> seq 10 > /tmp/hl_cu_seq.txt
+/> head -n 3 /tmp/hl_cu_seq.txt |> @_head_out
+/> tail -n 3 /tmp/hl_cu_seq.txt |> @_tail_out
+~> head -3: @_head_out
+~> tail -3: @_tail_out
+
+;; ── 6. wc ─────────────────────────────────────────────────────────────────────
+::bold 6. wc
+/> wc -l /tmp/hl_cu_seq.txt |> @_wc_l
+/> wc -w /tmp/hl_cu_seq.txt |> @_wc_w
+~> wc -l: @_wc_l  wc -w: @_wc_w
+
+;; ── 7. sort + uniq ────────────────────────────────────────────────────────────
+::bold 7. sort + uniq
+/> echo "b\na\nc\na\nb" > /tmp/hl_cu_sort.txt
+/> sort /tmp/hl_cu_sort.txt |> @_sorted
+/> sort /tmp/hl_cu_sort.txt | uniq |> @_unique
+~> sort: @_sorted
+~> uniq: @_unique
+
+;; ── 8. cut ────────────────────────────────────────────────────────────────────
+::bold 8. cut
+/> echo "root:x:0:0:root:/root:/bin/bash" > /tmp/hl_cu_cut.txt
+/> cut -d: -f1 /tmp/hl_cu_cut.txt |> @_user
+/> cut -d: -f6 /tmp/hl_cu_cut.txt |> @_home
+~> user: @_user   home: @_home
+
+;; ── 9. tr ─────────────────────────────────────────────────────────────────────
+::bold 9. tr
+>> echo "hello world" |> @_orig
+>> printf '%s' "@_orig" | tr 'a-z' 'A-Z' |> @_upper_ext
+/> echo "@_orig" | tr 'a-z' 'A-Z' |> @_upper_builtin
+~> > (zewnętrzny): @_upper_ext
+~> /> (wbudowany): @_upper_builtin
+
+;; ── 10. find ──────────────────────────────────────────────────────────────────
+::bold 10. find
+/> find /tmp -name "hl_cu_*.txt" -type f |> @_found
+~> Znalezione pliki testowe:
+~> @_found
+
+;; ── 11. basename + dirname ────────────────────────────────────────────────────
+::bold 11. basename + dirname
+/> basename /home/user/projekt/main.rs |> @_base
+/> dirname  /home/user/projekt/main.rs |> @_dir
+~> basename: @_base
+~> dirname:  @_dir
+
+;; ── 12. seq ───────────────────────────────────────────────────────────────────
+::bold 12. seq
+/> seq 5 |> @_seq5
+~> seq 5: @_seq5
+/> seq 2 2 10 |> @_seq_step
+~> seq 2 2 10: @_seq_step
+
+;; ── 13. pwd + which ───────────────────────────────────────────────────────────
+::bold 13. pwd + which
+/> pwd |> @_pwd
+/> which bash |> @_bash_path
+~> pwd: @_pwd
+~> which bash: @_bash_path
+
+;; ── 14. mkdir + touch + stat ──────────────────────────────────────────────────
+::bold 14. mkdir + touch + stat
+/> mkdir -p /tmp/hl_cu_testdir
+/> touch /tmp/hl_cu_testdir/plik.txt
+/> stat /tmp/hl_cu_testdir/plik.txt |> @_stat_out
+~> stat: @_stat_out
+
+;; ── 15. cp + mv + rm ──────────────────────────────────────────────────────────
+::bold 15. cp + mv + rm
+/> cp /tmp/hl_cu_test.txt /tmp/hl_cu_copy.txt
+/> mv /tmp/hl_cu_copy.txt /tmp/hl_cu_moved.txt
+/> rm /tmp/hl_cu_moved.txt
+::green cp/mv/rm OK
+
+;; ── Porównanie > vs /> ────────────────────────────────────────────────────────
+::nl
+::bold Porównanie > vs />:
+~>   >  echo "hello"  — wywołuje /bin/echo (subprocess)
+~>   /> echo "hello"  — wbudowane w Rust (zero fork/exec)
+~>
+~>   Zalety />:
+~>   • Brak zależności od systemu (działa nawet bez /bin/echo)
+~>   • Szybszy start (zero fork overhead)
+~>   • Spójna obsługa błędów przez Hacker Lang
+~>   • Działa identycznie na wszystkich systemach
+
+;; Czyszczenie
+/> rm /tmp/hl_cu_test.txt /tmp/hl_cu_grep.txt /tmp/hl_cu_seq.txt /tmp/hl_cu_sort.txt /tmp/hl_cu_cut.txt
+/> rm -r /tmp/hl_cu_testdir
+
+::nl
+::bold Gotowe!
