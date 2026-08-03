@@ -1,0 +1,34 @@
+#!/usr/bin/hl
+/// HBuild demo — budowanie projektów C++/Rust/TS/Vala/Go/etc.
+using <gen 2>
+
+<< main/hbuild.hl
+
+;; ── Demo 1: Autodetekcja ──────────────────────────────────────────────────────
+-- hbuild_header
+::nl
+::bold Demo: Autodetekcja i build
+~>   (uruchom z katalogu projektu)
+::nl
+-- hbuild_info
+
+;; ── Demo 2: Jawne ustawienie ──────────────────────────────────────────────────
+;; Odkomentuj i dostosuj do swojego projektu:
+;;
+;; % _hb_project    = MojApp
+;; % _hb_lang       = cpp
+;; % _hb_src_dir    = source-code
+;; % HBUILD_TYPE    = Debug
+;; -- hbuild_auto
+;; -- hbuild_run
+;;
+;; Rust:
+;; % _hb_project = moj-rust-app
+;; % _hb_lang    = rust
+;; -- hbuild_auto
+;;
+;; TypeScript:
+;; % _hb_lang   = ts
+;; % _hb_system = tsc
+;; -- hbuild_auto
+;; -- hbuild_run
