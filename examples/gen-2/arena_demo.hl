@@ -1,4 +1,7 @@
 #!/usr/bin/hl
+/// Arena Function — demonstracja gen 2 arena allocatora
+/// Arena function: :: nazwa <rozmiar> def ... done
+/// Izolowane środowisko, bump-pointer allocator, fast cleanup
 
 using <gen 2>
 
