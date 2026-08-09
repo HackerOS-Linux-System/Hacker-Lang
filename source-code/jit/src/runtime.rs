@@ -133,14 +133,34 @@ pub struct StringInterner {
 }
 
 impl StringInterner {
-    pub fn new() -> Self {
+    /// `module_strings`: stringi z ConstPool skompilowanego modułu (w tej
+    /// SAMEJ kolejności co ich indeksy tam) — muszą być zasiane JAKO
+    /// PIERWSZE, żeby `interner.intern(name)` dla nazwy znanej już w
+    /// czasie kompilacji zwracał DOKŁADNIE ten sam indeks co
+    /// `module.consts.find_str(name)`. To jest właściwa, ogólna naprawa
+    /// całej klasy błędów kolizji nazw zmiennych: każdy fragment kodu w
+    /// interpreterze, który robi `interner.intern(nazwa_zmiennej)` (np.
+    /// przy dynamicznym dostępie `@{arg@_i}`, `_last_exit_code`, itd.),
+    /// automatycznie trafia w ten sam slot co statyczne GetVar/SetVar dla
+    /// tej samej nazwy — bez tego dwa NIEZALEŻNE indeksowania (ConstPool
+    /// kompilatora i StringInterner runtime'u) mogły przypadkiem przydzielić
+    /// tę samą liczbę dwóm RÓŻNYM stringom, co cicho nadpisywało slot
+    /// zupełnie innej zmiennej (patrz historia init_hl_vars).
+    pub fn new(module_strings: &[String]) -> Self {
         let mut s = Self {
             map:     FxHashMap::default(),
-            strings: Vec::with_capacity(512),
+            strings: Vec::with_capacity(512.max(module_strings.len() + 16)),
         };
-        // Idx 0 = pusty string
+        // 1. Zasiej stringami z modułu — PIERWSZE, w tej samej kolejności,
+        //    żeby indeksy 1:1 pokrywały się z ConstPool.
+        for ms in module_strings {
+            s.intern(ms);
+        }
+        // 2. Idx dla pustego stringa (jeśli moduł go jeszcze nie miał)
         s.intern("");
-        // Pre-intern często używane stringi HL
+        // 3. Pre-intern często używane stringi HL — intern() jest
+        //    idempotentny, więc jeśli już są w module_strings, dostaną
+        //    swój ISTNIEJĄCY (poprawny) indeks zamiast duplikatu.
         for lit in &[
             "true", "false", "0", "1", "nil",
             "_last_exit_code", "_arena_args", "_arena_name",
@@ -178,7 +198,7 @@ impl StringInterner {
     pub fn lookup(&self, s: &str) -> Option<u32> { self.map.get(s).copied() }
 }
 
-impl Default for StringInterner { fn default() -> Self { Self::new() } }
+impl Default for StringInterner { fn default() -> Self { Self::new(&[]) } }
 
 // ── Inline Cache ──────────────────────────────────────────────────────────────
 
@@ -241,13 +261,13 @@ pub struct RuntimeState {
 const MAX_CALL_DEPTH: u32 = 512;
 
 impl RuntimeState {
-    pub fn new(num_regs: usize) -> Self {
+    pub fn new(num_regs: usize, module_strings: &[String]) -> Self {
         Self {
             regs:      vec![NanVal::nil(); num_regs.max(64)],
             vars_flat: vec![NanVal::nil(); 128],
             var_slots: FxHashMap::default(),
             var_cache: VarCache::new(256),
-            interner:  StringInterner::new(),
+            interner:  StringInterner::new(module_strings),
             last_exit: 0,
             call_depth: 0,
             iters:     FxHashMap::default(),
