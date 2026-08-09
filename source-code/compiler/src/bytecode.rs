@@ -52,6 +52,23 @@ impl ConstPool {
         i
     }
 
+    /// Znajdź istniejący indeks stringa w puli BEZ dodawania go, jeśli go
+    /// nie ma (w przeciwieństwie do add_str). Używane przez interpreter do
+    /// bezpiecznego rozwiązywania nazw zmiennych (name_idx) — nazwy
+    /// zmiennych MUSZĄ używać tego samego indeksu co reszta skompilowanego
+    /// bytecode (który powstał przez add_str), więc nie wolno tu użyć
+    /// osobnego, niezależnego interneru (patrz komentarz w interpreter.rs
+    /// przy init_hl_vars — to była realna przyczyna kolizji zmiennych).
+    pub fn find_str(&self, s: &str) -> Option<ConstIdx> {
+        if let Some(&i) = self.str_index.get(s) {
+            return Some(i);
+        }
+        // str_index nie jest serializowany (#[serde(skip)]) — po wczytaniu
+        // z cache .bc może być pusty, dopóki coś go nie odbuduje. Fallback:
+        // liniowe przeszukanie strings (rzadka ścieżka, tylko przy starcie).
+        self.strings.iter().position(|x| x == s).map(|p| p as ConstIdx)
+    }
+
     pub fn add_bool(&mut self, b: bool) -> ConstIdx {
         b as ConstIdx
     }
