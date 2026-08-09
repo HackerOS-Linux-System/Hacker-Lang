@@ -20,6 +20,10 @@ pub enum Token {
     CmdIsolated(String),
     CmdWithVars(String),
     Cmd(String),
+    /// /> komenda — wbudowane coreutils Hacker Langa (zero zewnętrznych zależności)
+    /// Obsługuje: cat, ls, grep, head, tail, wc, echo, find, cp, mv, rm, mkdir, touch,
+    ///            sort, uniq, cut, tr, rev, basename, dirname, stat, du, chmod, which, pwd
+    BuiltinCmd(String),
     HshCmd(String),
     Background(String),
     CmdPipeToVar { cmd: String, mode: PipeCmdMode, var_name: String },
@@ -64,7 +68,7 @@ pub enum Token {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PipeCmdMode { Plain, Sudo, WithVars }
+pub enum PipeCmdMode { Plain, Sudo, WithVars, Builtin }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommentKind { Line, Doc, Block }
@@ -167,7 +171,46 @@ impl Lexer {
         s.parse().unwrap_or(0.0)
     }
 
-    fn read_cmd(&mut self) -> String { self.skip_ws(); self.read_line() }
+    /// Czy string zawiera niesparzystą (otwartą) liczbę niecytowanych `"` —
+    /// czyli czy jesteśmy wciąż "w środku" literału stringowego.
+    fn has_unclosed_dquote(s: &str) -> bool {
+        let chars: Vec<char> = s.chars().collect();
+        let mut open = false;
+        for i in 0..chars.len() {
+            if chars[i] != '"' { continue; }
+            // Cudzysłów liczy się jako "ucieczka" (escaped) tylko jeśli jest
+            // poprzedzony NIEPARZYSTĄ liczbą backslashy — dokładnie jak w
+            // realnym shellu. Same backslashe (np. w regexach sed/awk typu
+            // `\\/`) nie mają tu żadnego znaczenia.
+            let mut bs = 0;
+            let mut j = i;
+            while j > 0 && chars[j - 1] == '\\' { bs += 1; j -= 1; }
+            if bs % 2 == 0 { open = !open; }
+        }
+        open
+    }
+
+    /// Czyta komendę (dla `>`, `>>`, `/>`, itd.). Obsługuje wieloliniowe
+    /// polecenia typu `bash -c "..."` / heredoc, gdzie treść w cudzysłowie
+    /// rozciąga się na kilka fizycznych linii — bez tego lekser rozbijał taką
+    /// komendę na osobne (błędne) tokeny w kolejnych liniach, co potem gubiło
+    /// parser (np. `mkdir -p ...` interpretowane jako nowa instrukcja).
+    fn read_cmd(&mut self) -> String {
+        self.skip_ws();
+        let mut result = self.read_line();
+        while Self::has_unclosed_dquote(&result) {
+            if self.peek() != Some('\n') { break; }
+            self.advance(); // pochłoń '\n' i kontynuuj w tej samej komendzie
+            result.push('\n');
+            let start = self.pos;
+            let mut end = start;
+            while end < self.source.len() && self.source[end] != '\n' { end += 1; }
+            let next: String = self.source[start..end].iter().collect();
+            for _ in start..end { self.advance(); }
+            result.push_str(&next);
+        }
+        result
+    }
 
     /// Rozdziel `args |> @var` dla QuickCall (:: name args |> @var)
     /// Zwraca (args_before_pipe, var_name) lub None jeśli brak |>
@@ -444,28 +487,32 @@ impl Lexer {
                     tokens.push(Token::Comments(CommentKind::Doc, self.read_line()));
                 }
 
-                // ── // zależność lub blok ─────────────────────────────────────
+                // ── // zależność ──────────────────────────────────────────────
+                // Naprawiony bug: wcześniej `//` skanował CAŁĄ RESZTĘ PLIKU w
+                // poszukiwaniu literalnego "\\", żeby zdecydować czy to "blok"
+                // komentarza — jeśli GDZIEKOLWIEK dalej w pliku pojawił się
+                // "\\" (np. referencja wsteczna sed `\1`, która w źródle HL
+                // musi być zapisana jako `\\1`), CAŁA zawartość między `//` a
+                // tym miejscem znikała jako jeden komentarz, gubiąc realny kod
+                // (m.in. `update-hackeros.hl` — blok `bash -c "..."` z `\1`
+                // w `sed`). Nie znaleziono ŻADNEGO użycia wariantu "blokowego"
+                // w prawdziwym kodzie — `//` jest teraz zawsze pojedynczą
+                // linią deklaracji zależności, tak jak faktycznie jest używane
+                // wszędzie w tym repozytorium.
                 '/' if self.matches_seq(&['/', '/']) => {
                     self.skip_n(2); self.skip_ws();
-                    let rest: String = self.source[self.pos..].iter().collect();
-                    if let Some(end) = rest.find("\\\\") {
-                        let content = rest[..end].trim().to_string();
-                        self.skip_n(end + 2);
-                        tokens.push(Token::Comments(CommentKind::Block, content));
+                    // Parsuj: "// narzedzie [pakiet-apt]" lub "// narzedzie"
+                    let raw_dep = self.read_line();
+                    let raw_dep = raw_dep.trim();
+                    // Rozdziel na bin_name i opcjonalny [apt-package]
+                    let (bin_name, apt_pkg) = if let (Some(lb), Some(rb)) = (raw_dep.find('['), raw_dep.rfind(']')) {
+                        let name = raw_dep[..lb].trim().to_string();
+                        let pkg  = raw_dep[lb+1..rb].trim().to_string();
+                        (name, if pkg.is_empty() { None } else { Some(pkg) })
                     } else {
-                        // Parsuj: "// narzedzie [pakiet-apt]" lub "// narzedzie"
-                        let raw_dep = self.read_line();
-                        let raw_dep = raw_dep.trim();
-                        // Rozdziel na bin_name i opcjonalny [apt-package]
-                        let (bin_name, apt_pkg) = if let (Some(lb), Some(rb)) = (raw_dep.find('['), raw_dep.rfind(']')) {
-                            let name = raw_dep[..lb].trim().to_string();
-                            let pkg  = raw_dep[lb+1..rb].trim().to_string();
-                            (name, if pkg.is_empty() { None } else { Some(pkg) })
-                        } else {
-                            (raw_dep.to_string(), None)
-                        };
-                        tokens.push(Token::Dependency(bin_name, apt_pkg));
-                    }
+                        (raw_dep.to_string(), None)
+                    };
+                    tokens.push(Token::Dependency(bin_name, apt_pkg));
                 }
 
                 // ── << file import ────────────────────────────────────────────
@@ -532,6 +579,17 @@ impl Lexer {
                     } else { tokens.push(Token::CmdWithVarsIsolated(line)); }
                 }
                 '-' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdIsolated(self.read_cmd())); }
+
+                // ── /> builtin coreutils ─────────────────────────────
+                '/' if self.peek_at(1) == Some('>') => {
+                    self.skip_n(2);
+                    let line = self.read_cmd();
+                    if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::Builtin, var_name: var });
+                    } else {
+                        tokens.push(Token::BuiltinCmd(line));
+                    }
+                }
 
                 '>' if self.peek_at(1) == Some('>') => {
                     self.skip_n(2);
@@ -634,6 +692,7 @@ impl Lexer {
 
                 '@' => {
                     self.advance();
+                    self.skip_ws();
                     let name = self.read_ident_full();
                     self.skip_ws();
                     let looks_like_for = {
