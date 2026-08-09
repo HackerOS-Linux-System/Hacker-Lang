@@ -2,6 +2,7 @@ pub mod deps;
 pub mod diagnostics;
 pub mod env;
 pub mod executor;
+pub use hl_coreutils as coreutils;
 pub mod libs;
 pub mod quick;
 pub mod arena;
