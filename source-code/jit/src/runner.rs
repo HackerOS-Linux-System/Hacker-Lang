@@ -5,13 +5,6 @@ use hl_core::{env::Env, Value};
 use crate::interpreter::BytecodeInterpreter;
 use std::path::Path;
 
-/// Skrypty powyżej tego progu linii używają AST executor zamiast BC serializacji.
-/// Podniesione z 300 → 2000, żeby duże skrypty jak bit.hl nie miały problemu z wstrzykiwaniem args.
-/// Wszystkie skrypty uruchamiane przez `hl run` używają AST executor (bez BC compile).
-/// BC compile jest dostępny przez `hl compile` + `hl run script.bc`.
-/// To eliminuje 8s+ timeout dla dużych skryptów jak bit.hl.
-const BC_LINE_THRESHOLD: usize = 0;
-
 /// Uruchom plik .hl — kompiluj do cache jeśli potrzeba, potem wykonaj przez JIT
 pub fn run_hl_file(path: &Path, args: &[String]) -> Result<i32> {
     if !path.exists() {
@@ -32,24 +25,24 @@ pub fn run_hl_file(path: &Path, args: &[String]) -> Result<i32> {
     }
 }
 
-/// Uruchom kod źródłowy HL
+/// Uruchom kod źródłowy HL przez BC compile + JIT interpreter, z bezpiecznym
+/// fallbackiem do AST executor jeśli KOMPILACJA się nie powiedzie (timeout
+/// albo błąd) — w tym przypadku nic jeszcze nie zostało wykonane, więc
+/// ponowne uruchomienie przez AST jest w pełni bezpieczne (zero ryzyka
+/// podwójnych efektów ubocznych typu podwójny zapis pliku).
+///
+/// Jeśli natomiast kompilacja się powiedzie, ale sam BytecodeInterpreter
+/// napotka błąd/panikę W TRAKCIE wykonania, NIE robimy cichego fallbacku do
+/// AST — to uruchomiłoby skrypt od nowa i mogłoby podwoić efekty uboczne
+/// (np. dwukrotne `rm`, dwukrotny zapis pliku). Zamiast tego zwracamy czysty
+/// błąd (patrz run_bc_module — panika jest łapana i zamieniana w Err, żeby
+/// nie zabijać całego procesu, ale bez automatycznego re-run).
 pub fn run_hl_source(source: &str, source_path: &Path, args: &[String]) -> Result<i32> {
     tracing::debug!("run_hl_source: {:?}", source_path);
 
     // Zawsze ustawiamy zmienne procesu (dla kompatybilności z BytecodeInterpreter)
     inject_args_to_env(args);
 
-    let line_count = source.lines().count();
-
-    if line_count > BC_LINE_THRESHOLD {
-        tracing::debug!(
-            "Duży plik ({} linii > {}), używam AST executor",
-            line_count, BC_LINE_THRESHOLD
-        );
-        return run_via_ast(source, source_path, args);
-    }
-
-    // Mały plik — kompiluj do .bc z timeoutem
     match compile_with_timeout(source, source_path, std::time::Duration::from_secs(30)) {
         Ok(bc_path) => {
             let module = read_bc_file(&bc_path)?;
@@ -127,11 +120,40 @@ pub fn run_bc_file(path: &Path, args: &[String]) -> Result<i32> {
 }
 
 /// Uruchom załadowany moduł bytecode przez interpreter + JIT
+///
+/// Wykonanie jest owinięte w catch_unwind: jeśli BytecodeInterpreter
+/// napotka błąd wewnętrzny (panika — np. nieoczekiwany indeks rejestru),
+/// dostajemy czysty Err zamiast twardego crasha całego procesu `hl`.
+/// Celowo NIE robimy tu automatycznego fallbacku do AST — do tego momentu
+/// skrypt mógł już wykonać efekty uboczne (zapis pliku, `rm`, itp.), więc
+/// ponowne uruchomienie od zera przez AST mogłoby je podwoić. Błąd
+/// kompilacji (przed jakimkolwiek wykonaniem) nadal bezpiecznie fallbackuje
+/// — patrz run_hl_source.
 pub fn run_bc_module(module: &HlModule, args: &[String]) -> Result<i32> {
     inject_args_to_env(args);
-    let mut interp = BytecodeInterpreter::new(module);
-    let exit_code = interp.run()?;
-    Ok(exit_code)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut interp = BytecodeInterpreter::new(module);
+        interp.run()
+    }));
+    match result {
+        Ok(Ok(exit_code)) => Ok(exit_code),
+        Ok(Err(e)) => Err(e),
+        Err(panic_payload) => {
+            let msg = panic_message(&panic_payload);
+            anyhow::bail!("BytecodeInterpreter spanikował w trakcie wykonania: {}", msg);
+        }
+    }
+}
+
+/// Wyciąga czytelny komunikat z payloadu paniki (który jest `Box<dyn Any>`).
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "nieznana panika (brak czytelnego komunikatu)".to_string()
+    }
 }
 
 /// Ustaw zmienne procesu dla BytecodeInterpreter (który czyta std::env::var)
