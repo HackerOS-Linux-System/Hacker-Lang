@@ -5,6 +5,7 @@ use tracing::debug;
 use hl_parser::ast::*;
 use crate::env::{Env, Value};
 use crate::deps::resolve_dependency;
+use crate::coreutils::run_builtin;
 use crate::libs::resolve_import;
 use crate::quick::exec_quick;
 use crate::arena::ArenaContext;
@@ -240,7 +241,10 @@ fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecRe
             stdout:    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
         });
     }
-    cmd.stdin(Stdio::inherit())
+    // stdin=null dla WSZYSTKICH komend (nie tylko capture=true)
+    // Zapobiega wiszeniu gdy subproces czeka na input z TTY
+    // Komendy interaktywne (np. `read`) powinny używać dedykowanego Node::ReadStdin
+    cmd.stdin(Stdio::null())
        .stdout(Stdio::inherit())
        .stderr(Stdio::inherit());
     Ok(ExecResult { exit_code: cmd.status()?.code().unwrap_or(1), stdout: None })
@@ -270,7 +274,7 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         Node::LineComment(_) | Node::DocComment(_) | Node::BlockComment(_) => Ok(ExecResult::ok()),
 
         Node::Print { parts } => {
-            let has_vars = parts.iter().any(|p| matches!(p, StringPart::Var(_)));
+            let has_vars = parts.iter().any(|p| matches!(p, StringPart::Var(_) | StringPart::DynVar(_)));
             if has_vars {
                 println!("{}", env.resolve_string_parts(parts));
             } else {
@@ -283,6 +287,31 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
         }
 
         // ── :: QuickCall (gen 1 wbudowane + gen 2 fallback) ───────────────────
+        // /> komenda — wbudowane coreutils (bez zewnętrznych zależności)
+        Node::BuiltinCmd { raw } => {
+            let expanded = env.interpolate(raw);
+            match run_builtin(&expanded, false) {
+                Ok(r)  => { env.last_exit = r.exit_code; Ok(ExecResult::err_or_ok(r.exit_code)) }
+                Err(e) => { eprintln!("\x1b[31m[/>]\x1b[0m {}", e); Ok(ExecResult::err(1)) }
+            }
+        }
+
+        // /> komenda |> @var — wbudowane z przechwyceniem stdout
+        Node::BuiltinPipeToVar { raw, var_name } => {
+            let expanded = env.interpolate(raw);
+            match run_builtin(&expanded, true) {
+                Ok(r) => {
+                    let captured = r.stdout.unwrap_or_default();
+                    // Trim trailing newline (jak PipeToVar)
+                    let trimmed = captured.trim_end_matches('\n').trim_end_matches('\r').to_string();
+                    env.set_var(var_name, Value::String(trimmed));
+                    env.last_exit = r.exit_code;
+                    Ok(ExecResult::err_or_ok(r.exit_code))
+                }
+                Err(e) => { eprintln!("\x1b[31m[/>]\x1b[0m {}", e); Ok(ExecResult::err(1)) }
+            }
+        }
+
         Node::QuickCall { name, args } => exec_quick(name, args, env),
 
         // :: name args |> @var — QuickCall z przechwyceniem stdout do zmiennej
@@ -321,6 +350,9 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
                 CommandMode::WithVars         => (false, false, true),
                 CommandMode::WithVarsSudo     => (true,  false, true),
                 CommandMode::WithVarsIsolated => (false, true,  true),
+                // Builtin nie trafia tutaj (obsługiwany przez Node::BuiltinCmd)
+                // ale kompilator wymaga wyczerpania wariantów
+                CommandMode::Builtin          => (false, false, true),
             };
             run_command(raw, sudo, isolated, interpolate, env, false)
         }
@@ -476,7 +508,9 @@ pub fn exec_node(node: &Node, env: &mut Env) -> Result<ExecResult> {
 
         Node::Dependency { name, apt_package } => {
             let apt = apt_package.as_deref();
-            match resolve_dependency(name, apt) {
+            // Flaga auto-install: std::env::var("HL_INSTALL_DEPS")=="1" lub --install-deps (ustawia env var)
+            let auto_install = std::env::var("HL_INSTALL_DEPS").as_deref() == Ok("1");
+            match resolve_dependency(name, apt, auto_install) {
                 Ok(r)  => Ok(if r.is_available() { ExecResult::ok() } else { ExecResult::err(1) }),
                 Err(e) => { eprintln!("\x1b[31m[hl dep]\x1b[0m {}", e); Ok(ExecResult::err(1)) }
             }
@@ -784,7 +818,7 @@ fn eval_atom(s: &str) -> Option<f64> {
 
 fn eval_arithmetic_shell(expr: &str) -> String {
     let sh_expr = format!("echo $(( {} ))", expr);
-    if let Ok(out) = Command::new("sh").args(["-c", &sh_expr]).output() {
+    if let Ok(out) = Command::new("sh").args(["-c", &sh_expr]).stdin(Stdio::null()).output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() && s != "0" || expr.trim() == "0" { return s; }
@@ -829,7 +863,8 @@ fn eval_condition_fast(cond: &str, env: &mut Env) -> Result<bool> {
         return Ok(!val.is_empty() && val != "false" && val != "0");
     }
 
-    Ok(Command::new("sh").args(["-c", cond]).status().map(|s| s.success()).unwrap_or(false))
+    // stdin=null: sh -c nie może blokować na TTY (byłoby: wpisz komendę → hang)
+    Ok(Command::new("sh").args(["-c", cond]).stdin(Stdio::null()).status().map(|s| s.success()).unwrap_or(false))
 }
 
 fn find_operator(s: &str, op: &str) -> Option<usize> {
