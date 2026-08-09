@@ -57,12 +57,12 @@ pub struct ArenaFuncEntry {
 }
 
 pub struct Env {
-    pub vars:        FxHashMap<String, Value>,
-    pub functions:   FxHashMap<String, FuncBody>,
+    pub vars:              FxHashMap<String, Value>,
+    pub functions:         FxHashMap<String, FuncBody>,
     /// Rejestr arena functions (gen 2): :: nazwa <rozmiar> def
-    pub arena_funcs: FxHashMap<String, ArenaFuncEntry>,
-    pub last_exit:   i32,
-    interp_buf:      String,
+    pub arena_funcs:       FxHashMap<String, ArenaFuncEntry>,
+    pub last_exit:         i32,
+    interp_buf:            String,
 }
 
 impl Default for Env {
