@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use hl_compiler::bytecode::*;
 use crate::runtime::{RuntimeState, NanVal};
 use std::process::{Command, Stdio};
+use std::collections::HashMap;
 
 // ── Dispatch signal ───────────────────────────────────────────────────────────
 
@@ -16,6 +17,21 @@ pub enum ExecSignal {
 
 // ── Trace JIT threshold ───────────────────────────────────────────────────────
 
+// Trace JIT NAPRAWIONY i ponownie włączony. Historia buga i naprawy — patrz
+// obszerny komentarz na górze jit_engine.rs (dwa niezależne braki: brak
+// prawdziwego CFG dla Jump/JumpIfFalse/JumpIfTrue, i GetVar/SetVar jako
+// no-opy zamiast dostępu do vars_ptr). Naprawa zweryfikowana:
+//   - cały tests/*.hl z aktywnym trace JIT (próg=5, agresywne wyzwalanie):
+//     zero crashy, zero nowych rozbieżności PASS/FAIL względem trybu
+//     domyślnego (wszystkie pętle w tym korpusie poprawnie i bezpiecznie
+//     odrzucają się z kompilacji, bo zawierają ExecCmd/stringi — dokładnie
+//     zgodnie z projektem bezpieczeństwa, patrz jit_engine.rs).
+//   - osobne testy syntetyczne dla przypadków, które FAKTYCZNIE się
+//     kompilują: prosty licznik, akumulator z dwiema zmiennymi nazwanymi,
+//     modulo, pętle zagnieżdżone (10x10), pętla zero-iteracji, odejmowanie
+//     z wynikiem ujemnym — wszystkie identyczne z trybem domyślnym, zero
+//     crashy.
+// Próg przywrócony do wartości produkcyjnej (50, jak przed wyłączeniem).
 const TRACE_THRESHOLD: u32 = 50;
 
 // ── Główny interpreter ────────────────────────────────────────────────────────
@@ -42,29 +58,54 @@ impl<'a> BytecodeInterpreter<'a> {
         let n = module.instructions.len();
         Self {
             module,
-            state:           RuntimeState::new(module.main_regs as usize),
+            state:           RuntimeState::new(module.main_regs as usize, &module.consts.strings),
             exec_counts:     vec![0u32; n],
             compiled_traces: rustc_hash::FxHashMap::default(),
         }
     }
 
     /// Inicjalizuj zmienne HL_VERSION itp.
+    ///
+    /// BUG (naprawiony): poprzednio używało self.state.interner.intern(...)
+    /// do wyliczenia name_idx — ale to CAŁKOWICIE ODDZIELNY interner od
+    /// module.consts (którego indeksów używa skompilowany bytecode we
+    /// WSZYSTKICH instrukcjach GetVar/SetVar). var_slots/var_cache trzymają
+    /// te indeksy jako nieprzezroczyste klucze — jeśli runtime-interner
+    /// przypadkiem zwróci tę samą liczbę co jakiś INNY, kompletnie
+    /// niezwiązany indeks w module.consts (np. dla zmiennej `_name`),
+    /// zapis do HL_VERSION cicho nadpisywał slot tamtej zmiennej. Objawiało
+    /// się to losowym pojawianiem się "gen 2" w miejscu zupełnie innych
+    /// wartości. Teraz: ustawiamy te zmienne TYLKO jeśli skrypt faktycznie
+    /// się do nich odwołuje (czyli ich nazwa już jest w module.consts) —
+    /// wtedy używamy DOKŁADNIE tego samego indeksu, więc zero kolizji.
+    /// Skrypt, który nigdy nie czyta @HL_VERSION/@HL_GEN i tak nie mógłby
+    /// ich odczytać bez tego indeksu w puli, więc nie tracimy funkcjonalności.
     pub fn init_hl_vars(&mut self) {
-        let k = self.state.interner.intern("HL_VERSION");
-        let v = self.state.intern_str("gen 2");
-        self.state.set_var(k, v);
-        let k2 = self.state.interner.intern("HL_GEN");
-        let v2 = self.state.intern_str("2");
-        self.state.set_var(k2, v2);
+        if let Some(k) = self.module.consts.find_str("HL_VERSION") {
+            let v = self.state.intern_str("gen 2");
+            self.state.set_var(k, v);
+        }
+        if let Some(k2) = self.module.consts.find_str("HL_GEN") {
+            let v2 = self.state.intern_str("2");
+            self.state.set_var(k2, v2);
+        }
     }
 
     /// Uruchom główny blok
     pub fn run(&mut self) -> Result<i32> {
         self.init_hl_vars();
-        let main_end = self.module.funcs.entries.first()
-        .map(|f| f.start_insn as usize)
-        .unwrap_or(self.module.instructions.len());
-        self.exec_block(0, main_end)?;
+        // BUG (naprawiony): wcześniej top-level wykonanie było obcinane do
+        // `main_end` = offset PIERWSZEJ zdefiniowanej funkcji, co zakładało,
+        // że wszystkie `: nazwa def ... done` są na KOŃCU pliku. W realnych
+        // skryptach HL funkcje są definiowane najpierw, a top-level kod
+        // (dispatch, wywołania) idzie PO nich — więc main_end obcinał
+        // wykonanie niemal natychmiast, zanim cokolwiek realnego się
+        // wykonało. Teraz ciała funkcji mają własny skip-jump (patrz
+        // lower.rs: Node::FuncDef/ArenaFuncDef), więc bezpiecznie
+        // wykonujemy CAŁY strumień instrukcji od 0 do końca — sekwencyjny
+        // przepływ sam poprawnie omija ciała funkcji, wchodząc do nich
+        // tylko przez explicit CallFunc (exec_func_by_name_idx).
+        self.exec_block(0, self.module.instructions.len())?;
         Ok(self.state.last_exit)
     }
 
@@ -83,9 +124,14 @@ impl<'a> BytecodeInterpreter<'a> {
                     let count = self.exec_counts.get_mut(pc).map(|c| { *c += 1; *c }).unwrap_or(0);
                     if count == TRACE_THRESHOLD && loop_size <= 64 {
                         // Próbuj skompilować pętlę [target..pc+1]
-                        if let Ok(trace) = self.try_compile_trace(target as u32, pc as u32) {
-                            self.compiled_traces.insert(target as u32, trace);
-                            tracing::debug!("[trace jit] skompilowano pętle @ {} (size={})", target, loop_size);
+                        match self.try_compile_trace(target as u32, pc as u32) {
+                            Ok(trace) => {
+                                self.compiled_traces.insert(target as u32, trace);
+                                tracing::debug!("[trace jit] skompilowano pętle @ {} (size={})", target, loop_size);
+                            }
+                            Err(e) => {
+                                tracing::debug!("[trace jit] pominięto pętlę @ {} (size={}): {}", target, loop_size, e);
+                            }
                         }
                     }
                     // Jeśli pętla jest skompilowana — wykonaj natywnie
@@ -117,12 +163,15 @@ impl<'a> BytecodeInterpreter<'a> {
             Some(t) => t,
             None    => return Ok(trace_start),
         };
-        let exit_offset = trace.exit_offset;
         let fn_ptr      = trace.fn_ptr;
         let reg_count   = self.state.regs.len() as u32;
         let var_count   = self.state.vars_flat.len() as u32;
 
-        // SAFETY: NanVal jest #[repr(transparent)] u64 — bezpośredni cast
+        // SAFETY: NanVal jest #[repr(transparent)] u64 — bezpośredni cast.
+        // Skompilowany kod (jit_engine.rs::compile_func_body) czyta/pisze
+        // WYŁĄCZNIE do slotów zweryfikowanych w try_compile_trace jako
+        // aktualnie-liczbowe, w zakresie [0, var_count) i [0, reg_count) —
+        // patrz komentarz bezpieczeństwa w jit_engine.rs.
         let result = unsafe {
             (fn_ptr)(
                 self.state.regs.as_mut_ptr() as *mut u64,
@@ -132,20 +181,65 @@ impl<'a> BytecodeInterpreter<'a> {
             )
         };
 
-        self.state.last_exit = result;
-        Ok(exit_offset)
+        // Naprawione: poprzednio ten wynik był ignorowany na rzecz sztywnego
+        // trace.exit_offset, co miało sens tylko dopóki skompilowany kod i
+        // tak nigdy nie pętlił się poprawnie (patrz historia w jit_engine.rs).
+        // Teraz jit_engine.rs generuje kod, który zwraca DOKŁADNY offset
+        // instrukcji, na którym interpreter ma wznowić wykonanie — po
+        // wyjściu z pętli (zewnętrzny cel JumpIfFalse/JumpIfTrue) albo po
+        // naturalnym końcu skompilowanego zakresu.
+        if result < 0 {
+            bail!("natywny trace zwrócił nieprawidłowy offset: {}", result);
+        }
+        let next_pc = result as u32;
+        if next_pc as usize > self.module.instructions.len() {
+            bail!("natywny trace zwrócił offset poza zakresem instrukcji: {}", next_pc);
+        }
+        Ok(next_pc)
     }
 
-    /// Próbuj skompilować trasę [start..end] do kodu maszynowego
-    /// Aktualnie: deleguje do JitEngine jeśli blok jest kwalifikowany
+    /// Próbuj skompilować trasę [start..end] do kodu maszynowego.
+    ///
+    /// Bezpieczeństwo (patrz też doku modułu w jit_engine.rs): przed
+    /// kompilacją zbieramy WSZYSTKIE nazwane zmienne (GetVar/SetVar)
+    /// odwoływane w zakresie trasy i wymagamy, żeby KAŻDA z nich (a) miała
+    /// już przydzielony slot w vars_flat (czyli była choć raz ustawiona),
+    /// (b) jej AKTUALNA wartość to `is_num()` — czysta liczba. Jeśli
+    /// którykolwiek warunek zawiedzie, w ogóle nie próbujemy kompilować —
+    /// bezpieczny fallback to po prostu dalsze interpretowanie tej pętli.
     fn try_compile_trace(&self, start: u32, end: u32) -> Result<CompiledTrace> {
-        // Trace compilation przez JitEngine — kompiluje blok jako pseudo-funkcję
         let entry = hl_compiler::bytecode::FuncEntry {
             name:       format!("__trace_{}_{}", start, end),
             start_insn: start,
             insn_count: end - start + 1,
         };
-        crate::jit_engine::compile_trace_entry(self.module, &entry)
+
+        let mut names: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for i in start..=end {
+            if let Some(insn) = self.module.instructions.get(i as usize) {
+                match insn {
+                    Instruction::GetVar { name, .. } | Instruction::SetVar { name, .. } => {
+                        names.insert(*name);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut var_slots: HashMap<u32, u32> = HashMap::new();
+        for name in &names {
+            let slot = match self.state.var_slots.get(name) {
+                Some(&s) => s,
+                None => bail!("zmienna (idx {}) nie ma jeszcze slotu — trace JIT pomija", name),
+            };
+            let val = self.state.vars_flat.get(slot as usize).copied().unwrap_or(NanVal::nil());
+            if !val.is_num() {
+                bail!("zmienna (idx {}) nie jest obecnie liczbą — trace JIT pomija (bezpieczny fallback)", name);
+            }
+            var_slots.insert(*name, slot);
+        }
+
+        crate::jit_engine::compile_trace_entry(self.module, &entry, &var_slots)
     }
 
     // ── Dispatch instrukcji ───────────────────────────────────────────────────
