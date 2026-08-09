@@ -242,10 +242,24 @@ impl Lowerer {
             }
 
             Node::FuncDef { name, body } => {
+                // BUG (naprawiony): ciało funkcji było emitowane inline, bez
+                // żadnej instrukcji "przeskocz nad tym". To działało tylko
+                // dopóki interpreter obcinał top-level wykonanie na starcie
+                // pierwszej funkcji (main_end w runner.rs/interpreter.rs) —
+                // co z kolei oznaczało, że JAKIKOLWIEK kod PO definicji
+                // funkcji (czyli niemal cały realny skrypt — HL pisze się
+                // "funkcje najpierw, dispatch na końcu") nigdy się nie
+                // wykonywał. Teraz emitujemy bezwarunkowy skok NAD ciałem
+                // funkcji, więc zwykły sekwencyjny top-level przepływ
+                // (pc += 1) poprawnie go omija — jedyny sposób wejścia do
+                // środka to explicit CallFunc (patrz exec_func_by_name_idx
+                // w interpreter.rs, który adresuje bezpośrednio start_insn).
+                let skip = self.emit_jump_placeholder(None);
                 let start = self.current_offset();
                 self.lower_nodes(body);
                 self.emit(Instruction::Return { src: None });
                 let end = self.current_offset();
+                self.patch_jump(skip, end);
                 self.module.funcs.entries.push(FuncEntry {
                     name:       name.clone(),
                                                start_insn: start,
@@ -359,6 +373,7 @@ impl Lowerer {
                 self.emit(Instruction::ExecCmd { cmd: cmd_reg, mode: CmdMode::Plain, dst });
             }
 
+            Node::BuiltinCmd { .. } | Node::BuiltinPipeToVar { .. } => { /* runtime-only */ }
             Node::Import { .. } | Node::Dependency { .. } => {
                 // Resolved at load-time przez JIT runtime
             }
@@ -407,10 +422,13 @@ impl Lowerer {
             // ArenaFuncDef: kompilujemy ciało jak zwykłą funkcję.
             // Arena allocation dzieje się w runtime (executor), nie w bytecode.
             Node::ArenaFuncDef { name, body, .. } => {
+                // Ten sam fix co Node::FuncDef — patrz komentarz tam.
+                let skip = self.emit_jump_placeholder(None);
                 let start = self.current_offset();
                 self.lower_nodes(body);
                 self.emit(Instruction::Return { src: None });
                 let end = self.current_offset();
+                self.patch_jump(skip, end);
                 self.module.funcs.entries.push(FuncEntry {
                     name:       format!("__arena__{}", name),
                                                start_insn: start,
@@ -591,15 +609,31 @@ impl Lowerer {
             return Some(dst);
         }
 
-        // Zmienna @name
+        // Zmienna @name — ALE tylko jeśli CAŁE wyrażenie to sama zmienna
+        // (bez operatora po niej). Wcześniejszy błąd: ta gałąź brała jako
+        // "nazwę" WSZYSTKO po '@' aż do końca stringa (np. "@a + 5" →
+        // nazwa zmiennej "a + 5" zamiast "a"), więc nigdy nie docierało do
+        // find_binary_op_split poniżej — całe wyrażenie z operatorem po
+        // zmiennej (np. `$(@a + 5)`, `$(@a + @b)`) dawało 0, bo szukało
+        // (i nie znajdowało) zmiennej o dosłownej nazwie "a + 5".
         if expr.starts_with('@') {
-            let name = &expr[1..];
-            let dst = self.alloc_reg();
-            let name_idx = self.module.consts.add_str(name);
-            self.emit(Instruction::GetVar { dst, name: name_idx });
-            let num_dst = self.alloc_reg();
-            self.emit(Instruction::ToNumber { dst: num_dst, src: dst });
-            return Some(num_dst);
+            let rest = &expr[1..];
+            let ident_len = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            if ident_len > 0 && ident_len == rest.len() {
+                // Całe wyrażenie to czysta zmienna, np. "@a" — nic po niej.
+                let name = rest;
+                let dst = self.alloc_reg();
+                let name_idx = self.module.consts.add_str(name);
+                self.emit(Instruction::GetVar { dst, name: name_idx });
+                let num_dst = self.alloc_reg();
+                self.emit(Instruction::ToNumber { dst: num_dst, src: dst });
+                return Some(num_dst);
+            }
+            // W przeciwnym razie leć dalej do find_binary_op_split — to co
+            // jest po zmiennej (operator + reszta wyrażenia) samo zostanie
+            // poprawnie rozbite i @name trafi tu ponownie jako `left`,
+            // tym razem jako CAŁY (już przycięty) podstring.
         }
 
         // Nawiasy
@@ -683,6 +717,9 @@ fn lower_cmd_mode(mode: &CommandMode) -> CmdMode {
         CommandMode::WithVars         => CmdMode::WithVars,
         CommandMode::WithVarsSudo     => CmdMode::WithVarsSudo,
         CommandMode::WithVarsIsolated => CmdMode::WithVarsIsolated,
+        // Builtin (/>): obsługiwane przez Node::BuiltinCmd w AST executor,
+        // nie trafia do kompilatora BC — fallback do Plain
+        CommandMode::Builtin          => CmdMode::Plain,
     }
 }
 
