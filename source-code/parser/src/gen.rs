@@ -62,6 +62,8 @@ impl Gen {
             GenFeature::ExternJava        => g >= 2,
             GenFeature::ExternElf         => g >= 2,
             GenFeature::ExternSo          => g >= 2,
+            // /> BuiltinCoreutils (gen 2+ / ROLLING)
+            GenFeature::BuiltinCoreutils  => g >= 2,
             // Gen 3+ (future / ROLLING preview)
             GenFeature::AsyncCommands     => g >= 3,
             GenFeature::Closures          => g >= 3,
@@ -88,6 +90,7 @@ pub enum GenFeature {
     // Extern system
     ExternShell, ExternPython, ExternJava, ExternElf, ExternSo,
     // Gen 3+ / ROLLING
+    BuiltinCoreutils,  // /> wbudowane coreutils
     AsyncCommands, Closures,
 }
 
