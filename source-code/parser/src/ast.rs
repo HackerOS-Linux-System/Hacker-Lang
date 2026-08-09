@@ -167,6 +167,10 @@ pub enum Node {
     QuickPipeToVar { name: String, args: Vec<StringPart>, var_name: String },
 
     Command     { raw: String, mode: CommandMode, interpolate: bool },
+    /// /> komenda — wbudowane coreutils (cat, ls, grep, head, tail, wc, ...)
+    BuiltinCmd  { raw: String },
+    /// /> komenda |> @var — wbudowane z przechwyceniem stdout
+    BuiltinPipeToVar { raw: String, var_name: String },
     HshCommand  { raw: String },
     Background  { raw: String },
     RepeatN     { count: u64, body: Vec<Node> },
@@ -236,6 +240,7 @@ pub enum ExportValue {
 pub enum CommandMode {
     Plain, Sudo, Isolated, IsolatedSudo,
     WithVars, WithVarsSudo, WithVarsIsolated,
+    Builtin,  // /> — wbudowane coreutils
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
