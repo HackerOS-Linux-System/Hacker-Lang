@@ -65,7 +65,7 @@ impl Parser {
         if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
             let inner = &value[1..value.len()-1];
             let parts = parse_string_parts(inner);
-            if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
+            if parts.iter().any(|p| matches!(p, StringPart::Var(_) | StringPart::DynVar(_))) {
                 return VarValue::Interpolated(parts);
             }
             return VarValue::String(inner.to_string());
@@ -78,7 +78,7 @@ impl Parser {
         if value == "true"  { return VarValue::Bool(true);  }
         if value == "false" { return VarValue::Bool(false); }
         let parts = parse_string_parts(value);
-        if parts.iter().any(|p| matches!(p, StringPart::Var(_))) {
+        if parts.iter().any(|p| matches!(p, StringPart::Var(_) | StringPart::DynVar(_))) {
             VarValue::Interpolated(parts)
         } else {
             VarValue::String(value.to_string())
@@ -218,10 +218,15 @@ impl Parser {
 
             Token::CmdPipeToVar { cmd, mode, var_name } => {
                 self.advance();
+                // /> cmd |> @var → BuiltinPipeToVar (wbudowane coreutils z przechwyceniem)
+                if matches!(mode, PipeCmdMode::Builtin) {
+                    return Ok(Some(Node::BuiltinPipeToVar { raw: cmd, var_name }));
+                }
                 let cmd_mode = match mode {
                     PipeCmdMode::Plain    => CommandMode::Plain,
                     PipeCmdMode::Sudo     => CommandMode::Sudo,
                     PipeCmdMode::WithVars => CommandMode::WithVars,
+                    PipeCmdMode::Builtin  => unreachable!(),
                 };
                 Ok(Some(Node::PipeToVar { command: cmd, mode: cmd_mode, var_name }))
             }
@@ -234,6 +239,7 @@ impl Parser {
                 }))
             }
 
+            Token::BuiltinCmd(raw)          => { self.advance(); Ok(Some(Node::BuiltinCmd { raw })) }
             Token::Cmd(raw)                 => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Plain,            interpolate: false })) }
             Token::CmdSudo(raw)             => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Sudo,             interpolate: false })) }
             Token::CmdIsolated(raw)         => { self.advance(); Ok(Some(Node::Command { raw, mode: CommandMode::Isolated,         interpolate: false })) }
@@ -311,8 +317,24 @@ impl Parser {
         let mut nodes = Vec::with_capacity(32);
         loop {
             self.skip_newlines();
-            if matches!(self.peek(), Token::Eof) { break; }
+            match self.peek() {
+                Token::Eof => break,
+                // Zbłąkane / niesparowane 'done' na najwyższym poziomie — pochłoń je
+                // zamiast pętlić w nieskończoność (parse_node zwraca Ok(None) dla Done
+                // bez przesunięcia pozycji, więc musimy jawnie je tu skonsumować).
+                Token::Done => { self.advance(); continue; }
+                _ => {}
+            }
+            let pos_before = self.pos;
             if let Some(n) = self.parse_node()? { nodes.push(n); }
+            // Zabezpieczenie: parse_node MUSI zawsze przesunąć pozycję (poza Eof/Done,
+            // obsłużonymi wyżej). Jeśli tego nie zrobił — to błąd parsera, a nie powód
+            // by zawiesić cały proces w nieskończonej pętli bez żadnego outputu.
+            if self.pos == pos_before {
+                let pos = self.pos;
+                let tok = self.advance();
+                return Err(ParseError::UnexpectedToken(pos, format!("{:?} (parser nie przesunął pozycji)", tok)));
+            }
         }
         Ok(nodes)
     }
@@ -330,6 +352,31 @@ pub fn parse_source_with_meta(source: &str) -> Result<ParseMeta, ParseError> {
     let tokens     = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     let nodes      = parser.parse()?;
+
+    // Walidacja: sprawdź czy użyte węzły pasują do zadeklarowanego genu
+    // Gen 1 nie obsługuje: PipeToVar, ForIn, WhileLoop, MatchExpr, Arithmetic, ArenaFunc
+    if gen.number() < 2 {
+        for node in &nodes {
+            let unsupported = match node {
+                Node::PipeToVar { .. }      => Some("PipeToVar (|>) wymaga gen 2"),
+                Node::BuiltinCmd { .. }     => Some("/> (wbudowane coreutils) wymaga gen 2"),
+                Node::BuiltinPipeToVar { .. }=> Some("/> ... |> @var wymaga gen 2"),
+                Node::ForIn { .. }       => Some("ForIn (@ x in lista) wymaga gen 2"),
+                Node::WhileLoop { .. }   => Some("WhileLoop (?~) wymaga gen 2"),
+                Node::MatchExpr { .. }   => Some("MatchExpr (? switch) wymaga gen 2"),
+                Node::Arithmetic { .. }  => Some("Arytmetyka $() wymaga gen 2"),
+                Node::ArenaFuncDef { .. }=> Some("Arena function (:: def) wymaga gen 2"),
+                Node::ArenaFuncCall{ .. }=> Some("Arena function call (::) wymaga gen 2"),
+                _ => None,
+            };
+            if let Some(msg) = unsupported {
+                return Err(ParseError::Gen(GenError::ParseError(
+                    format!("{} — zmień na `using <gen 2>`", msg)
+                )));
+            }
+        }
+    }
+
     Ok(ParseMeta { nodes, gen, shebang: preprocessed.shebang })
 }
 
