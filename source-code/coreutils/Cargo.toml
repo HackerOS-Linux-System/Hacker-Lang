@@ -1,0 +1,13 @@
+[package]
+name = "hl-coreutils"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "hl_coreutils"
+crate-type = ["rlib"]
+
+[dependencies]
+anyhow.workspace = true
+which.workspace  = true
