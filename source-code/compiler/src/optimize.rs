@@ -4,6 +4,10 @@ use std::collections::{HashMap, HashSet};
 pub fn optimize_module(module: &mut HlModule) {
     pass_constant_folding(module);
     pass_dead_branch_elimination(module);
+    // Po dead_branch_elimination (który zamienia znane-stałe JumpIfFalse/
+    // JumpIfTrue na Jump) — żeby wątkowanie objęło też te NOWO powstałe
+    // bezwarunkowe skoki, nie tylko te napisane wprost w źródle.
+    pass_jump_threading(module);
     pass_dead_store_elimination(module);
     pass_nop_elimination(module);
     pass_source_line_strip(module);
@@ -11,7 +15,10 @@ pub fn optimize_module(module: &mut HlModule) {
 }
 
 /// Constant folding: dwa LoadNum + Add/Sub/Mul/Div/Mod → jeden LoadNum,
-/// dwa LoadNum + porównanie → jeden LoadBool.
+/// dwa LoadNum + porównanie → jeden LoadBool, ToNumber/Truthy ze znanej
+/// stałej → LoadNum/LoadBool bezpośrednio (patrz komentarz przy gałęzi
+/// `Truthy` niżej — to również poszerza zasięg whole-function/trace JIT,
+/// bo `Truthy` sam w sobie nie jest jit-eligible, a `LoadBool` jest).
 fn pass_constant_folding(module: &mut HlModule) {
     // Śledź jakie rejestry są wynikiem LoadNum/LoadBool i ich wartości
     // (prosty jednoprzebiegowy model — bez analizy flow)
@@ -168,6 +175,46 @@ fn pass_constant_folding(module: &mut HlModule) {
                 reg_consts.remove(&dst);
                 reg_bools.remove(&dst);
             }
+            // ToNumber ze znanej stałej liczbowej → LoadNum bezpośrednio
+            // (jeden krok zamiast dwóch w interpreterze/JIT).
+            Instruction::ToNumber { dst, src } => {
+                if let Some(&v) = reg_consts.get(&src) {
+                    let new_idx = module.consts.add_num(v);
+                    module.instructions[i] = Instruction::LoadNum { dst, idx: new_idx };
+                    reg_consts.insert(dst, v);
+                    reg_bools.remove(&dst);
+                } else {
+                    reg_consts.remove(&dst);
+                    reg_bools.remove(&dst);
+                }
+            }
+            // Truthy ze znanej stałej (bool LUB liczbowej) → LoadBool.
+            //
+            // To NIE jest tylko "jedna instrukcja mniej": `Truthy` wywołuje w
+            // interpreterze specjalną ścieżkę dla stringów-warunków
+            // (`eval_condition_str`) i dlatego CELOWO nie jest na liście
+            // bezpiecznych instrukcji dla JIT (patrz `is_jit_eligible` w
+            // jit_engine.rs). Foldując `Truthy` znanej stałej na wprost
+            // `LoadBool` — co JEST jit-eligible — poszerzamy zakres pętli i
+            // funkcji, które kwalifikują się do kompilacji natywnej, bez
+            // zmiany semantyki: src pochodzi tu WYŁĄCZNIE z LoadNum/LoadBool
+            // (śledzonych w reg_consts/reg_bools), nigdy ze stringa, więc
+            // nie ma ryzyka pominięcia ścieżki eval_condition_str.
+            Instruction::Truthy { dst, src } => {
+                if let Some(&b) = reg_bools.get(&src) {
+                    module.instructions[i] = Instruction::LoadBool { dst, val: b };
+                    reg_bools.insert(dst, b);
+                    reg_consts.remove(&dst);
+                } else if let Some(&v) = reg_consts.get(&src) {
+                    let b = v != 0.0;
+                    module.instructions[i] = Instruction::LoadBool { dst, val: b };
+                    reg_bools.insert(dst, b);
+                    reg_consts.remove(&dst);
+                } else {
+                    reg_consts.remove(&dst);
+                    reg_bools.remove(&dst);
+                }
+            }
             // ExecCapture zapisuje DWA rejestry (dst_ec i dst_out) — trzeba
             // unieważnić oba, inaczej dalsze foldowanie mogłoby użyć
             // nieaktualnej "stałej" wartości w jednym z nich.
@@ -243,7 +290,56 @@ fn pass_dead_branch_elimination(module: &mut HlModule) {
     }
 }
 
-/// Zwraca rejestr docelowy instrukcji (jeśli go ma) — używane, żeby wiedzieć,
+/// Wątkowanie skoków (jump threading): jeśli bezwarunkowy `Jump{offset: X}`
+/// wskazuje na INNĄ bezwarunkową instrukcję `Jump{offset: Y}`, przekierowuje
+/// go bezpośrednio na `Y`, pomijając pośredni "doskok" — i tak dalej
+/// łańcuchowo, aż trafi na coś innego niż `Jump` (albo osiągnie limit
+/// `MAX_HOPS`, co gwarantuje zakończenie nawet dla patologicznych /
+/// cyklicznych łańcuchów).
+///
+/// Bezpieczeństwo: ta transformacja NIGDY nie przesuwa ani nie usuwa żadnej
+/// instrukcji — zmienia WYŁĄCZNIE pole `offset` samego skoku źródłowego.
+/// Dzięki temu żadne INNE miejsce w module, które skacze gdzie indziej
+/// (albo w ogóle nie dotyczy tego łańcucha), nie wymaga żadnej korekty —
+/// w przeciwieństwie do przesuwania/usuwania instrukcji, gdzie trzeba by
+/// przeliczyć WSZYSTKIE offsety w całym module.
+///
+/// Korzyść dla JIT: `try_compile_trace` liczy `loop_size = pc - target` i
+/// odrzuca trasy dłuższe niż `MAX_TRACE_LOOP_SIZE` — wątkowanie skoków
+/// zmniejsza tę odległość (mniej pośrednich "doskoków" po drodze), więc
+/// więcej pętli mieści się pod limitem. Krócej też znaczy mniej bloków w
+/// CFG budowanym przez Cranelift (`compile_func_body`) — mniejszy koszt
+/// kompilacji za każdym razem, gdy retry-with-backoff próbuje ponownie.
+fn pass_jump_threading(module: &mut HlModule) {
+    const MAX_HOPS: usize = 64;
+    let len = module.instructions.len();
+    for i in 0..len {
+        let mut target = match module.instructions[i] {
+            Instruction::Jump { offset } => offset,
+            _ => continue,
+        };
+        let mut hops = 0;
+        // Podążaj łańcuchem Jump→Jump→Jump… aż trafisz na coś innego.
+        // Czytamy AKTUALNY (być może już częściowo powątkowany w tym samym
+        // przebiegu) stan instrukcji — to bezpieczne i tylko przyspiesza
+        // zbieżność: wynik końcowy jest tym samym punktem stałym niezależnie
+        // od kolejności przetwarzania, bo wątkowanie jest przechodnie.
+        while hops < MAX_HOPS {
+            match module.instructions.get(target as usize) {
+                Some(&Instruction::Jump { offset: next }) if next != target => {
+                    target = next;
+                    hops += 1;
+                }
+                _ => break,
+            }
+        }
+        if let Instruction::Jump { offset } = &mut module.instructions[i] {
+            *offset = target;
+        }
+    }
+}
+
+
 /// kiedy dotychczasowa wiedza o "ten rejestr to znana stała" się dezaktualizuje.
 fn instruction_dst(insn: &Instruction) -> Option<Reg> {
     match *insn {
@@ -736,5 +832,73 @@ mod tests {
         let after = m.instructions.len();
 
         assert!(after < before, "dead store elimination + nop elimination powinno skrócić kod");
+    }
+
+    #[test]
+    fn test_jump_threading_collapses_chain() {
+        // Jump{1} → Jump{2} → Jump{3} → Return  ⇒  po wątkowaniu WSZYSTKIE
+        // trzy skoki powinny wskazywać bezpośrednio na Return (idx 3), bez
+        // pośrednich "doskoków". Wołamy pass w izolacji (jak inne testy
+        // pojedynczych przebiegów w tym pliku) — pełny optimize_module
+        // zawierałby też dead_store/nop_elimination, które przenumerowałyby
+        // indeksy po ewentualnym usunięciu martwych instrukcji i
+        // zaciemniłyby to, co faktycznie testujemy.
+        let mut m = make_module_with(vec![
+            Instruction::Jump { offset: 1 },   // 0 → 1 → 2 → 3
+            Instruction::Jump { offset: 2 },   // 1 → 2 → 3
+            Instruction::Jump { offset: 3 },   // 2 → 3
+            Instruction::Return { src: None }, // 3
+        ], vec![]);
+
+        pass_jump_threading(&mut m);
+
+        for (i, insn) in m.instructions.iter().enumerate() {
+            if let Instruction::Jump { offset } = insn {
+                assert_eq!(*offset, 3, "instrukcja {} powinna wskazywać bezpośrednio na Return (idx 3), nie na pośredni doskok", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_jump_threading_after_dead_branch_elimination() {
+        // Warunek znany na etapie kompilacji → JumpIfFalse zwija się w Jump
+        // (dead_branch_elimination) → ten NOWO powstały Jump też powinien
+        // zostać powątkowany, jeśli sam wskazuje na kolejny Jump. Oba passy
+        // wołane bezpośrednio (bez nop/dead-store elimination), żeby
+        // uniknąć przenumerowania indeksów przez niepowiązane przebiegi.
+        let mut m = make_module_with(vec![
+            Instruction::LoadBool { dst: 0, val: false },    // 0
+            Instruction::JumpIfFalse { cond: 0, offset: 2 }, // 1 → (cond=false) → Jump{2}
+            Instruction::Jump { offset: 3 },                 // 2
+            Instruction::Return { src: None },               // 3
+        ], vec![]);
+
+        pass_dead_branch_elimination(&mut m);
+        pass_jump_threading(&mut m);
+
+        match m.instructions[1] {
+            Instruction::Jump { offset } => assert_eq!(
+                offset, 3,
+                "Jump powstały z foldowania warunku powinien być powątkowany do celu ostatecznego"
+            ),
+            ref other => panic!("Oczekiwano Jump, jest {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_jump_threading_self_loop_terminates() {
+        // Jump do samego siebie (odpowiednik `while true do done` bez ciała)
+        // — pass NIE MOŻE wpaść w nieskończoną pętlę KOMPILATORA, nawet
+        // jeśli sam program źródłowy opisuje nieskończoną pętlę wykonania.
+        let mut m = make_module_with(vec![
+            Instruction::Jump { offset: 0 }, // 0 → 0 (sam do siebie)
+        ], vec![]);
+
+        pass_jump_threading(&mut m); // nie powinno się zawiesić
+
+        match m.instructions[0] {
+            Instruction::Jump { offset } => assert_eq!(offset, 0),
+            _ => panic!("Oczekiwano Jump"),
+        }
     }
 }
