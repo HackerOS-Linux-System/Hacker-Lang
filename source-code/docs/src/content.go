@@ -1,4 +1,4 @@
-package main
+package src
 
 // DocSection to pojedynczy wpis dokumentacji widoczny w menu po lewej.
 // Treść każdej sekcji jest renderowana od razu (nie leniwie) — koszt
@@ -21,6 +21,7 @@ func allSections() []DocSection {
 	out = append(out, quickFuncSections...)
 	out = append(out, coreutilsSections...)
 	out = append(out, toolsSections...)
+	out = append(out, jitSections...)
 	out = append(out, rollingSections...)
 	out = append(out, tutorialSections...)
 	return out
