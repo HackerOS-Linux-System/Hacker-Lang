@@ -15,7 +15,7 @@ pub enum ExecSignal {
     Exit(i32),
 }
 
-// ── Trace JIT threshold ───────────────────────────────────────────────────────
+// ── JIT thresholds ────────────────────────────────────────────────────────────
 
 // Trace JIT NAPRAWIONY i ponownie włączony. Historia buga i naprawy — patrz
 // obszerny komentarz na górze jit_engine.rs (dwa niezależne braki: brak
@@ -31,36 +31,193 @@ pub enum ExecSignal {
 //     modulo, pętle zagnieżdżone (10x10), pętla zero-iteracji, odejmowanie
 //     z wynikiem ujemnym — wszystkie identyczne z trybem domyślnym, zero
 //     crashy.
-// Próg przywrócony do wartości produkcyjnej (50, jak przed wyłączeniem).
+// Próg domyślny to wartość produkcyjna (50, jak przed wyłączeniem) — teraz
+// dostrajalna przez zmienne środowiskowe (patrz `env_threshold` niżej), a
+// dla CIASNYCH pętli (<= TIGHT_LOOP_SIZE instrukcji) efektywnie obniżana:
+// mała pętla wykonuje dużo więcej iteracji na jednostkę "rozgrzewki" niż
+// duża, więc szybsze przejście na kod natywny szybciej się zwraca.
 const TRACE_THRESHOLD: u32 = 50;
+const FUNC_JIT_THRESHOLD: u32 = 50;
+const TIGHT_LOOP_SIZE: usize = 8;
+const TIGHT_LOOP_THRESHOLD_DIVISOR: u32 = 2;
+const MIN_ADAPTIVE_THRESHOLD: u32 = 4;
+const MAX_TRACE_LOOP_SIZE: usize = 64;
+/// Ile razy WOLNO ponowić próbę kompilacji trasy/funkcji po niepowodzeniu
+/// spowodowanym przyczyną DYNAMICZNĄ (np. zmienna jeszcze nie ma stabilnie
+/// numerycznej wartości), zanim JIT trwale się podda. Niepowodzenia
+/// STRUKTURALNE (instrukcje niekwalifikujące się do JIT — patrz
+/// `is_jit_eligible`) nigdy się same nie naprawią, więc dla nich nie ma
+/// sensu w ogóle liczyć prób — blokujemy od razu i na zawsze (patrz
+/// `func_eligible`/`func_jit_blocked` niżej).
+const MAX_JIT_RETRIES: u8 = 4;
+
+/// Odczytaj próg z env (np. `HL_JIT_TRACE_THRESHOLD`), z fallbackiem na
+/// wartość domyślną, jeśli zmienna nie jest ustawiona / nie parsuje się /
+/// jest zerem (próg zerowy nie ma sensu — kompilowałby wszystko od razu,
+/// zanim interpreter zdąży w ogóle ustalić stabilne typy zmiennych).
+fn env_threshold(var: &str, default: u32) -> u32 {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(default)
+}
 
 // ── Główny interpreter ────────────────────────────────────────────────────────
 
 pub struct BytecodeInterpreter<'a> {
     pub module:      &'a HlModule,
     pub state:       RuntimeState,
-    /// Liczniki wykonań per instrukcja (dla trace JIT)
+    /// Liczniki wykonań per instrukcja (dla trace JIT) — indeksowane
+    /// BEZPOŚREDNIO przez `pc` (Vec, nie mapa: rozmiar = liczba instrukcji,
+    /// dostęp bez hashowania na najgorętszej możliwej ścieżce).
     exec_counts:     Vec<u32>,
-    /// Skompilowane trasy (offset → native fn ptr)
-    compiled_traces: rustc_hash::FxHashMap<u32, CompiledTrace>,
+    /// Skompilowane trasy pętli — indeksowane BEZPOŚREDNIO przez offset
+    /// startu pętli (`target`). Wcześniej `FxHashMap<u32, CompiledTrace>`:
+    /// każde przejście przez KAŻDĄ pętlę wsteczną (skompilowaną czy nie —
+    /// to sprawdzenie wykonuje się na WIĘKSZOŚCI iteracji każdej pętli w
+    /// programie) hashowało klucz. `pc`/`target` są gęstymi indeksami w
+    /// [0, instructions.len()) z definicji (to offsety w tym samym
+    /// strumieniu bytecode) — `Vec<Option<_>>` daje identyczną semantykę
+    /// przy zerowym koszcie hashowania.
+    compiled_traces:   Vec<Option<CompiledTrace>>,
+    /// Licznik ponownych prób kompilacji per miejsce pętli (indeksowany
+    /// przez `target`) — patrz `MAX_JIT_RETRIES`.
+    trace_retry_count: Vec<u8>,
+
+    // ── Whole-function JIT ──────────────────────────────────────────────
+    // Uzupełnienie Trace JIT: pętla kompiluje SIEBIE, gdy jest gorąca, ale
+    // funkcja czysto obliczeniowa wołana wielokrotnie z top-level (bez
+    // gorącej pętli WEWNĄTRZ niej) wcześniej nigdy nie trafiała do JIT —
+    // `jit_compile`/`record_call` w jit_engine.rs istniały, ale nic ich nie
+    // wołało (patrz historia w komentarzu tamtego pliku). Teraz: śledzimy
+    // liczbę wywołań PER FUNKCJA i po przekroczeniu progu próbujemy
+    // skompilować całe jej ciało.
+    //
+    // Wszystkie poniższe pola są indeksowane BEZPOŚREDNIO przez `name_idx`
+    // (indeks do puli stałych stringowych modułu — patrz `const_str`), z
+    // tego samego powodu co `compiled_traces` wyżej: `exec_func_by_name_idx`
+    // jest wołane na KAŻDE wywołanie funkcji w skrypcie, skompilowanej czy
+    // nie, więc to jest równie gorąca ścieżka jak trasy pętli.
+    /// Liczba wywołań per funkcja
+    func_call_counts: Vec<u32>,
+    /// Cache wyniku audytu whole-function JIT per funkcja (patrz
+    /// `jit_engine::InlineAudit`/`audit_for_inlining`) — liczony raz, bo
+    /// zbiór instrukcji funkcji (i to, czy ma bezpieczne miejsce do
+    /// wklejenia wywołania — patrz "Inlining" niżej) się nie zmienia między
+    /// wywołaniami.
+    func_eligible:    Vec<Option<crate::jit_engine::InlineAudit>>,
+    /// Licznik ponownych prób kompilacji per funkcja (patrz `MAX_JIT_RETRIES`).
+    func_retry_count: Vec<u8>,
+    /// Funkcje, dla których JIT jest trwale wykluczony w tym uruchomieniu:
+    /// albo audyt zwrócił `Ineligible` (nigdy się nie zmieni), albo pula
+    /// ponownych prób (`MAX_JIT_RETRIES`) się wyczerpała.
+    func_jit_blocked: Vec<bool>,
+    /// Skompilowane CAŁE funkcje
+    compiled_funcs:   Vec<Option<CompiledTrace>>,
+
+    /// Trwały silnik JIT (patrz doc `JitEngine` w jit_engine.rs) — `None`,
+    /// jeśli `HL_NO_JIT` jest ustawione, albo jeśli budowa silnika (np.
+    /// wykrycie natywnego ISA) się nie powiodła; w obu przypadkach
+    /// interpreter bezpiecznie działa w trybie czysto interpretowanym.
+    jit_engine: Option<crate::jit_engine::JitEngine>,
+    trace_threshold: u32,
+    func_threshold:  u32,
+
+    /// ── Trace linking ───────────────────────────────────────────────────
+    /// Tablica przekazywana jako 5. parametr do KAŻDEGO skompilowanego
+    /// fragmentu (patrz `jit_engine::CompiledFnPtr`): `link_table[i] != 0`
+    /// oznacza "pod offsetem `i` jest już skompilowana natywnie TRASA — jej
+    /// wskaźnik funkcji to `link_table[i]`". Wygenerowany kod trasy
+    /// SPRAWDZA tę tablicę przy KAŻDYM wyjściu i, jeśli cel jest już
+    /// skompilowany, doskakuje do niego BEZPOŚREDNIO w kodzie natywnym —
+    /// bez przechodzenia przez pętlę dispatchu w Rust. Rozmiar ustalony RAZ
+    /// (= liczba instrukcji) i NIGDY nie zmieniany — indeksy muszą zostać
+    /// stabilne przez cały czas życia interpretera, bo wskaźnik do tej
+    /// tablicy jest przekazywany w głąb potencjalnie długich łańcuchów
+    /// zagnieżdżonych wywołań natywnych.
+    link_table: Vec<usize>,
 }
 
-/// Skompilowana trasa (wynik trace JIT)
+/// Skompilowana trasa (wynik trace JIT) ALBO całej funkcji (whole-function
+/// JIT) — oba przypadki mają identyczny kształt: wskaźnik do kodu
+/// natywnego i offset, na którym interpreter widzi stan jako w pełni
+/// zapisany po zakończeniu wykonania natywnego (patrz
+/// `jit_engine.rs::emit_store_and_return`). `Copy`: zawiera tylko wskaźnik
+/// funkcji i u32 — potrzebne, żeby `vec![None; n]` mogło inicjalizować
+/// gęste tablice `Vec<Option<CompiledTrace>>` (patrz `BytecodeInterpreter`).
+#[derive(Clone, Copy)]
 pub struct CompiledTrace {
-    /// fn(regs: *mut u64, vars: *mut u64, reg_count: u32, var_count: u32) -> i32
-    pub fn_ptr: unsafe extern "C" fn(*mut u64, *mut u64, u32, u32) -> i32,
-    /// Offset wyjścia z trasy (dokąd skakać po wykonaniu)
+    /// Patrz `jit_engine::CompiledFnPtr` — WSPÓLNA sygnatura dla tras i
+    /// całych funkcji (piąty parametr to `link_table`, patrz wyżej;
+    /// whole-function JIT dostaje go dla jednorodności ABI, ale nigdy go
+    /// nie odczytuje w wygenerowanym kodzie).
+    pub fn_ptr: crate::jit_engine::CompiledFnPtr,
+    /// Offset wyjścia (dokąd skakać po wykonaniu trasy pętli; dla
+    /// whole-function JIT jest to zawsze koniec funkcji i jest ignorowany
+    /// przez wołającego — patrz `exec_func_by_name_idx`).
     pub exit_offset: u32,
+}
+
+/// Zbiorcze statystyki JIT dla jednego uruchomienia — patrz `HL_JIT_STATS`
+/// (drukowane przez `runner.rs::run_bc_module`, gdy zmienna jest ustawiona).
+pub struct JitStats {
+    pub compiled_traces: usize,
+    pub compiled_funcs:  usize,
+    pub engine_compiles: u32,
+    pub engine_insns:    u32,
 }
 
 impl<'a> BytecodeInterpreter<'a> {
     pub fn new(module: &'a HlModule) -> Self {
         let n = module.instructions.len();
+        // name_idx (indeks do puli stałych stringowych — GetVar/SetVar/
+        // CallFunc wszystkie się do niej odwołują) jest zawsze < ten rozmiar
+        // z definicji, więc Vec o tej długości pokrywa KAŻDY możliwy
+        // name_idx bez potrzeby hashowania na ścieżce wywołania funkcji.
+        let name_pool = module.consts.strings.len();
+
+        let jit_engine = if std::env::var("HL_NO_JIT").is_ok() {
+            None
+        } else {
+            match crate::jit_engine::JitEngine::new() {
+                Ok(engine) => Some(engine),
+                Err(e) => {
+                    tracing::warn!(
+                        "[jit] silnik JIT niedostępny ({}), praca w trybie czysto interpretowanym",
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
         Self {
             module,
-            state:           RuntimeState::new(module.main_regs as usize, &module.consts.strings),
-            exec_counts:     vec![0u32; n],
-            compiled_traces: rustc_hash::FxHashMap::default(),
+            state:             RuntimeState::new(module.main_regs as usize, &module.consts.strings),
+            exec_counts:       vec![0u32; n],
+            compiled_traces:   vec![None; n],
+            trace_retry_count: vec![0u8; n],
+            func_call_counts:  vec![0u32; name_pool],
+            func_eligible:     vec![None; name_pool],
+            func_retry_count:  vec![0u8; name_pool],
+            func_jit_blocked:  vec![false; name_pool],
+            compiled_funcs:    vec![None; name_pool],
+            trace_threshold:   env_threshold("HL_JIT_TRACE_THRESHOLD", TRACE_THRESHOLD),
+            func_threshold:    env_threshold("HL_JIT_FUNC_THRESHOLD", FUNC_JIT_THRESHOLD),
+            jit_engine,
+            // Rozmiar ustalony RAZ, nigdy nie zmieniany — patrz doc pola.
+            link_table: vec![0usize; n],
+        }
+    }
+
+    /// Statystyki JIT dla tego uruchomienia (patrz `JitStats`).
+    pub fn jit_stats(&self) -> JitStats {
+        JitStats {
+            compiled_traces: self.compiled_traces.iter().filter(|o| o.is_some()).count(),
+            compiled_funcs:  self.compiled_funcs.iter().filter(|o| o.is_some()).count(),
+            engine_compiles: self.jit_engine.as_ref().map(|e| e.compiled_count).unwrap_or(0),
+            engine_insns:    self.jit_engine.as_ref().map(|e| e.compiled_insns).unwrap_or(0),
         }
     }
 
@@ -118,27 +275,74 @@ impl<'a> BytecodeInterpreter<'a> {
             if let Some(Instruction::Jump { offset }) = self.module.instructions.get(pc) {
                 let target = *offset as usize;
                 if target < pc {
-                    // Pętla wsteczna — kandydat do trace JIT
-                    // Guard: kompiluj tylko małe pętle (<= 64 instrukcji)
+                    // Już skompilowana? Wykonaj natywnie od razu — dostęp
+                    // O(1) przez Vec (bez hashowania), sprawdzane na TEJ
+                    // SAMEJ ścieżce co każda inna iteracja tej pętli.
+                    if let Some(trace) = self.compiled_traces.get(target).and_then(|o| o.as_ref()) {
+                        let fn_ptr = trace.fn_ptr;
+                        let result = self.exec_native_fn_ptr(fn_ptr)?;
+                        pc = result as usize;
+                        continue;
+                    }
+
+                    // Pętla wsteczna, jeszcze nieskompilowana — kandydat do trace JIT.
+                    // Guard: kompiluj tylko małe pętle (<= MAX_TRACE_LOOP_SIZE instrukcji)
                     let loop_size = pc - target;
+                    // Ciasne pętle (mało instrukcji, więc dużo iteracji na
+                    // jednostkę "rozgrzewki") rozgrzewają się o połowę
+                    // szybciej niż domyślny próg — patrz komentarz przy
+                    // TRACE_THRESHOLD.
+                    let effective_threshold = if loop_size <= TIGHT_LOOP_SIZE {
+                        (self.trace_threshold / TIGHT_LOOP_THRESHOLD_DIVISOR).max(MIN_ADAPTIVE_THRESHOLD)
+                    } else {
+                        self.trace_threshold
+                    };
                     let count = self.exec_counts.get_mut(pc).map(|c| { *c += 1; *c }).unwrap_or(0);
-                    if count == TRACE_THRESHOLD && loop_size <= 64 {
+                    if count == effective_threshold && loop_size <= MAX_TRACE_LOOP_SIZE {
                         // Próbuj skompilować pętlę [target..pc+1]
                         match self.try_compile_trace(target as u32, pc as u32) {
                             Ok(trace) => {
-                                self.compiled_traces.insert(target as u32, trace);
-                                tracing::debug!("[trace jit] skompilowano pętle @ {} (size={})", target, loop_size);
+                                tracing::debug!("[trace jit] skompilowano pętlę @ {} (size={})", target, loop_size);
+                                // Trace linking: udostępnij tę trasę WSZYSTKIM
+                                // innym już skompilowanym trasom, których
+                                // wyjście akurat tu prowadzi — patrz doc pola
+                                // `link_table` i `jit_engine.rs::emit_store_and_return`.
+                                // Retroaktywne: nie trzeba niczego łatać w
+                                // już wyemitowanym kodzie tamtych tras, bo
+                                // sprawdzają tę tablicę w RUNTIME przy
+                                // każdym swoim wyjściu.
+                                if let Some(slot) = self.link_table.get_mut(target) { *slot = trace.fn_ptr as usize; }
+                                if let Some(slot) = self.compiled_traces.get_mut(target) { *slot = Some(trace); }
                             }
                             Err(e) => {
                                 tracing::debug!("[trace jit] pominięto pętlę @ {} (size={}): {}", target, loop_size, e);
+                                // Niepowodzenie MOŻE być dynamiczne (np.
+                                // zmienna jeszcze nie jest stabilnie
+                                // numeryczna po pierwszym przejściu) i
+                                // naprawić się samo później — dajemy
+                                // ograniczoną liczbę ponownych prób zamiast
+                                // trwale się poddawać po pierwszej. Reset
+                                // licznika pozwala mu ponownie wspiąć się do
+                                // `effective_threshold` po kolejnych
+                                // iteracjach tej samej pętli.
+                                if let Some(r) = self.trace_retry_count.get_mut(target) {
+                                    if *r < MAX_JIT_RETRIES {
+                                        *r += 1;
+                                        if let Some(c) = self.exec_counts.get_mut(pc) { *c = 0; }
+                                    }
+                                    // Pula wyczerpana: zostawiamy licznik jak
+                                    // jest — nigdy więcej nie trafi dokładnie
+                                    // w `effective_threshold`, więc trasa
+                                    // jest odtąd trwale interpretowana.
+                                }
                             }
                         }
-                    }
-                    // Jeśli pętla jest skompilowana — wykonaj natywnie
-                    if let Some(_trace) = self.compiled_traces.get(&(target as u32)) {
-                        let result = self.exec_native_trace(target as u32)?;
-                        pc = result as usize;
-                        continue;
+                        if let Some(trace) = self.compiled_traces.get(target).and_then(|o| o.as_ref()) {
+                            let fn_ptr = trace.fn_ptr;
+                            let result = self.exec_native_fn_ptr(fn_ptr)?;
+                            pc = result as usize;
+                            continue;
+                        }
                     }
                 }
             }
@@ -157,27 +361,35 @@ impl<'a> BytecodeInterpreter<'a> {
         Ok(ExecSignal::Next)
     }
 
-    /// Wykonaj skompilowaną trasę — przekaż rejestry i zmienne jako raw pointers
-    fn exec_native_trace(&mut self, trace_start: u32) -> Result<u32> {
-        let trace = match self.compiled_traces.get(&trace_start) {
-            Some(t) => t,
-            None    => return Ok(trace_start),
-        };
-        let fn_ptr      = trace.fn_ptr;
-        let reg_count   = self.state.regs.len() as u32;
-        let var_count   = self.state.vars_flat.len() as u32;
+    /// Wykonaj DOWOLNY skompilowany natywny fragment (trasa pętli LUB całe
+    /// ciało funkcji — patrz `exec_func_by_name_idx`) na bieżącym stanie
+    /// rejestrów/zmiennych i zwróć offset, na którym interpreter widzi stan
+    /// jako w pełni zapisany po zakończeniu (dla whole-function JIT jest to
+    /// zawsze koniec funkcji; wołający wtedy tę wartość ignoruje).
+    fn exec_native_fn_ptr(
+        &mut self,
+        fn_ptr: crate::jit_engine::CompiledFnPtr,
+    ) -> Result<u32> {
+        let reg_count = self.state.regs.len() as u32;
+        let var_count = self.state.vars_flat.len() as u32;
 
         // SAFETY: NanVal jest #[repr(transparent)] u64 — bezpośredni cast.
         // Skompilowany kod (jit_engine.rs::compile_func_body) czyta/pisze
-        // WYŁĄCZNIE do slotów zweryfikowanych w try_compile_trace jako
-        // aktualnie-liczbowe, w zakresie [0, var_count) i [0, reg_count) —
-        // patrz komentarz bezpieczeństwa w jit_engine.rs.
+        // WYŁĄCZNIE do slotów zweryfikowanych w try_compile_trace /
+        // try_compile_function jako aktualnie-liczbowe, w zakresie
+        // [0, var_count) i [0, reg_count) — patrz komentarz bezpieczeństwa
+        // w jit_engine.rs. `link_table.as_ptr()` (patrz doc pola
+        // `link_table`) jest ważny przez cały czas trwania tego wywołania —
+        // rozmiar Vec jest ustalony raz w `new()` i nigdy nie zmieniany, więc
+        // wskaźnik nie staje się nieważny nawet w głąb zagnieżdżonych
+        // natywnych wywołań łańcuchowanych przez trace linking.
         let result = unsafe {
             (fn_ptr)(
                 self.state.regs.as_mut_ptr() as *mut u64,
                      self.state.vars_flat.as_mut_ptr() as *mut u64,
                      reg_count,
                      var_count,
+                     self.link_table.as_ptr(),
             )
         };
 
@@ -189,32 +401,44 @@ impl<'a> BytecodeInterpreter<'a> {
         // wyjściu z pętli (zewnętrzny cel JumpIfFalse/JumpIfTrue) albo po
         // naturalnym końcu skompilowanego zakresu.
         if result < 0 {
-            bail!("natywny trace zwrócił nieprawidłowy offset: {}", result);
+            bail!("natywny JIT zwrócił nieprawidłowy offset: {}", result);
         }
         let next_pc = result as u32;
         if next_pc as usize > self.module.instructions.len() {
-            bail!("natywny trace zwrócił offset poza zakresem instrukcji: {}", next_pc);
+            bail!("natywny JIT zwrócił offset poza zakresem instrukcji: {}", next_pc);
         }
         Ok(next_pc)
     }
 
-    /// Próbuj skompilować trasę [start..end] do kodu maszynowego.
-    ///
-    /// Bezpieczeństwo (patrz też doku modułu w jit_engine.rs): przed
-    /// kompilacją zbieramy WSZYSTKIE nazwane zmienne (GetVar/SetVar)
-    /// odwoływane w zakresie trasy i wymagamy, żeby KAŻDA z nich (a) miała
-    /// już przydzielony slot w vars_flat (czyli była choć raz ustawiona),
-    /// (b) jej AKTUALNA wartość to `is_num()` — czysta liczba. Jeśli
-    /// którykolwiek warunek zawiedzie, w ogóle nie próbujemy kompilować —
-    /// bezpieczny fallback to po prostu dalsze interpretowanie tej pętli.
-    fn try_compile_trace(&self, start: u32, end: u32) -> Result<CompiledTrace> {
-        let entry = hl_compiler::bytecode::FuncEntry {
-            name:       format!("__trace_{}_{}", start, end),
-            start_insn: start,
-            insn_count: end - start + 1,
-        };
+    /// Zbierz i zweryfikuj var_slots dla zakresu instrukcji [start..end)
+    /// (bez końca) LUB [start..=end] (z końcem, dla tras pętli — patrz
+    /// wywołania niżej). Współdzielona logika bezpieczeństwa między
+    /// `try_compile_trace` i `try_compile_function`: KAŻDA zmienna
+    /// odwoływana w zakresie musi (a) mieć już przydzielony slot w
+    /// vars_flat (czyli być choć raz ustawiona), (b) jej AKTUALNA wartość
+    /// musi być `is_num()` — czysta liczba. Jeśli którykolwiek warunek
+    /// zawiedzie, w ogóle nie próbujemy kompilować — bezpieczny fallback to
+    /// po prostu dalsze interpretowanie.
+    fn collect_verified_var_slots(&self, names: &std::collections::HashSet<u32>) -> Result<HashMap<u32, u32>> {
+        let mut var_slots: HashMap<u32, u32> = HashMap::new();
+        for name in names {
+            let slot = match self.state.var_slots.get(name) {
+                Some(&s) => s,
+                None => bail!("zmienna (idx {}) nie ma jeszcze slotu — JIT pomija", name),
+            };
+            let val = self.state.vars_flat.get(slot as usize).copied().unwrap_or(NanVal::nil());
+            if !val.is_num() {
+                bail!("zmienna (idx {}) nie jest obecnie liczbą — JIT pomija (bezpieczny fallback)", name);
+            }
+            var_slots.insert(*name, slot);
+        }
+        Ok(var_slots)
+    }
 
-        let mut names: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    /// Zbierz wszystkie nazwane zmienne (GetVar/SetVar) odwoływane w zakresie
+    /// instrukcji [start..end] (WŁĄCZNIE z `end`).
+    fn named_vars_in_range_inclusive(&self, start: u32, end: u32) -> std::collections::HashSet<u32> {
+        let mut names = std::collections::HashSet::new();
         for i in start..=end {
             if let Some(insn) = self.module.instructions.get(i as usize) {
                 match insn {
@@ -225,21 +449,62 @@ impl<'a> BytecodeInterpreter<'a> {
                 }
             }
         }
+        names
+    }
 
-        let mut var_slots: HashMap<u32, u32> = HashMap::new();
-        for name in &names {
-            let slot = match self.state.var_slots.get(name) {
-                Some(&s) => s,
-                None => bail!("zmienna (idx {}) nie ma jeszcze slotu — trace JIT pomija", name),
-            };
-            let val = self.state.vars_flat.get(slot as usize).copied().unwrap_or(NanVal::nil());
-            if !val.is_num() {
-                bail!("zmienna (idx {}) nie jest obecnie liczbą — trace JIT pomija (bezpieczny fallback)", name);
+    /// Próbuj skompilować trasę pętli [start..end] do kodu maszynowego.
+    /// Bezpieczeństwo: patrz `collect_verified_var_slots`.
+    fn try_compile_trace(&mut self, start: u32, end: u32) -> Result<CompiledTrace> {
+        let entry = hl_compiler::bytecode::FuncEntry {
+            name:       format!("__trace_{}_{}", start, end),
+            start_insn: start,
+            insn_count: end - start + 1,
+        };
+
+        let names = self.named_vars_in_range_inclusive(start, end);
+        let var_slots = self.collect_verified_var_slots(&names)?;
+
+        let engine = self.jit_engine.as_mut().ok_or_else(|| anyhow::anyhow!("silnik JIT niedostępny"))?;
+        crate::jit_engine::compile_trace_entry(engine, self.module, &entry, &var_slots)
+    }
+
+    /// Próbuj skompilować CAŁE ciało funkcji `entry` do kodu maszynowego
+    /// (whole-function JIT — patrz `compile_function_entry` w
+    /// jit_engine.rs), ewentualnie z jednym wklejonym wywołaniem funkcji
+    /// (patrz `inline` — wynik `audit_for_inlining`, WCZEŚNIEJ obliczony i
+    /// scache'owany przez wołającego w `func_eligible`).
+    ///
+    /// Bezpieczeństwo: sama kwalifikacja instrukcji (i miejsca do wklejenia,
+    /// jeśli jest) jest już zagwarantowana przez `audit_for_inlining`
+    /// (sprawdzone wcześniej w `exec_func_by_name_idx`); tutaj dodatkowo
+    /// weryfikujemy zmienne — identycznie jak dla tras, ale gdy `inline`
+    /// jest `Some`, zakres skanowania obejmuje TAKŻE ciało wklejanego
+    /// callee (patrz `named_vars_in_range_inclusive` wywołane dla jego
+    /// własnego zakresu) — inaczej JIT mógłby błędnie założyć, że zmienna
+    /// używana WYŁĄCZNIE przez callee jest bezpieczna, nigdy jej nie
+    /// sprawdziwszy.
+    fn try_compile_function(
+        &mut self,
+        entry: &FuncEntry,
+        inline: Option<&(u32, FuncEntry)>,
+    ) -> Result<CompiledTrace> {
+        let start = entry.start_insn;
+        let end_excl = entry.start_insn + entry.insn_count;
+        let mut names = if entry.insn_count == 0 {
+            std::collections::HashSet::new()
+        } else {
+            self.named_vars_in_range_inclusive(start, end_excl - 1)
+        };
+        if let Some((_, callee)) = inline {
+            if callee.insn_count > 0 {
+                let callee_end_excl = callee.start_insn + callee.insn_count;
+                names.extend(self.named_vars_in_range_inclusive(callee.start_insn, callee_end_excl - 1));
             }
-            var_slots.insert(*name, slot);
         }
+        let var_slots = self.collect_verified_var_slots(&names)?;
 
-        crate::jit_engine::compile_trace_entry(self.module, &entry, &var_slots)
+        let engine = self.jit_engine.as_mut().ok_or_else(|| anyhow::anyhow!("silnik JIT niedostępny"))?;
+        crate::jit_engine::compile_function_entry(engine, self.module, entry, &var_slots, inline)
     }
 
     // ── Dispatch instrukcji ───────────────────────────────────────────────────
@@ -534,11 +799,93 @@ impl<'a> BytecodeInterpreter<'a> {
 
     fn exec_func_by_name_idx(&mut self, name_idx: u32) -> Result<()> {
         self.state.check_call_depth()?;
+        let idx = name_idx as usize;
+
+        // ── Whole-function JIT: funkcja już skompilowana → wykonaj natywnie ──
+        // Nie trzeba tu ruszać call_depth: funkcje kwalifikujące się do JIT
+        // (patrz is_jit_eligible) z definicji nie zawierają CallFunc, więc
+        // wykonanie natywne nigdy nie rekurencyjnie woła z powrotem
+        // exec_func_by_name_idx — nie ma czego liczyć. Dostęp O(1) przez
+        // Vec — to sprawdzenie wykonuje się na KAŻDE wywołanie funkcji.
+        if let Some(trace) = self.compiled_funcs.get(idx).and_then(|o| o.as_ref()) {
+            let fn_ptr = trace.fn_ptr;
+            self.exec_native_fn_ptr(fn_ptr)?;
+            return Ok(());
+        }
+
         let name = self.const_str(name_idx);
         let entry = match self.module.funcs.find(&name) {
             Some(e) => e.clone(),
             None    => bail!("Niezdefiniowana funkcja: '{}'", name),
         };
+
+        // ── Whole-function JIT: śledzenie gorących funkcji ──────────────
+        // Uzupełnienie Trace JIT (który kompiluje tylko GORĄCE PĘTLE
+        // wewnątrz funkcji): funkcja czysto obliczeniowa wołana wiele razy
+        // z top-level, bez żadnej gorącej pętli w środku, wcześniej nigdy
+        // nie trafiała do JIT. Kwalifikacja używa `audit_for_inlining` w
+        // jit_engine.rs — jak dotychczasowe `is_jit_eligible`, ale
+        // DODATKOWO rozpoznaje jedno bezpieczne miejsce do wklejenia
+        // wywołania funkcji (patrz doc `InlineAudit`) — liczymy ją raz per
+        // funkcja (cache w `func_eligible`), bo zbiór instrukcji funkcji
+        // się nie zmienia między wywołaniami.
+        let blocked = self.func_jit_blocked.get(idx).copied().unwrap_or(true);
+        if self.jit_engine.is_some() && !blocked {
+            let audit = match self.func_eligible.get(idx).and_then(|o| o.clone()) {
+                Some(a) => a,
+                None => {
+                    let a = crate::jit_engine::audit_for_inlining(self.module, &entry);
+                    if let Some(slot) = self.func_eligible.get_mut(idx) { *slot = Some(a.clone()); }
+                    a
+                }
+            };
+            let inline = match audit {
+                crate::jit_engine::InlineAudit::Ineligible => {
+                    // Strukturalne — nigdy się nie zmieni. Blokuj trwale bez
+                    // liczenia prób ponownych (patrz MAX_JIT_RETRIES).
+                    if let Some(slot) = self.func_jit_blocked.get_mut(idx) { *slot = true; }
+                    None
+                }
+                crate::jit_engine::InlineAudit::Eligible { inline } => inline,
+            };
+            if !self.func_jit_blocked.get(idx).copied().unwrap_or(true) {
+                let count = self.func_call_counts.get_mut(idx).map(|c| { *c += 1; *c }).unwrap_or(0);
+                if count == self.func_threshold {
+                    match self.try_compile_function(&entry, inline.as_ref()) {
+                        Ok(trace) => {
+                            if inline.is_some() {
+                                tracing::debug!("[func jit] skompilowano funkcję '{}' (z wklejonym wywołaniem)", name);
+                            } else {
+                                tracing::debug!("[func jit] skompilowano funkcję '{}'", name);
+                            }
+                            let fn_ptr = trace.fn_ptr;
+                            if let Some(slot) = self.compiled_funcs.get_mut(idx) { *slot = Some(trace); }
+                            self.exec_native_fn_ptr(fn_ptr)?;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::debug!("[func jit] pominięto funkcję '{}': {}", name, e);
+                            // Niepowodzenie DYNAMICZNE (np. zmienna używana
+                            // przez funkcję — lub przez wklejane callee —
+                            // wciąż nie jest stabilnie numeryczna) może się
+                            // naprawić samo w kolejnych wywołaniach — dajemy
+                            // ograniczoną liczbę ponownych prób (reset
+                            // licznika wywołań) zamiast trwale się poddawać
+                            // po pierwszej porażce.
+                            let retries_left = self.func_retry_count.get(idx).copied().unwrap_or(u8::MAX);
+                            if retries_left < MAX_JIT_RETRIES {
+                                if let Some(r) = self.func_retry_count.get_mut(idx) { *r += 1; }
+                                if let Some(c) = self.func_call_counts.get_mut(idx) { *c = 0; }
+                            } else {
+                                if let Some(slot) = self.func_jit_blocked.get_mut(idx) { *slot = true; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Ścieżka interpretowana (rozgrzewka albo trwały fallback) ────
         self.state.call_depth += 1;
         let start = entry.start_insn as usize;
         let end   = start + entry.insn_count as usize;
@@ -585,6 +932,31 @@ fn exec_system_cmd(cmd: &str, mode: CmdMode, _state: &mut RuntimeState) -> Resul
         return Ok(0);
     }
 
+    // `cd` MUSI być obsłużone jako wbudowane, w BIEŻĄCYM procesie hl —
+    // nigdy przez spawnowanie zewnętrznego programu:
+    //   1. "cd" nie istnieje jako samodzielny plik wykonywalny na dysku —
+    //      próba `Command::new("cd")` kończy się ENOENT ("No such file or
+    //      directory"), mimo że polecenie jest z punktu widzenia użytkownika
+    //      całkowicie poprawne.
+    //   2. Nawet gdyby "cd" istniało jako binarka, zmiana katalogu roboczego
+    //      SPAWNOWANEGO procesu i tak nigdy nie przetrwałaby do KOLEJNEJ
+    //      linii `> ...` w skrypcie — każda taka linia to OSOBNY proces,
+    //      dziedziczący cwd macierzystego procesu hl (niezmieniony), a nie
+    //      cwd poprzedniej komendy. Trwała zmiana katalogu obejmująca CAŁY
+    //      dalszy ciąg skryptu wymaga `std::env::set_current_dir` wykonanego
+    //      TU, w tym samym procesie co interpreter — dokładnie tak, jak
+    //      powłoki (bash/zsh/...) traktują `cd` jako komendę wbudowaną, a
+    //      nie zewnętrzny program, z tego samego powodu.
+    // Ograniczone do Plain/WithVars — Sudo/Isolated uruchamiają polecenie w
+    // innym kontekście uprawnień/przestrzeni nazw, gdzie "zmień katalog w
+    // procesie hl" nie ma tego samego znaczenia; te tryby nadal idą starą
+    // ścieżką (spawn), tak jak dotychczas.
+    if matches!(mode, CmdMode::Plain | CmdMode::WithVars) {
+        if let Some(target) = parse_cd_builtin(cmd) {
+            return exec_cd_builtin(&target);
+        }
+    }
+
     let (prog, args, needs_sh) = build_cmd_parts(cmd, mode);
     let status = if needs_sh {
         Command::new("sh").args(["-c", cmd])
@@ -600,6 +972,41 @@ fn exec_system_cmd(cmd: &str, mode: CmdMode, _state: &mut RuntimeState) -> Resul
         Ok(s)  => Ok(s.code().unwrap_or(1)),
         Err(e) => {
             eprintln!("\x1b[31m[hl jit]\x1b[0m Błąd komendy: {}", e);
+            Ok(1)
+        }
+    }
+}
+
+/// Rozpoznaj `cd` / `cd <ścieżka>` jako CAŁĄ komendę (nie fragment większej,
+/// np. `cd foo && bar` — to zawiera `&`, więc `build_cmd_parts` i tak
+/// skierowałby je przez `sh -c`, gdzie `cd` DZIAŁA poprawnie jako builtin
+/// powłoki; specjalnie obsługujemy tu tylko przypadek, który inaczej
+/// próbowałby spawnować nieistniejący plik "cd"). Zwraca docelową ścieżkę —
+/// pusty string oznacza `cd` bez argumentu, czyli $HOME (jak w bash).
+fn parse_cd_builtin(cmd: &str) -> Option<String> {
+    let trimmed = cmd.trim();
+    if trimmed == "cd" {
+        return Some(String::new());
+    }
+    trimmed.strip_prefix("cd ").map(|rest| rest.trim().to_string())
+}
+
+fn exec_cd_builtin(target: &str) -> Result<i32> {
+    let path = if target.is_empty() {
+        match std::env::var("HOME") {
+            Ok(h) => h,
+            Err(_) => {
+                eprintln!("\x1b[31m[hl jit]\x1b[0m cd: brak zmiennej środowiskowej HOME");
+                return Ok(1);
+            }
+        }
+    } else {
+        target.to_string()
+    };
+    match std::env::set_current_dir(&path) {
+        Ok(())  => Ok(0),
+        Err(e)  => {
+            eprintln!("\x1b[31m[hl jit]\x1b[0m cd: {}: {}", path, e);
             Ok(1)
         }
     }
