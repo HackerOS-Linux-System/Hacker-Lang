@@ -34,6 +34,23 @@ smallvec      = "1"
 which         = "6"
 nix           = { version = "0.29", features = ["user"] }
 thiserror     = "1.0"
+# Świadomie PRZYPIĘTE na 0.132.3, nie na najnowszym wydaniu (próbowano
+# 0.134.3 → 0.134.4 → 0.135.0). Powód: `MemFlags` w API load/store od
+# cranelift-codegen 0.134.x wymaga konwersji `Into<MemFlagsData>`, którą
+# implementuje TYLKO wewnętrzny `MachMemFlags`, nie publiczny `MemFlags` —
+# potwierdzone jako realny błąd kompilacji w DWÓCH niezależnych, osobno
+# opublikowanych wydaniach (0.134.4 ORAZ 0.135.0), nie tylko w jednym
+# przejściowym patchu. W repozytorium wasmtime na GitHubie (branch `main`,
+# ta sama linia rozwoju cranelift co ich własna, jeszcze NIEOPUBLIKOWANA na
+# crates.io kopia) `MemFlags::trusted()` działa poprawnie z `ins().load()` —
+# czyli poprawka najwyraźniej już istnieje w rozwoju, tylko jeszcze nie
+# trafiła do wydania na crates.io. Dopóki nie trafi, każda kolejna próba
+# bumpowania to zgadywanie tego samego, złamanego zachowania pod nowym
+# numerkiem. 0.132.3 to ostatnia opublikowana wersja, przy której cały ten
+# moduł (Trace JIT + whole-function JIT + trace linking + inlining)
+# kompilował się od razu, bez niespodzianek — jeśli chcesz spróbować nowszej
+# wersji w przyszłości, sprawdź najpierw samodzielnie `cargo build` z nią,
+# zanim poprosisz o kolejną rundę poprawek pod nią.
 cranelift-codegen  = { version = "0.132.3", features = ["all-arch"] }
 cranelift-frontend = "0.132.3"
 cranelift-jit      = "0.132.3"
@@ -41,8 +58,16 @@ cranelift-module   = "0.132.3"
 cranelift-native   = "0.132.3"
 bincode            = "1"
 memmap2            = "0.9"
-indexmap           = "=2.1.0"
-hk-parser          = "0.3.1"
+# Konflikt "failed to select a version for `indexmap`" brał się stąd, że TU
+# była twarda blokada "=2.1.0" (dokładnie ta jedna wersja, zero elastyczności),
+# podczas gdy hk-parser >=0.3.1 wymaga transitywnie `indexmap = "^2.14.0"`.
+# Cargo unifikuje jedną wersję indexmap w całym grafie zależności w obrębie
+# gałęzi 2.x — z dokładnym pinem "=2.1.0" te dwa wymagania nigdy nie mogły
+# zostać spełnione jednocześnie. "2" (bez "=") pozwala Cargo wybrać
+# najnowszą kompatybilną 2.x (obecnie 2.14.0 — dokładnie to, czego chce
+# hk-parser), zamiast blokować się na jednej konkretnej wersji.
+indexmap           = "2"
+hk-parser          = "0.3.2"
 
 [profile.release]
 lto           = true
