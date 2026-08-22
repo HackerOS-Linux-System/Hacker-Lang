@@ -131,9 +131,23 @@ pub fn run_bc_file(path: &Path, args: &[String]) -> Result<i32> {
 /// — patrz run_hl_source.
 pub fn run_bc_module(module: &HlModule, args: &[String]) -> Result<i32> {
     inject_args_to_env(args);
+    // HL_JIT_STATS=1 hl run skrypt.hl — wypisz na stderr, ile tras pętli i
+    // ile całych funkcji zostało skompilowanych natywnie w tym uruchomieniu
+    // (patrz whole-function JIT / adaptive trace threshold w interpreter.rs).
+    // Przydatne przy strojeniu HL_JIT_TRACE_THRESHOLD / HL_JIT_FUNC_THRESHOLD.
+    let show_jit_stats = std::env::var("HL_JIT_STATS").is_ok();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut interp = BytecodeInterpreter::new(module);
-        interp.run()
+        let exit = interp.run();
+        if show_jit_stats {
+            let s = interp.jit_stats();
+            eprintln!(
+                "{} trasy pętli: {} | funkcje: {} | kompilacji łącznie: {} | instrukcji objętych JIT: {}",
+                "[hl jit stats]".bright_magenta(),
+                s.compiled_traces, s.compiled_funcs, s.engine_compiles, s.engine_insns
+            );
+        }
+        exit
     }));
     match result {
         Ok(Ok(exit_code)) => Ok(exit_code),
