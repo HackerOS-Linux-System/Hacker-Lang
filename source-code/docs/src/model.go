@@ -1,4 +1,4 @@
-package main
+package src
 
 import (
 	"strings"
@@ -28,7 +28,13 @@ type model struct {
 	showHelp     bool // "?" — nakładka z listą skrótów klawiszowych
 }
 
-func initialModel() model {
+// InitialModel zwraca początkowy stan aplikacji hl-docs — jedyny
+// eksportowany punkt wejścia pakietu `src`, wołany przez main.go
+// (`tea.NewProgram(src.InitialModel(), ...)`). Sam typ `model` pozostaje
+// nieeksportowany — wołający nigdy nie musi nazywać go wprost, bo
+// zwracana wartość jest przekazywana do bubbletea wyłącznie jako
+// implementacja interfejsu `tea.Model`.
+func InitialModel() model {
 	all := allSections()
 	allIdx := make([]int, len(all))
 	for i := range all {
