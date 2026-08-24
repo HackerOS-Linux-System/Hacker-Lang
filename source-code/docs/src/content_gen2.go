@@ -118,4 +118,39 @@ var gen2Sections = []DocSection{
 			styleH2.Render("Uwaga"),
 		),
 	},
+	{
+		Title:    "cd — wbudowana komenda (gen 2)",
+		Category: "GEN 2",
+		Content: fmt.Sprintf(`%s
+
+%s
+%s
+
+%s
+  %s w KAŻDYM trybie komendy (%s)
+  jest teraz obsługiwane wbudowanie, w procesie interpretera —
+  dokładnie tak, jak powłoki (bash/zsh/...) traktują je jako komendę
+  wbudowaną, a nie zewnętrzny program.
+
+%s
+  Zmiana katalogu wykonana przez %s PRZETRWA do
+  kolejnych linii komendy w tym samym skrypcie — bo dzieje się w
+  procesie hl, nie w jednorazowym spawnowanym podprocesie, który i
+  tak by zniknął po zakończeniu linii.
+
+%s
+  Patrz sekcja "Znany błąd: cd (gen 1)" w kategorii GEN 1 — to samo
+  ograniczenie w starszych skryptach jest tam udokumentowane
+  osobno, jako część historii języka, a nie aktualnego zachowania.`,
+			styleH1.Render("cd — teraz działa jak powinno"),
+			styleH2.Render("Skladnia"),
+			styleCode.Render("> cd source-code/docs\n> go build\n;; katalog roboczy zmieniony przez pierwsza linie\n;; obowiazuje takze w drugiej"),
+			styleH2.Render("Co się zmieniło"),
+			styleOp.Render("cd"),
+			styleOp.Render(">, ^>, ->, ^->, >>, *>"),
+			styleH2.Render("Trwałość między liniami"),
+			styleOp.Render("cd"),
+			styleH2.Render("Historia"),
+		),
+	},
 }
