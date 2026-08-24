@@ -1,1 +1,38 @@
+[package]
+name = "hl-playground"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 
+[lib]
+name = "hl_playground"
+# cdylib: wymagane, żeby wasm-bindgen/wasm-pack wygenerowały ładowalny
+# moduł .wasm. rlib zostawione dodatkowo, żeby crate dało się też użyć jako
+# zwykłą zależność Rust (np. w testach na hoście) bez przechodzenia przez
+# całą ścieżkę wasm-bindgen.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Prawdziwy parser i kompilator Hacker Lang — bez żadnych ustępstw:
+# dokładnie ten sam kod co reszta projektu, statycznie wlinkowany.
+hl-parser   = { path = "../parser" }
+# `default-features = false`: wyłącza moduł `cache` (i jego jedyną
+# zależność, `dirs`) — cache .bc na dysku nie ma sensu w przeglądarce, a
+# playground i tak nie woła nic z tego modułu (kompiluje w pamięci).
+hl-compiler = { path = "../compiler", default-features = false }
+# `default-features = false`: wyłącza `native-jit` (Cranelift — wymaga
+# wykonywalnej pamięci mmap, której sandbox przeglądarki kategorycznie nie
+# udostępnia) i `process-exec` (spawnowanie procesów — też nie istnieje w
+# przeglądarce). Sam BYTECODE INTERPRETER (Trace JIT/whole-function JIT po
+# prostu nigdy się nie aktywują — patrz jit_stub.rs) zostaje w pełni
+# funkcjonalny i identyczny semantycznie z wersją natywną.
+hl-jit      = { path = "../jit", default-features = false }
+anyhow.workspace = true
+wasm-bindgen.workspace = true
+
+# UWAGA: [profile.release] NIE działa tutaj — Cargo honoruje profile
+# wyłącznie z Cargo.toml w KORZENIU workspace (gdzie już jest ustawione
+# lto=true, codegen-units=1, strip=true, panic="abort" — to i tak dobre
+# ustawienia pod rozmiar .wasm). Cokolwiek by tu nie zostało wpisane,
+# Cargo by to po cichu zignorowało (z ostrzeżeniem) — więc świadomie stąd
+# usunięte, żeby nie sugerować działania, którego nie ma.
