@@ -1,5 +1,48 @@
 // cargo
 // golang
+// rustc
 
-> cargo build --release
-> cd source-code/docs && go get hl-docs && go build
+;; hl build.hl              -> buduje binarke Hacker Lang (cargo) + hl-docs (go)
+;; hl build.hl playground   -> buduje WYLACZNIE source-code/playground do WASM,
+;;                             wynik: dist/hl-playground.wasm (+ glue JS)
+;;
+;; Wymaga (tylko dla `playground`):
+;;   rustup target add wasm32-unknown-unknown
+;;   cargo install wasm-bindgen-cli --version <ta sama co w Cargo.lock>
+
+:: env arg0 |> @target
+
+? switch @target
+| playground
+    ~> === Hacker Lang playground -> WASM ===
+
+    > rustup target add wasm32-unknown-unknown
+
+    ~> Kompiluje source-code/playground (release, wasm32-unknown-unknown)...
+    > cargo build --release -p hl-playground --target wasm32-unknown-unknown
+
+    > mkdir -p dist
+
+    ~> Generuje glue JS + procesuje .wasm (wasm-bindgen)...
+    ~> (jesli ponizej wywali sie 'No such file or directory' -> zainstaluj:
+    ~>  cargo install wasm-bindgen-cli --version <wersja z Cargo.lock>)
+    > wasm-bindgen target/wasm32-unknown-unknown/release/hl_playground.wasm --target web --out-dir dist --out-name hl-playground-raw
+
+    ;; wasm-bindgen nazywa wynikowy plik binarny "<out-name>_bg.wasm" —
+    ;; zmieniamy na dokladnie zadana nazwe: hl-playground.wasm
+    > mv dist/hl-playground-raw_bg.wasm dist/hl-playground.wasm
+    > mv dist/hl-playground-raw.js dist/hl-playground.js
+
+    ~> Gotowe: dist/hl-playground.wasm + dist/hl-playground.js
+    ~> Uzycie w HTML: <script type="module">
+    ~> import init, { run_hl } from "./dist/hl-playground.js";
+    ~> await init();
+    ~> const result = run_hl("~> Hello from Hacker Lang!");
+    ~> console.log(result.output);
+    ~> </script>
+| *
+    ~> === Hacker Lang: build pelny ===
+    > cargo build --release
+    > cd source-code/docs && go get hl-docs && go build
+    ~> Gotowe.
+done
