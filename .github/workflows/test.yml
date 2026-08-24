@@ -1,0 +1,122 @@
+name: Test
+
+# Cztery niezależne, równoległe joby:
+#   1. test-rust      — testy jednostkowe Rust (cargo test), cały workspace
+#                        poza playground (playground linkuje wasm-bindgen,
+#                        które nie ma sensu testować na hoście — patrz
+#                        check-wasm poniżej dla jego właściwej weryfikacji).
+#   2. test-hl-scripts — uruchamia PRAWDZIWY, zbudowany binarnie `hl` na
+#                        całym pakiecie testów językowych z tests/*.hl
+#                        (m.in. tests/jit_arithmetic.hl — realny, wykonywalny
+#                        test JIT-a, nie tylko kompilacji).
+#   3. check-wasm      — cargo check (szybkie, bez wasm-bindgen-cli) dla
+#                        hl-playground na docelowym targecie
+#                        wasm32-unknown-unknown — łapie regresje w feature
+#                        gatingu (native-jit/process-exec) zanim trafią do
+#                        pełnego builda w build.yml.
+#   4. check-docs      — go vet + go build dla hl-docs — dokładnie ten
+#                        rodzaj błędu (pakiety w dwóch katalogach,
+#                        "undefined: initialModel"), który wcześniej dało
+#                        się złapać dopiero ręcznie, teraz łapie CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-rust:
+    name: cargo test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: cargo test --workspace (poza playground)
+        run: cargo test --release --workspace --exclude hl-playground
+
+  test-hl-scripts:
+    name: Pakiet testów językowych (tests/*.hl)
+    runs-on: ubuntu-latest
+    needs: test-rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: cargo build --release -p hl (tylko binarka hl + jej zależności)
+        run: cargo build --release -p hl
+
+      - name: Uruchom każdy skrypt z tests/*.hl
+        env:
+          HL_NOT_ON_HACKEROS: "YES"
+        run: |
+          set -e
+          fail=0
+          for f in tests/*.hl; do
+            echo "── $f ──"
+            if ! ./target/release/hl run "$f"; then
+              echo "::error file=$f::skrypt zakończył się błędem (exit != 0)"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  check-wasm:
+    name: cargo check --target wasm32-unknown-unknown -p hl-playground
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Rust stable + target wasm32-unknown-unknown
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          key: wasm32-unknown-unknown
+
+      - name: cargo check (szybka weryfikacja feature gatingu dla wasm32)
+        run: cargo check --release -p hl-playground --target wasm32-unknown-unknown
+
+  check-docs:
+    name: go vet + go build (hl-docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: source-code/docs/go.mod
+
+      - name: go get + go vet + go build
+        working-directory: source-code/docs
+        run: |
+          go get hl-docs
+          go vet ./...
+          go build -o /dev/null .
