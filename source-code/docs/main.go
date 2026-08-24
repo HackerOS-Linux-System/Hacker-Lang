@@ -17,8 +17,10 @@ import (
 // kontekstu Cranelift (jit). 1.2.0: trace linking, pomijanie zbędnych
 // load'ów (dowiedzione bezpieczne dla pojedynczego bloku wejściowego) i
 // ograniczony (jeden poziom, jedno miejsce wywołania) inlining CallFunc w
-// whole-function JIT.
-const docsVersion = "1.2.0"
+// whole-function JIT. 1.2.1: tryb myszy domyślnie WYŁĄCZONY (patrz niżej) —
+// naprawia klawisze strzałek nie reagujące w ogóle w wielu terminalach
+// (kontenery, SSH bez negocjacji trybu myszy).
+const docsVersion = "1.2.1"
 
 func main() {
 	showVersion := flag.Bool("version", false, "wypisz wersję hl-docs i wyjdź")
@@ -30,13 +32,20 @@ func main() {
 		return
 	}
 
-	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
-	if os.Getenv("HL_DOCS_NO_MOUSE") != "" {
-		// Niektóre terminale (zwłaszcza przez SSH/tmux bez odpowiedniej
-		// konfiguracji raportowania myszy) źle sobie radzą z trybem mouse
-		// cell motion — pozwól to wyłączyć bez przebudowy binarki, tak jak
-		// HL_NO_JIT/HL_NOT_ON_HACKEROS pozwalają dostroić resztę Hacker Lang.
-		opts = []tea.ProgramOption{tea.WithAltScreen()}
+	// Mysz domyślnie WYŁĄCZONA (odwrócone względem wcześniejszej wersji).
+	// tea.WithMouseCellMotion() potrafi rozregulować CAŁY strumień wejścia
+	// (nie tylko obsługę myszy) w terminalach, które nie negocjują trybu
+	// raportowania myszy poprawnie — typowe dla kontenerów Docker, wielu
+	// konfiguracji SSH/tmux i konsoli bez pełnej emulacji xterm. Objaw:
+	// aplikacja w ogóle nie reaguje na klawisze strzałek (ani nic innego),
+	// bo bubbletea czeka na dane wejściowe w formacie, którego terminal
+	// nigdy nie wyśle. hl-docs jest z założenia nawigowany klawiaturą
+	// (strzałki/j-k/enter/tab) — mysz to czysty dodatek, więc bezpieczny
+	// domyślny wybór to "wyłączona", z jawnym opt-in dla terminali, które
+	// obsługują ją poprawnie.
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if os.Getenv("HL_DOCS_MOUSE") != "" {
+		opts = append(opts, tea.WithMouseCellMotion())
 	}
 
 	p := tea.NewProgram(src.InitialModel(), opts...)
