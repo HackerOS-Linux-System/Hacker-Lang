@@ -150,4 +150,44 @@ var gen1Sections = []DocSection{
 			styleH2.Render("Kompatybilnosc wstecz — stara skladnia takze dziala"),
 		),
 	},
+	{
+		Title:    "Znany błąd: cd (gen 1)",
+		Category: "GEN 1",
+		Content: fmt.Sprintf(`%s
+
+%s
+%s
+
+%s
+  W gen 1 każda linia komendy (%s) uruchamia
+  SPAWNOWANY proces zewnętrzny — dokładnie tak jak w każdym języku,
+  które spawnuje polecenia zamiast interpretować je we własnej
+  powłoce. %s NIE istnieje jako samodzielny plik
+  wykonywalny na dysku (to wbudowana komenda powłoki bash/zsh/...),
+  więc próba jej spawnowania kończy się błędem systemowym.
+
+%s
+  Nawet gdyby "cd" dało się uruchomić jako proces, zmiana katalogu
+  roboczego W TYM PROCESIE i tak nigdy nie przetrwałaby do KOLEJNEJ
+  linii komendy — każda linia to osobny, niezależny proces,
+  dziedziczący katalog roboczy skryptu HL, nie katalog ustawiony
+  przez poprzednią komendę.
+
+%s
+  To ograniczenie jest udokumentowane tu celowo — jeśli piszesz lub
+  utrzymujesz skrypt w stylu gen 1, %s po prostu
+  nie zadziała jako samodzielna linia komendy. Patrz sekcja "cd —
+  wbudowana komenda (gen 2)" w kategorii GEN 2 dla aktualnego,
+  działającego zachowania.`,
+			styleH1.Render("Znany błąd gen 1: cd nie działa"),
+			styleH2.Render("Objaw"),
+			styleCode.Render("> cd /jakis/katalog\n;; error: No such file or directory (os error 2)"),
+			styleH2.Render("Przyczyna"),
+			styleOp.Render(">, ^>, ->, ^->, >>, *>"),
+			styleOp.Render("cd"),
+			styleH2.Render("Dlaczego nie wystarczyłoby samo naprawienie spawnowania"),
+			styleH2.Render("To NIE jest literówka w Twoim skrypcie"),
+			styleOp.Render("cd"),
+		),
+	},
 }
