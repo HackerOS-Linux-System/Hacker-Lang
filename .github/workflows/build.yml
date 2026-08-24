@@ -1,1 +1,132 @@
+name: Build
 
+# Buduje DWIE rzeczy niezależnie od siebie:
+#   1. build-native — binarka Hacker Lang (cargo, cały workspace poza
+#      playground) + hl-docs (Go TUI).
+#   2. build-wasm   — source-code/playground skompilowany do WASM
+#      (wasm32-unknown-unknown + wasm-bindgen), dokładnie tak jak
+#      `hl build.hl playground` robi to lokalnie — patrz build.hl w
+#      korzeniu repo dla pełnego opisu kroków i wymagań.
+#
+# Oba joby są od siebie niezależne (żaden nie blokuje drugiego) i działają
+# równolegle.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-native:
+    name: Binarka Hacker Lang (cargo) + hl-docs (go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Wyklucz playground z tego cache'a — ma osobny target (wasm32),
+          # dzieli go job build-wasm poniżej.
+          workspaces: |
+            . -> target
+
+      - name: cargo build --release (cały workspace poza playground)
+        run: cargo build --release --workspace --exclude hl-playground
+
+      - name: Upload binarki hl
+        uses: actions/upload-artifact@v4
+        with:
+          name: hacker-lang-binary-${{ runner.os }}
+          # Uwaga: hl-shell to biblioteka (crate-type=rlib) używana przez
+          # `hl`, nie osobna binarka — jedyny prawdziwy plik wykonywalny w
+          # tym workspace to `hl` (source-code/cli, [[bin]] name = "hl").
+          path: target/release/hl
+          if-no-files-found: error
+
+      - name: Zainstaluj Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: source-code/docs/go.mod
+
+      - name: go build hl-docs
+        working-directory: source-code/docs
+        run: |
+          go get hl-docs
+          go build -o hl-docs .
+
+      - name: Upload hl-docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hl-docs-${{ runner.os }}
+          path: source-code/docs/hl-docs
+          if-no-files-found: error
+
+  build-wasm:
+    name: Playground -> WASM (hl-playground.wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zainstaluj Rust stable + target wasm32-unknown-unknown
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          key: wasm32-unknown-unknown
+
+      - name: cargo build --release -p hl-playground --target wasm32-unknown-unknown
+        run: cargo build --release -p hl-playground --target wasm32-unknown-unknown
+
+      # wasm-bindgen (narzędzie CLI) MUSI mieć DOKŁADNIE tę samą wersję co
+      # crate `wasm-bindgen` faktycznie użyty w budowie (Cargo.lock) — inaczej
+      # generowanie glue JS kończy się błędem niezgodności wersji schematu.
+      # Wyciągamy więc numer wersji wprost z Cargo.lock zamiast go hardkodować.
+      - name: Ustal wersję wasm-bindgen z Cargo.lock
+        id: wbg
+        run: |
+          VERSION=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d '"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache wasm-bindgen-cli
+        id: cache-wbg-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}
+
+      - name: Zainstaluj wasm-bindgen-cli (dopasowana wersja)
+        if: steps.cache-wbg-cli.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}" --locked
+
+      - name: Wygeneruj glue JS + procesuj .wasm
+        run: |
+          mkdir -p dist
+          wasm-bindgen target/wasm32-unknown-unknown/release/hl_playground.wasm \
+            --target web --out-dir dist --out-name hl-playground-raw
+          # wasm-bindgen nazywa wynikowy plik binarny "<out-name>_bg.wasm" —
+          # zmieniamy na dokładnie żądaną nazwę: hl-playground.wasm
+          mv dist/hl-playground-raw_bg.wasm dist/hl-playground.wasm
+          mv dist/hl-playground-raw.js dist/hl-playground.js
+
+      - name: Upload hl-playground.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: hl-playground-wasm
+          path: |
+            dist/hl-playground.wasm
+            dist/hl-playground.js
+          if-no-files-found: error
