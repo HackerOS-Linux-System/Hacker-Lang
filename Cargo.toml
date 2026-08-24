@@ -7,6 +7,7 @@ members = [
     "source-code/cli",
     "source-code/compiler",
     "source-code/jit",
+    "source-code/playground",
 ]
 exclude = [
     "source-code/vendor/hk-parser",
@@ -57,7 +58,6 @@ cranelift-jit      = "0.132.3"
 cranelift-module   = "0.132.3"
 cranelift-native   = "0.132.3"
 bincode            = "1"
-memmap2            = "0.9"
 # Konflikt "failed to select a version for `indexmap`" brał się stąd, że TU
 # była twarda blokada "=2.1.0" (dokładnie ta jedna wersja, zero elastyczności),
 # podczas gdy hk-parser >=0.3.1 wymaga transitywnie `indexmap = "^2.14.0"`.
@@ -68,6 +68,11 @@ memmap2            = "0.9"
 # hk-parser), zamiast blokować się na jednej konkretnej wersji.
 indexmap           = "2"
 hk-parser          = "0.3.2"
+# Tylko source-code/playground (target wasm32-unknown-unknown) tego używa —
+# glue do wywoływania funkcji Rust z JS i z powrotem. Wersja "0.2" to
+# wieloletnia, bardzo stabilna linia (wszystkie 0.2.x są wzajemnie
+# kompatybilne wg semver wasm-bindgen).
+wasm-bindgen       = "0.2"
 
 [profile.release]
 lto           = true
