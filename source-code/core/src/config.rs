@@ -1,4 +1,5 @@
 use anyhow::Result;
+use colored::Colorize;
 use hk_parser::{parse_hk, write_hk_file, HkConfig, HkValue};
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
@@ -67,7 +68,13 @@ impl HlConfig {
     /// Usuń klucz z sekcji
     pub fn remove_key(&mut self, section: &str, key: &str) {
         if let Some(HkValue::Map(map)) = self.inner.get_mut(section) {
-            map.remove(key);
+            // shift_remove (nie swap_remove): plik .hk jest zapisywany z
+            // powrotem na dysk w tej samej kolejności kluczy co przy
+            // odczycie (patrz write_hk_file) — swap_remove przesunęłoby
+            // OSTATNI klucz sekcji na miejsce usuniętego, myląc kolejność
+            // przy każdym kolejnym zapisie. Sekcje configu są małe, więc
+            // koszt O(n) przesunięcia jest nieistotny.
+            map.shift_remove(key);
         }
     }
 
@@ -123,7 +130,24 @@ pub fn load_config() -> HlConfig {
     match std::fs::read_to_string(&path) {
         Ok(content) => match parse_hk(&content) {
             Ok(inner) => HlConfig { inner },
-            Err(_)    => default_config(),
+            Err(e) => {
+                // hk-parser 0.3.2: `HkError::render()` daje czytelny,
+                // rustc-podobny fragment (linia/kolumna + "^" + podpowiedź)
+                // zamiast gołego jednolinijkowego komunikatu. Wcześniej ten
+                // błąd był po prostu POŁYKANY (`Err(_) => default_config()`)
+                // — jeśli ktoś ręcznie zepsuł sobie config.hk literówką,
+                // dostawał bez ostrzeżenia ciche przywrócenie domyślnej
+                // konfiguracji i zero wskazówki dlaczego. Teraz przynajmniej
+                // widzi na stderr DOKŁADNIE gdzie i co jest nie tak, zanim
+                // spadniemy na bezpieczny fallback.
+                eprintln!(
+                    "{} nie udało się wczytać {} — używam konfiguracji domyślnej:",
+                    "ostrzeżenie:".bright_yellow().bold(),
+                    path.display()
+                );
+                eprint!("{}", e.render(&content));
+                default_config()
+            }
         },
         Err(_) => default_config(),
     }
