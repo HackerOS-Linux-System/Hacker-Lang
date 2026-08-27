@@ -1,5 +1,5 @@
 use std::process::{Command, Stdio};
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, Context};
 use smallvec::SmallVec;
 use tracing::debug;
 use hl_parser::ast::*;
@@ -200,10 +200,44 @@ fn run_command(raw: &str, sudo: bool, isolated: bool, interpolate: bool, env: &m
         return Ok(ExecResult::err_or_ok(code));
     }
 
+    // Wbudowane `cd` — MUSI być obsłużone TUTAJ, w bieżącym procesie, a nie
+    // przez spawnowanie zewnętrznego programu: (1) "cd" nie istnieje jako
+    // plik wykonywalny na dysku — Command::new("cd") zawsze kończy się
+    // ENOENT ("No such file or directory"), (2) nawet gdyby istniało,
+    // zmiana katalogu roboczego SPAWNOWANEGO procesu i tak nie
+    // przetrwałaby do kolejnej linii komendy w skrypcie — każda linia to
+    // osobny proces, dziedziczący cwd macierzystego `hl`, nie cwd
+    // poprzedniej komendy. Ograniczone do prostego `cd`/`cd <ścieżka>` bez
+    // dalszych operatorów powłoki — złożone wyrażenia (np. `cd x && y`)
+    // trafiają do `needs_shell`/`run_via_shell` niżej, gdzie `cd` działa
+    // poprawnie jako naturalny builtin bash-a wewnątrz TEGO jednego `bash -c`.
+    if let Some(target) = parse_cd_builtin(trimmed) {
+        return exec_cd_builtin(&target);
+    }
+
     if needs_shell(trimmed) { return run_via_shell(trimmed, sudo, isolated, capture); }
     let parts = shell_words(trimmed);
     if parts.is_empty() { return Ok(ExecResult::ok()); }
     build_and_run(parts, sudo, isolated, capture)
+}
+
+/// Rozpoznaj `cd` / `cd <ścieżka>` jako CAŁĄ komendę — patrz komentarz przy
+/// wołaniu w `run_command`. Zwraca docelową ścieżkę; pusty string = `cd`
+/// bez argumentu, czyli $HOME (jak w bash).
+fn parse_cd_builtin(cmd: &str) -> Option<String> {
+    if cmd == "cd" { return Some(String::new()); }
+    cmd.strip_prefix("cd ").map(|rest| rest.trim().to_string())
+}
+
+fn exec_cd_builtin(target: &str) -> Result<ExecResult> {
+    let path = if target.is_empty() {
+        std::env::var("HOME").context("cd: brak zmiennej środowiskowej HOME (potrzebna dla `cd` bez argumentu)")?
+    } else {
+        target.to_string()
+    };
+    std::env::set_current_dir(&path)
+        .with_context(|| format!("cd: nie można przejść do '{}'", path))?;
+    Ok(ExecResult::ok())
 }
 
 fn run_via_shell(cmd: &str, sudo: bool, isolated: bool, capture: bool) -> Result<ExecResult> {
@@ -227,6 +261,14 @@ fn build_and_run(parts: SmallVec<[String; 8]>, sudo: bool, isolated: bool, captu
 }
 
 fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecResult> {
+    // Pełny, czytelny zapis komendy — używany WYŁĄCZNIE do komunikatu
+    // błędu, więc koszt sklejania stringa ponosimy tylko na ścieżce
+    // niepowodzenia (Context::with_context jest leniwe — domknięcie
+    // wykonuje się tylko, gdy operacja faktycznie zawiedzie).
+    let cmd_display = || {
+        if args.is_empty() { prog.clone() } else { format!("{} {}", prog, args.join(" ")) }
+    };
+
     let mut cmd = Command::new(&prog);
     cmd.args(&args);
     if capture {
@@ -235,7 +277,14 @@ fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecRe
         cmd.stdin(Stdio::null())
            .stdout(Stdio::piped())
            .stderr(Stdio::inherit());
-        let out = cmd.output()?;
+        let out = cmd.output().with_context(|| {
+            format!(
+                "nie udało się uruchomić komendy '{}' — program '{}' nie znaleziony w PATH \
+                 albo brak uprawnień do jego uruchomienia. Sprawdź, czy jest zainstalowany \
+                 (`which {}`) i czy ścieżka do niego jest w $PATH tego procesu.",
+                cmd_display(), prog, prog
+            )
+        })?;
         return Ok(ExecResult {
             exit_code: out.status.code().unwrap_or(1),
             stdout:    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
@@ -247,7 +296,15 @@ fn exec_process(prog: String, args: Vec<String>, capture: bool) -> Result<ExecRe
     cmd.stdin(Stdio::null())
        .stdout(Stdio::inherit())
        .stderr(Stdio::inherit());
-    Ok(ExecResult { exit_code: cmd.status()?.code().unwrap_or(1), stdout: None })
+    let status = cmd.status().with_context(|| {
+        format!(
+            "nie udało się uruchomić komendy '{}' — program '{}' nie znaleziony w PATH \
+             albo brak uprawnień do jego uruchomienia. Sprawdź, czy jest zainstalowany \
+             (`which {}`) i czy ścieżka do niego jest w $PATH tego procesu.",
+            cmd_display(), prog, prog
+        )
+    })?;
+    Ok(ExecResult { exit_code: status.code().unwrap_or(1), stdout: None })
 }
 
 fn resolve_export_value(val: &ExportValue, env: &mut Env) -> String {
