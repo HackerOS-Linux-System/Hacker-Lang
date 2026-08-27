@@ -8,22 +8,46 @@ authors.workspace = true
 name = "hl_jit"
 crate-type = ["rlib"]
 
+[features]
+default = ["native-jit", "process-exec"]
+# JIT natywny (Cranelift): kompiluje trasy pętli/funkcje do prawdziwego kodu
+# maszynowego w wykonywalnej pamięci (mmap). Sandbox WASM (source-code/
+# playground, target wasm32-unknown-unknown) kategorycznie nie udostępnia
+# wykonywalnej pamięci ani wykrywania natywnego ISA — cranelift-jit/
+# cranelift-native po prostu się tam nie skompilują. Wyłączenie tej cechy
+# podstawia `jit_stub.rs`: `JitEngine::new()` zawsze zwraca Err, więc
+# `BytecodeInterpreter::new()` ustawia `jit_engine: None` — DOKŁADNIE ta sama
+# ścieżka, którą interpreter już ma dla "silnik JIT niedostępny na tym ISA"
+# (patrz interpreter.rs) — zero zmian w logice sterowania przepływem, tylko
+# execution spada w całości na czystą interpretację bytecode.
+native-jit = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
+# Wykonywanie komend systemowych (ExecCmd — operatory >, ^>, ->, ^->, >>, *>,
+# oraz kilka quick-funkcji: ::pid, ::which, ::date, ::time) i orientowane na
+# plik/proces uruchamianie (runner.rs, hl-core z zależnościami nix/which
+# specyficznymi dla Unixa). Sandbox WASM nie ma pojęcia procesu ani
+# prawdziwego systemu plików — te operacje NIE MOGĄ tam sensownie działać,
+# niezależnie od tego, ile pracy włożyć w kompilację. Wyłączenie tej cechy
+# zamienia je na jawne, nieudające bezpieczeństwa komunikaty błędu zamiast
+# próby (i nieuchronnej porażki) kompilacji `nix`/procesów dla wasm32.
+process-exec = ["dep:hl-core", "dep:which"]
+
 [dependencies]
 hl-parser            = { path = "../parser" }
 hl-compiler          = { path = "../compiler" }
-hl-core              = { path = "../core" }
+hl-core              = { path = "../core", optional = true }
 anyhow.workspace     = true
 thiserror.workspace  = true
 tracing.workspace    = true
 serde.workspace      = true
-dirs.workspace        = true
 colored.workspace     = true
 rustc-hash.workspace  = true
-which.workspace       = true
-cranelift-codegen.workspace  = true
-cranelift-frontend.workspace = true
-cranelift-jit.workspace      = true
-cranelift-module.workspace   = true
-cranelift-native.workspace   = true
+which                = { workspace = true, optional = true }
+cranelift-codegen  = { workspace = true, optional = true }
+cranelift-frontend = { workspace = true, optional = true }
+cranelift-jit      = { workspace = true, optional = true }
+cranelift-module   = { workspace = true, optional = true }
+cranelift-native   = { workspace = true, optional = true }
 bincode.workspace    = true
-memmap2.workspace    = true
+# memmap2/dirs USUNIĘTE: sprawdzone (grep) jako niewykorzystywane nigdzie w
+# tym crate — martwe zależności, które i tak nie mają powodu istnieć, a przy
+# okazji to dwa mniej potencjalne problemy ze zgodnością wasm32 do niczego.
