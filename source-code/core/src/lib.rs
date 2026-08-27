@@ -52,7 +52,7 @@ pub fn exec_nodes_pub(nodes: &[Node], env: &mut Env) -> Result<executor::ExecRes
 
 pub use env::Value;
 pub use executor::ExecResult;
-pub use diagnostics::{Diag, DiagLevel, DiagRenderer, DiagSummary, Span, lint_source};
+pub use diagnostics::{Diag, DiagLevel, DiagRenderer, DiagSummary, Span, lint_source, error_chain_to_diag};
 pub use libs::{cmd_lib_list, cmd_lib_install, cmd_lib_remove, cmd_clean_cache};
 pub use diagnostics::lint_gen;
 pub use arena::{Arena, ArenaContext, ArenaStats};
