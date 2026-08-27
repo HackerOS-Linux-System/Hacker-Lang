@@ -1,18 +1,31 @@
 // cargo
-// golang
 // rustc
+// go [golang]
 
-;; hl build.hl              -> buduje binarke Hacker Lang (cargo) + hl-docs (go)
-;; hl build.hl playground   -> buduje WYLACZNIE source-code/playground do WASM,
-;;                             wynik: dist/hl-playground.wasm (+ glue JS)
+;; hl build.hl                    -> buduje binarke Hacker Lang (cargo) + hl-docs (go)
+;; hl build.hl -- playground      -> buduje WYLACZNIE source-code/playground do WASM,
+;;                                   wynik: dist/hl-playground.wasm (+ glue JS)
 ;;
-;; Wymaga (tylko dla `playground`):
+;; UWAGA na "--": to WYMAGANE przez clap (Cli.script_args ma last=true) —
+;; `hl build.hl playground` (bez "--") zwroci "unexpected argument 'playground'",
+;; bo bez separatora `playground` probuje sparsowac sie jako FLAGA/OPCJA hl,
+;; nie jako argument przekazywany DALEJ do samego skryptu. Dziala tak samo
+;; przez `hl run build.hl -- playground`.
+;;
+;; Wymaga (tylko dla `-- playground`):
 ;;   rustup target add wasm32-unknown-unknown
 ;;   cargo install wasm-bindgen-cli --version <ta sama co w Cargo.lock>
 
-:: env arg0 |> @target
+;; UWAGA: @arg0 to zmienna Env ustawiona bezpośrednio przez `hl` (tree-walk
+;; executor — domyślna ścieżka wykonania .hl, bez --jit), NIE zmienna
+;; środowiskowa OS — `:: env arg0` (czyta std::env::var) tu nie zadziała,
+;; bo tree-walk nigdy nie ustawia arg0 jako env procesu, tylko jako zmienną
+;; Env dostępną wprost pod @arg0. Odczyt @arg0, gdy w ogóle nie podano
+;; żadnych argumentów, jest bezpieczny — Env spada wtedy sam na
+;; std::env::var("arg0") (zwykle też nieustawione -> pusty string), więc
+;; poniższy switch zawsze trafia w `| *` bez błędu.
 
-? switch @target
+? switch @arg0
 | playground
     ~> === Hacker Lang playground -> WASM ===
 
