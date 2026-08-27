@@ -8,6 +8,16 @@ authors.workspace = true
 name = "hl_compiler"
 crate-type = ["rlib"]
 
+[features]
+default = ["cache"]
+# Cache .bc na dysku (~/.hackeros/hacker-lang/cache/) — potrzebuje
+# prawdziwego systemu plików i katalogu domowego, obu niedostępnych w
+# sandboxie WASM. Wyłączenie tej cechy usuwa moduł `cache` (i jego jedyną
+# zależność, `dirs`) z kompilacji — source-code/playground buduje ten crate
+# z `default-features = false`, bo i tak nie woła nic z tego modułu (parsuje
+# i kompiluje w pamięci, bez cache na dysku).
+cache = ["dep:dirs"]
+
 [dependencies]
 hl-parser            = { path = "../parser" }
 anyhow.workspace     = true
@@ -15,10 +25,10 @@ thiserror.workspace  = true
 tracing.workspace    = true
 serde.workspace      = true
 serde_json.workspace = true
-dirs.workspace       = true
+dirs                 = { workspace = true, optional = true }
 colored.workspace    = true
-cranelift-codegen.workspace  = true
-cranelift-frontend.workspace = true
-cranelift-module.workspace   = true
-cranelift-native.workspace   = true
 bincode.workspace    = true
+# cranelift-* USUNIĘTE: sprawdzone (grep) jako niewykorzystywane nigdzie w
+# tym crate — martwe zależności. Poza tym, że to zbędny balast, cranelift-
+# native w szczególności nie ma sensu (i prawdopodobnie się nie skompiluje)
+# dla wasm32 — jednego z docelowych targetów tego crate (playground).
