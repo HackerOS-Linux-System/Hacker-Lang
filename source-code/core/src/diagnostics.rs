@@ -270,3 +270,27 @@ pub fn lint_gen(source: &str) -> Vec<Diag> {
     }
     diags
 }
+
+/// Zamień `anyhow::Error` na `Diag` pokazujący CAŁY łańcuch przyczyn, nie
+/// tylko najbardziej zewnętrzną warstwę. `anyhow::Error`'s `Display` (`{}`,
+/// czyli to, czego dawniej używało `e.to_string()`) domyślnie pokazuje
+/// WYŁĄCZNIE ostatni dodany `.context(...)` — jeśli błąd przeszedł przez
+/// kilka warstw (np. "nie mogę zbudować X" → "nie mogę uruchomić komendy Y"
+/// → surowy `io::Error` z systemu), reszta ginie całkowicie, a
+/// użytkownik dostaje coś w stylu gołego "No such file or directory" bez
+/// jakiegokolwiek wskazania, CO dokładnie próbowało się wykonać.
+///
+/// Tutaj: pierwsza warstwa (`e`) trafia jako główny komunikat błędu, a
+/// KAŻDA kolejna warstwa łańcucha (`e.chain().skip(1)`, czyli `e.source()`
+/// i tak dalej w głąb, aż do surowej przyczyny systemowej) trafia jako
+/// osobna linia `note:` — więc widać dokładnie, na którym kroku i dlaczego
+/// coś zawiodło, zamiast zgadywać.
+pub fn error_chain_to_diag(e: &anyhow::Error) -> Diag {
+    let mut chain = e.chain();
+    let top = chain.next().map(|c| c.to_string()).unwrap_or_else(|| e.to_string());
+    let mut diag = Diag::error(top);
+    for cause in chain {
+        diag = diag.with_note(format!("przyczyna: {}", cause));
+    }
+    diag
+}
