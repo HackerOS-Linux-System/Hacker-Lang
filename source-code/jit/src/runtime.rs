@@ -256,6 +256,16 @@ pub struct RuntimeState {
     pub call_depth: u32,
     /// Iterator state: iter_reg → (interned word idxs, current pos)
     pub iters: FxHashMap<u32, (Vec<u32>, usize)>,
+    /// Bufor wyjścia z `Instruction::Print` — DODATKOWO do zwykłego
+    /// `println!` (który zostaje nietknięty i działa jak dotychczas dla
+    /// natywnego CLI), NIGDY zamiast niego. Na wasm32 (source-code/
+    /// playground) `println!` ląduje donikąd (brak prawdziwego stdout w
+    /// sandboxie przeglądarki bez powłoki WASI) — ten bufor to jedyny
+    /// sposób, żeby wywołujący (glue JS) mógł odczytać, co skrypt
+    /// faktycznie wypisał, PO wykonaniu. Zero kosztu/ryzyka dla natywnej
+    /// ścieżki: to czysto addytywny zapis do String, który i tak nikt nie
+    /// musi odczytywać, jeśli go nie potrzebuje.
+    pub output: String,
 }
 
 const MAX_CALL_DEPTH: u32 = 512;
@@ -271,6 +281,7 @@ impl RuntimeState {
             last_exit: 0,
             call_depth: 0,
             iters:     FxHashMap::default(),
+            output:    String::new(),
         }
     }
 
