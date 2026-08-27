@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use hl_compiler::bytecode::*;
 use crate::runtime::{RuntimeState, NanVal};
+#[cfg(feature = "process-exec")]
 use std::process::{Command, Stdio};
 use std::collections::HashMap;
 
@@ -689,7 +690,15 @@ impl<'a> BytecodeInterpreter<'a> {
 
             // ── Output ────────────────────────────────────────────────────────
             Instruction::Print { src } => {
-                println!("{}", self.state.get_reg(src).to_str_val(&self.state.interner));
+                let text = self.state.get_reg(src).to_str_val(&self.state.interner);
+                println!("{}", text);
+                // Dodatkowo bufor `state.output` — patrz doc pola w
+                // runtime.rs (potrzebne na wasm32/playground, gdzie
+                // println! nie ma dokąd trafić; na ścieżce natywnej to
+                // czysty, tani no-op dla wywołujących, którzy tego nie
+                // odczytują).
+                self.state.output.push_str(&text);
+                self.state.output.push('\n');
                 Ok(ExecSignal::Next)
             }
 
@@ -778,19 +787,35 @@ impl<'a> BytecodeInterpreter<'a> {
 
             // ── HackerOS API ──────────────────────────────────────────────────
             Instruction::HackerOsCall { tool, args, dst } => {
-                let tool_str = self.const_str(tool);
-                let args_str = self.state.get_reg(args).to_str_val(&self.state.interner);
-                let cmd = if args_str.is_empty() {
-                    tool_str.clone()
-                } else {
-                    format!("{} {}", tool_str, args_str)
-                };
-                if which::which(&tool_str).is_err() {
-                    eprintln!("\x1b[33m[hl ||]\x1b[0m Narzędzie '{}' nie jest zainstalowane.", tool_str);
+                #[cfg(feature = "process-exec")]
+                {
+                    let tool_str = self.const_str(tool);
+                    let args_str = self.state.get_reg(args).to_str_val(&self.state.interner);
+                    let cmd = if args_str.is_empty() {
+                        tool_str.clone()
+                    } else {
+                        format!("{} {}", tool_str, args_str)
+                    };
+                    if which::which(&tool_str).is_err() {
+                        eprintln!("\x1b[33m[hl ||]\x1b[0m Narzędzie '{}' nie jest zainstalowane.", tool_str);
+                        self.state.set_reg(dst, NanVal::num(127.0));
+                    } else {
+                        let ec = exec_system_cmd(&cmd, CmdMode::Plain, &mut self.state)?;
+                        self.state.set_reg(dst, NanVal::num(ec as f64));
+                    }
+                }
+                #[cfg(not(feature = "process-exec"))]
+                {
+                    // Narzędzia HackerOS (fs/net/proc/...) to zewnętrzne
+                    // programy — z definicji nie mogą istnieć w sandboxie
+                    // bez procesów (playground/wasm). Kod 127 to konwencja
+                    // powłoki dla "komenda nie znaleziona" — ta sama
+                    // wartość, którą HL już zwraca, gdy narzędzie brakuje
+                    // NA PRAWDZIWYM systemie, więc skrypty sprawdzające ten
+                    // kod działają identycznie w obu przypadkach.
+                    let _ = tool;
+                    let _ = args;
                     self.state.set_reg(dst, NanVal::num(127.0));
-                } else {
-                    let ec = exec_system_cmd(&cmd, CmdMode::Plain, &mut self.state)?;
-                    self.state.set_reg(dst, NanVal::num(ec as f64));
                 }
                 Ok(ExecSignal::Next)
             }
@@ -917,6 +942,20 @@ impl<'a> BytecodeInterpreter<'a> {
 
 // ── Komendy systemowe ─────────────────────────────────────────────────────────
 
+#[cfg(not(feature = "process-exec"))]
+fn exec_system_cmd(cmd: &str, _mode: CmdMode, _state: &mut RuntimeState) -> Result<i32> {
+    // Bez cechy `process-exec` (np. build wasm32/playground): sandbox nie
+    // ma pojęcia procesu, więc "wykonanie komendy systemowej" nie może
+    // sensownie istnieć — jawny, czytelny błąd zamiast próby (i nieuchronnej
+    // porażki) kompilacji Command/Stdio dla tego celu.
+    bail!(
+        "wykonywanie komend systemowych niedostępne w tej konfiguracji \
+         (playground/wasm) — komenda pominięta: '{}'",
+        cmd
+    );
+}
+
+#[cfg(feature = "process-exec")]
 fn exec_system_cmd(cmd: &str, mode: CmdMode, _state: &mut RuntimeState) -> Result<i32> {
     // Specjalne prefiksy z lowera
     if let Some(path) = cmd.strip_prefix("__hl_import__ ") {
@@ -983,6 +1022,7 @@ fn exec_system_cmd(cmd: &str, mode: CmdMode, _state: &mut RuntimeState) -> Resul
 /// powłoki; specjalnie obsługujemy tu tylko przypadek, który inaczej
 /// próbowałby spawnować nieistniejący plik "cd"). Zwraca docelową ścieżkę —
 /// pusty string oznacza `cd` bez argumentu, czyli $HOME (jak w bash).
+#[cfg(feature = "process-exec")]
 fn parse_cd_builtin(cmd: &str) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed == "cd" {
@@ -991,6 +1031,7 @@ fn parse_cd_builtin(cmd: &str) -> Option<String> {
     trimmed.strip_prefix("cd ").map(|rest| rest.trim().to_string())
 }
 
+#[cfg(feature = "process-exec")]
 fn exec_cd_builtin(target: &str) -> Result<i32> {
     let path = if target.is_empty() {
         match std::env::var("HOME") {
@@ -1012,6 +1053,16 @@ fn exec_cd_builtin(target: &str) -> Result<i32> {
     }
 }
 
+#[cfg(not(feature = "process-exec"))]
+fn exec_system_cmd_capture(cmd: &str, _mode: CmdMode) -> Result<(i32, String)> {
+    bail!(
+        "przechwytywanie wyniku komend systemowych niedostępne w tej \
+         konfiguracji (playground/wasm) — komenda pominięta: '{}'",
+        cmd
+    );
+}
+
+#[cfg(feature = "process-exec")]
 fn exec_system_cmd_capture(cmd: &str, mode: CmdMode) -> Result<(i32, String)> {
     let (prog, args, needs_sh) = build_cmd_parts(cmd, mode);
     let out = if needs_sh {
@@ -1029,6 +1080,7 @@ fn exec_system_cmd_capture(cmd: &str, mode: CmdMode) -> Result<(i32, String)> {
     }
 }
 
+#[cfg(feature = "process-exec")]
 fn build_cmd_parts(cmd: &str, mode: CmdMode) -> (String, Vec<String>, bool) {
     let needs_sh = cmd.contains('|') || cmd.contains(';') || cmd.contains('&')
     || cmd.contains('>') || cmd.contains('<') || cmd.contains('$') || cmd.contains('`')
@@ -1099,7 +1151,10 @@ fn exec_quick_fn(name: &str, arg: &str, state: &mut RuntimeState) -> String {
         "round"    => arg.parse::<f64>().unwrap_or(0.0).round().to_string(),
         "basename" => std::path::Path::new(arg).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
         "dirname"  => std::path::Path::new(arg).parent().and_then(|p| p.to_str()).unwrap_or(".").to_string(),
+        #[cfg(feature = "process-exec")]
         "pid"      => { println!("{}", std::process::id()); String::new() }
+        #[cfg(not(feature = "process-exec"))]
+        "pid"      => String::new(),
         "nl"       => { println!(); String::new() }
         "hr"       => {
             let w: usize = arg.parse().unwrap_or(60);
@@ -1118,15 +1173,21 @@ fn exec_quick_fn(name: &str, arg: &str, state: &mut RuntimeState) -> String {
         }
         "isdir"    => { let e = std::path::Path::new(arg).is_dir();  e.to_string() }
         "isfile"   => { let e = std::path::Path::new(arg).is_file(); e.to_string() }
+        #[cfg(feature = "process-exec")]
         "which"    => which::which(arg).map(|p| p.display().to_string()).unwrap_or_default(),
+        #[cfg(not(feature = "process-exec"))]
+        "which"    => String::new(),
         "env" | "getenv" => std::env::var(arg).unwrap_or_default(),
         // ::env-path — ścieżka aktywnego środowiska z config.hk, zero subprocess
+        #[cfg(feature = "process-exec")]
         "env-path" => {
             use hl_core::config::get_active_env;
             get_active_env()
                 .map(|(_n, p)| p.display().to_string())
                 .unwrap_or_default()
         }
+        #[cfg(not(feature = "process-exec"))]
+        "env-path" => String::new(),
         "read"     => std::fs::read_to_string(arg).unwrap_or_default(),
         "set"      => {
             if let Some((name, val)) = arg.splitn(2, ' ').collect::<Vec<_>>().as_slice().split_first() {
@@ -1152,8 +1213,12 @@ fn exec_quick_fn(name: &str, arg: &str, state: &mut RuntimeState) -> String {
             let r = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) % 100;
             r.to_string()
         }
+        #[cfg(feature = "process-exec")]
         "date"     => { let o = Command::new("date").arg("+%Y-%m-%d").output().ok(); o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() }
+        #[cfg(feature = "process-exec")]
         "time"     => { let o = Command::new("date").arg("+%H:%M:%S").output().ok(); o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default() }
+        #[cfg(not(feature = "process-exec"))]
+        "date" | "time" => String::new(),
         _          => {
             eprintln!("\x1b[31m[hl jit]\x1b[0m Nieznana quick-funkcja '::{}'", name);
             String::new()
@@ -1194,8 +1259,14 @@ fn eval_condition_str(cond: &str, state: &mut RuntimeState) -> bool {
         }
     }
 
-    // Fallback shell
-    Command::new("sh").args(["-c", cond]).status().map(|s| s.success()).unwrap_or(false)
+    // Fallback shell — niedostępny bez `process-exec` (patrz Cargo.toml):
+    // brak procesu = warunek nierozpoznanego kształtu jest po prostu
+    // fałszywy, zamiast próbować spawnować powłokę, która i tak nie mogłaby
+    // tam istnieć.
+    #[cfg(feature = "process-exec")]
+    { Command::new("sh").args(["-c", cond]).status().map(|s| s.success()).unwrap_or(false) }
+    #[cfg(not(feature = "process-exec"))]
+    { false }
 }
 
 fn find_op(s: &str, op: &str) -> Option<usize> {
