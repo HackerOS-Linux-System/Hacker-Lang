@@ -2,12 +2,14 @@ pub mod bytecode;
 pub mod lower;
 pub mod optimize;
 pub mod serialize;
+#[cfg(feature = "cache")]
 pub mod cache;
 
 pub use bytecode::{HlModule, HlBcHeader, Instruction, ConstPool, FuncTable};
 pub use lower::lower_ast;
 pub use optimize::optimize_module;
 pub use serialize::{write_bc_file, read_bc_file, BC_MAGIC, BC_VERSION};
+#[cfg(feature = "cache")]
 pub use cache::{bc_cache_path, ensure_cache_dir, cache_cleanup_if_needed, CACHE_MAX_FILES};
 
 use anyhow::Result;
@@ -55,7 +57,9 @@ pub fn compile_source_to_bc(
 }
 
 /// Kompiluj do cache (~/.hackeros/hacker-lang/cache/<hash>.bc)
-/// Zwraca ścieżkę do pliku cache.
+/// Zwraca ścieżkę do pliku cache. Dostępne tylko z cechą `cache` (wymaga
+/// katalogu domowego i systemu plików — patrz doc cechy w Cargo.toml).
+#[cfg(feature = "cache")]
 pub fn compile_to_cache(source: &str, source_path: &Path) -> Result<std::path::PathBuf> {
     ensure_cache_dir()?;
     cache_cleanup_if_needed()?;
@@ -88,6 +92,7 @@ pub fn compile_to_cache(source: &str, source_path: &Path) -> Result<std::path::P
 }
 
 /// FNV-1a hash — stabilny między procesami, szybszy niż sha256 dla małych danych
+#[cfg(feature = "cache")]
 fn fnv1a_hash_source(source: &str, path: &Path) -> u64 {
     const FNV_OFFSET: u64 = 14695981039346656037;
     const FNV_PRIME:  u64 = 1099511628211;
