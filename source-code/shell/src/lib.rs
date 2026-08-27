@@ -137,7 +137,7 @@ pub fn execute_source(source: &str, filename: &str, env: &mut Env) {
     match run_source(source, env) {
         Ok(r)  => env.last_exit = r.exit_code,
         Err(e) => {
-            renderer.emit(&hl_core::Diag::error(e.to_string()).with_note("blad runtime"));
+            renderer.emit(&hl_core::error_chain_to_diag(&e).with_note("blad runtime"));
             env.last_exit = 1;
         }
     }
@@ -167,7 +167,7 @@ pub fn run_file(path: &Path, env: &mut Env) -> Result<i32> {
     match run_source(&source, env) {
         Ok(r)  => Ok(r.exit_code),
         Err(e) => {
-            let d = hl_core::Diag::error(e.to_string())
+            let d = hl_core::error_chain_to_diag(&e)
             .with_note(format!("blad runtime w '{}'", filename));
             renderer.emit(&d); Ok(1)
         }
