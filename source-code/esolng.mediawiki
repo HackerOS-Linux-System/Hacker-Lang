@@ -1,0 +1,470 @@
+'''HackerLang''' (also written '''Hacker Lang''', binary name <code>hl</code>, file extension <code>.hl</code>) is a sigil-driven, line-oriented scripting language created by the '''HackerOS Team''' as the native system-scripting language of '''HackerOS''', a Linux distribution. Every statement begins with a short punctuation "operator" (<code>~&gt;</code>, <code>&gt;</code>, <code>%</code>, <code>@</code>, <code>::</code>, <code>$( )</code>, <code>|&gt;</code>, <code>=&gt;</code>, <code>?~</code>, <code>:*</code>, <code>*--</code>, etc.) instead of a keyword, so a HackerLang program reads more like a stream of shell redirections than like C-family source code. The language is compiled through an AST&nbsp;→&nbsp;bytecode&nbsp;→&nbsp;native-code pipeline (a [https://cranelift.dev/ Cranelift]-based JIT) rather than interpreted line-by-line, and it ships with its own package manager, called '''bit''', whose index lives on the '''bit.io''' project.
+
+The reference implementation is written in [[Rust]] (compiler/runtime/CLI) and [[Go]] (a TUI documentation browser), and HackerLang scripts themselves are used to implement parts of the tooling (e.g. the <code>bit</code> package manager is itself an <code>.hl</code> program).
+
+{{infobox proglang
+|name=HackerLang
+|paradigm=[[imperative]], line/statement-oriented, shell-scripting
+|author=HackerOS Team
+|year=2025/2026 ("gen 1"), "gen 2" is the current default dialect
+|memtype=
+|dimensions=1
+|computational class=believed [[Turing complete]] (unbounded <code>?~</code>/while loops with mutable numeric state, plus arbitrary host command execution)
+|majorimpl=<code>hl</code> (Rust; tree-walking executor **and** AST→bytecode→Cranelift JIT)
+|influence=POSIX shell / Bash, sigil-heavy scripting languages
+|influenced=
+|file ext=.hl, .bc (compiled bytecode), .hlrc (shell config), .hk / .hacker (HackerOS-specific config/metadata formats)
+}}
+
+== Platform restriction ==
+
+HackerLang is explicitly '''not portable''': the project's own documentation states, in bold, that <code>hl</code> "runs '''exclusively on HackerOS'''" and that the <code>hl</code> binary is built into the operating system itself. The compiler/runtime reaches directly into HackerOS-specific paths (<code>/usr/lib/HackerOS/Hacker-Lang/main-libs/</code> for the standard library, <code>/usr/share/HackerOS/Scripts/Bin/</code> for "system scripts" runnable via <code>hl exec</code>, <code>~/.hackeros/hacker-lang/</code> for caches/config/installed libraries) and provides first-class syntax (<code>||</code>, see below) for calling a whole family of HackerOS-only executables (<code>hacker</code>, <code>hpkg</code>, <code>hco</code>, <code>hsh</code>, <code>hnm</code>, <code>hedit</code>, <code>lpm</code>, <code>isolator</code>, <code>hackeros-steam</code>, etc.). Running an <code>.hl</code> script outside HackerOS will generally fail once it touches any of these paths or tools, even though the parser/executor/JIT crates themselves have no OS-specific code beyond that.
+
+== Execution pipeline ==
+
+<pre>
+.hl source ──parse──► AST ──lower──► .bc bytecode ──JIT──► machine code
+                                         │
+                          ~/.hackeros/hacker-lang/cache/
+                          (max 30 files, auto-cleanup)
+</pre>
+
+Running <code>hl run script.hl</code> (or simply <code>hl script.hl</code>):
+
+# parses the <code>.hl</code> source into an AST;
+# lowers the AST into an optimized <code>.bc</code> module (constant folding, dead-code elimination, peephole optimization — a Cranelift-style IR, not Cranelift itself at this stage);
+# caches the compiled module under <code>~/.hackeros/hacker-lang/cache/</code>, keyed by a hash of the source content, path and mtime (capped at 30 cached files, oldest evicted first);
+# executes the bytecode through an interpreter;
+# "hot" loops/functions (a call-count threshold of '''50''') are promoted to native machine code (x86_64/aarch64) via [[Cranelift]]. Everything that touches I/O or spawns processes always stays on the interpreter path. JIT can be disabled with <code>hl run --no-jit</code> or <code>HL_NO_JIT=1</code>.
+
+Compiled <code>.bc</code> files start with the header <code>HLBC</code>, a <code>u32</code> version, a length-prefixed JSON header (dialect/"gen", source path, timestamp) and a [[bincode]]-serialized module (instructions, constant pool, function table). The compiler auto-prepends a shebang (<code>#!/usr/bin/env -S /usr/bin/hl run</code>) and sets the executable bit, so a <code>.bc</code> file can be run directly as <code>./script.bc</code>.
+
+== Dialects ("gens") ==
+
+HackerLang is versioned internally through a system of '''gens''' (generations), declared optionally at the top of a file:
+
+<syntaxhighlight lang="text">
+#!/usr/bin/env hl
+using <gen 2>
+</syntaxhighlight>
+
+{| class="wikitable"
+! Gen !! Status !! Adds
+|-
+| gen 1 || active || base syntax: <code>~&gt;</code>, <code>&amp;</code>, <code>*&gt;</code>, <code>_N</code>, <code>&lt;&lt;</code>, <code>:*</code>, <code>:**</code>, <code>*--</code>
+|-
+| gen 2 (default) || active || typed variables (<code>%name: type = ...</code>), <code>$( )</code> native arithmetic, <code>|&gt;</code> pipe-to-variable, <code>@ x in ...</code> for-loops, <code>?~</code> while-loops, <code>? switch</code>, <code>||</code> HackerOS API calls
+|-
+| gen 3 || reserved, unimplemented || planned: closures
+|}
+
+Old ("gen 1"-era) import prefixes are kept for backward compatibility and silently rewritten: <code>std/</code>&nbsp;→&nbsp;<code>main/</code>, <code>virus/</code>&nbsp;→&nbsp;<code>bit/</code>, <code>community/</code>&nbsp;→&nbsp;<code>github/</code>.
+
+== Syntax ==
+
+Because almost every construct is a distinct leading sigil rather than a keyword, the grammar is best read as a table of line prefixes recognised by the lexer.
+
+=== Output ===
+
+<syntaxhighlight lang="text">
+~> Text with interpolation @variable
+</syntaxhighlight>
+
+<code>~&gt;</code> prints a line; <code>@name</code> anywhere inside it is interpolated. <code>@{expr}</code> is a "dynamic" reference (its inner text is itself interpolated first, then used as a variable name — i.e. one level of indirection/pointer-like lookup), and writing two variable references back-to-back with no separator (<code>@arg@_i</code>) is sugar for the same thing: it looks up <code>_i</code>, then reads the variable whose name is <code>arg</code> concatenated with that value — used heavily for indexing positional script arguments (<code>@{arg@_i}</code> = "the value of <code>arg</code> followed by the current value of <code>_i</code>", i.e. argument number <code>_i</code>).
+
+=== Shell commands ===
+
+<syntaxhighlight lang="text">
+>    command             # plain
+^>   command             # sudo
+->   command             # run in an isolated namespace
+^->  command             # sudo + isolated namespace
+>>   command @var        # plain, with variable interpolation
+^>>  command @var        # sudo, with interpolation
+->>  command @var        # isolated, with interpolation
+*>   command             # run through hsh -c (the HackerOS shell)
+/>   command             # run through HackerLang's OWN built-in coreutils
+&    command             # background (non-blocking); PID is stored in @_bg_pid
+</syntaxhighlight>
+
+Any of the command forms can redirect captured stdout straight into a variable with <code>|&gt;</code>:
+
+<syntaxhighlight lang="text">
+> hostname   |> @host
+^> id -u     |> @uid
+/> cat file  |> @contents
+</syntaxhighlight>
+
+The <code>/&gt;</code> form does not spawn <code>/bin/*</code> at all — it dispatches into a native, dependency-free re-implementation of common Unix tools shipped inside the HackerLang runtime itself (<code>cat</code>, <code>ls</code>, <code>grep</code>, <code>head</code>, <code>tail</code>, <code>wc</code>, <code>echo</code>, <code>find</code>, <code>cp</code>, <code>mv</code>, <code>rm</code>, <code>mkdir</code>, <code>touch</code>, <code>sort</code>, <code>uniq</code>, <code>cut</code>, <code>tr</code>, <code>rev</code>, <code>basename</code>, <code>dirname</code>, <code>stat</code>, <code>du</code>, <code>chmod</code>, <code>which</code>, <code>pwd</code>, <code>date</code>, <code>env</code>, <code>seq</code>, <code>sleep</code>, <code>printf</code>, <code>yes</code>, <code>tee</code>, <code>xargs</code>).
+
+A command's success/failure can be branched on immediately afterward with <code>? ok</code> / <code>? err</code> blocks (checking the previous exit status), closed with <code>done</code>:
+
+<syntaxhighlight lang="text">
+> test -f /etc/passwd
+? ok
+    ::green file exists
+done
+? err
+    ::red   missing file
+done
+</syntaxhighlight>
+
+=== Variables ===
+
+<syntaxhighlight lang="text">
+% name = value            # gen 1 — untyped
+% name: int   = 42        # gen 2 — int
+% name: float = 3.14      # gen 2 — float
+% name: str   = text      # gen 2 — string
+% name: bool  = true      # gen 2 — bool
+@name                     # dereference
+</syntaxhighlight>
+
+Recognised type annotations map to a small internal <code>VarType</code> enum: <code>str</code>/<code>string</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>list</code>, <code>map</code>, and <code>Any</code> when no annotation is given (gen&nbsp;1 style).
+
+=== Native arithmetic ===
+
+<syntaxhighlight lang="text">
+$( 2 + 2 )          -> @result       # evaluate, store into a variable
+$( @a * @b + 10 )   -> @res          # with variable interpolation
+% x: int = $( 100 / 4 )              # used directly as a variable's value
+</syntaxhighlight>
+
+<code>$( … )</code> is evaluated natively (not shelled out to <code>expr</code>/<code>bc</code>); operators seen in the examples include <code>+ - * / %</code> and parentheses for grouping, with comparison operators (<code>&lt; &gt; == &gt;=</code> etc.) usable inside <code>?~</code> while-conditions.
+
+=== Loops ===
+
+<syntaxhighlight lang="text">
+@ item in val1 val2 val3     # for-in over a literal word list
+    ~> element: @item
+done
+
+@ cmd in @list                # for-in over the contents of a variable
+    /> which @cmd
+done
+
+?~ @counter < 10              # while
+    $( @counter + 1 ) -> @counter
+done
+
+_10 > hacker update           # repeat the SAME statement N times
+_5  ~> repeated
+</syntaxhighlight>
+
+<code>_N</code> immediately followed by any single statement re-runs that one statement <code>N</code> times; it is not a block form.
+
+=== Switch/case ===
+
+<syntaxhighlight lang="text">
+? switch @variable
+| linux
+    ::green Linux!
+| windows
+    ::yellow Windows!
+| *
+    ~> unknown: @variable
+done
+</syntaxhighlight>
+
+=== Functions ===
+
+<syntaxhighlight lang="text">
+: name def
+    ~> function body
+done
+
+-- name       # call
+</syntaxhighlight>
+
+==== Arena functions (gen 2) ====
+
+A second, distinct function form exists purely for performance-sensitive code:
+
+<syntaxhighlight lang="text">
+:: name <4k> def      # <size> is optional (default 4096 bytes); accepts "4k"/"1m" suffixes
+    ...
+done
+
+:: name arg1 arg2     # call
+</syntaxhighlight>
+
+Before entering the function body the runtime bump-allocates one contiguous memory block of the requested size (an [[arena allocator]]); every local allocation inside the function draws from that arena instead of issuing individual heap allocations, and the whole arena is freed in a single deallocation on return. This is documented as being aimed at string processing, parsing and tight arithmetic loops that would otherwise generate heap-allocation/GC pressure. Because the <code>::</code> sigil is shared with "quick functions" (below), the lexer/parser disambiguate by checking whether <code>name</code> was previously declared as an arena function; if not, <code>:: name args</code> falls back to being interpreted as a call to one of the built-in quick functions.
+
+=== Quick functions ===
+
+<code>::</code> also invokes a large table of built-in one-shot utility functions (over 30), e.g.:
+
+<syntaxhighlight lang="text">
+::upper  text        ::lower  text       ::len   text     ::trim  text
+::rev    text         ::replace @t s d    ::contains @t s  ::split @t :
+::abs   -42            ::ceil 3.2          ::floor 3.9      ::round 3.5
+::max 10 20            ::min 10 20         ::rand           ::env HOME
+::date                 ::time              ::pid            ::which curl
+::exists /etc/file      ::isdir /tmp        ::isfile /etc/hosts
+::basename /a/b.c       ::dirname /a/b.c    ::read file.txt
+::set n value           ::get n             ::type n         ::unset n
+::nl                   ::hr 40             ::bold text
+::red text ::green text ::yellow text ::cyan text
+</syntaxhighlight>
+
+The output of any quick call can also be piped to a variable: <code>:: name args |&gt; @var</code>.
+
+=== Exports (environment variables) ===
+
+<syntaxhighlight lang="text">
+=> EDITOR = nvim
+=> PATH [
+| /usr/local/bin
+| /usr/bin
+| /usr/lib/HackerOS
+]
+</syntaxhighlight>
+
+=== Goroutines and channels ===
+
+<syntaxhighlight lang="text">
+:** results          # declare a channel
+
+:* scanner def       # named goroutine (gen 2)
+    > some_task
+    *-- results       # send onto channel
+done
+
+:*                   # anonymous goroutine (gen 1)
+    > other_task
+done
+
+*-- results           # receive from channel
+</syntaxhighlight>
+
+=== Imports ===
+
+<syntaxhighlight lang="text">
+<< utils.hl              # import a local file
+<< config.hl | detail    # import with an extra "detail" argument
+<* some_dir              # import a directory (loads some_dir/imports.hl, like a mod.rs)
+
+# <main/net>              # standard library (.hl files under .../main-libs/)
+# <main/colors>
+# <bit/hashlib>            # a package installed through the `bit` package manager
+# <github/user/repo>       # pull a library straight from a GitHub repo
+</syntaxhighlight>
+
+=== Dependency declarations ===
+
+<syntaxhighlight lang="text">
+// curl                # declare that the "curl" binary is required
+// ninja [ninja-build]  # required binary "ninja", installed via apt package "ninja-build"
+</syntaxhighlight>
+
+<code>//</code> is '''not''' a comment despite superficially resembling C++'s <code>//</code> — the parser reads a single dependency declaration from it and, if <code>hl</code> is invoked with <code>--install-deps</code>, will attempt to install missing binaries via <code>apt</code>. (The project's own README still lists <code>// ...</code> as "block comment" syntax; the lexer source code disagrees and its comments explain that the block-comment behaviour was removed as a bug fix — an inconsistency worth being aware of if porting or referencing the README verbatim.)
+
+Actual comments use two other sigils:
+
+<syntaxhighlight lang="text">
+;; a line comment
+/// a documentation comment (surfaced by `hl search`)
+</syntaxhighlight>
+
+=== HackerOS API calls ===
+
+<syntaxhighlight lang="text">
+|| hacker update
+|| hpkg install nmap
+|| lpm list
+|| hsh -c "ls /tmp"
+</syntaxhighlight>
+
+<code>||</code> is dedicated syntax for invoking one of a fixed whitelist of HackerOS system tools — <code>H#</code>, <code>hco</code>, <code>hacker</code>, <code>hsh</code>, <code>hpkg</code>, <code>Blue-Environment</code>, <code>hnm</code>, <code>hpm</code>, <code>hedit</code>, <code>ngt</code>, <code>eiq</code>, <code>getit</code>, <code>hdev</code>, <code>anvil</code>, <code>a</code>, <code>hbuild</code>, <code>lpm</code>, <code>chker</code>, <code>isolator</code>, <code>hackeros-steam</code>, <code>ulb</code>, <code>gameframe</code>, <code>hup</code>, <code>hackeros-builder</code> — which is the clearest illustration of the language's single-OS scope: none of these binaries exist outside HackerOS.
+
+=== Extern runtimes ===
+
+<syntaxhighlight lang="text">
+_> script.py [python] def
+    ...
+done
+</syntaxhighlight>
+
+<code>_&gt;</code> hands a block off to an external runtime — <code>shell</code> (bash), <code>python</code> (python3), <code>java</code>, <code>elf</code> (direct exec of a binary) or <code>so</code> (<code>dlopen</code> a shared library and call a fixed symbol, <code>hl_extern_call</code>). The runtime is auto-detected from the file extension when the <code>[runtime]</code> tag is omitted.
+
+== Type system ==
+
+HackerLang gen&nbsp;2 is optionally typed at the variable-declaration site only (<code>%name: type = value</code>); there is no static type checker beyond that, and gen&nbsp;1-style untyped declarations remain valid everywhere. Values ultimately live in a small internal value enum (string, number, bool, int, float, list, map, plus "command output" and "interpolated string" and "arithmetic expression" variants used internally by the AST before evaluation).
+
+== The `bit` package manager and bit.io ==
+
+'''bit''' is HackerLang's package manager. Notably, its reference implementation (<code>source-code/bit.hl</code> in the compiler repository) is itself written '''in HackerLang''' — described in its own header comment as a "1:1 port" of an earlier Python implementation (<code>bit.py</code>) — making it a practical, non-trivial example HackerLang program in addition to being a system tool.
+
+=== Layout on disk ===
+
+{| class="wikitable"
+! Path !! Purpose
+|-
+| <code>~/.hackeros/hacker-lang/libs/</code> || installed packages, one directory per package, laid out as <code>libs/&lt;name&gt;/&lt;commit&gt;/</code> with a <code>current</code> symlink pointing at the active commit
+|-
+| <code>~/.hackeros/hacker-lang/cache/</code> || compiled <code>.bc</code> cache '''and''' the downloaded package index (<code>repo-list.json</code>)
+|-
+| <code>~/.hackeros/hacker-lang/meta/</code> || <code>bit.lock</code>, a JSON lockfile (managed with <code>jq</code>) recording installed package name → {version, commit, installed_at}
+|}
+
+=== Repository format ===
+
+The master package index is fetched from
+<code>https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json</code>
+(source browsable at [https://github.com/bit-io/repository bit-io/repository]), a flat JSON object:
+
+<syntaxhighlight lang="json">
+{
+  "hashlib": {
+    "type": "git",
+    "family": "github",
+    "url": "HackerOS-Linux-System/hashlib-bit.git",
+    "description": "Cryptography: sha256, md5, blake3"
+  },
+  "obsidian": {
+    "type": "git",
+    "family": "github",
+    "url": "Bytes-Repository/obsidian-lib.git",
+    "description": "GUI dialogs for HL"
+  }
+}
+</syntaxhighlight>
+
+Three package <code>type</code>s are supported: <code>git</code> (clone from GitHub/GitLab, pinned by short commit hash — this is the path implemented in <code>bit.hl</code>: a shallow <code>git clone --depth=1</code> into a versioned directory, hashed with <code>sha256sum</code>, then symlinked as <code>current</code>), <code>tar</code> (archive) and <code>link</code> (prebuilt binary).
+
+=== Commands ===
+
+<syntaxhighlight lang="text">
+bit                    # auto-detect run.hl / build.hl / a source-code/ tree, then build+run
+bit install <name>...
+bit remove  <name>...
+bit upgrade [name]
+bit verify  [name]
+bit list
+bit installed
+bit search  <query>
+bit search  all
+bit update             # refresh repo-list.json
+bit info    <name>
+bit clean
+bit run                # find entry point + install bit.hk deps + run
+bit workspace          # show project's bit.hk and installed libs
+bit io                 # open the bit.io website in a browser
+bit help
+</syntaxhighlight>
+
+A project directory can declare its own dependency list in a small INI-like file, <code>bit.hk</code>:
+
+<syntaxhighlight lang="text">
+[project]
+-> name    => MyProject
+-> version => 1.0.0
+-> entry   => source-code/main.hl
+-> type    => hl
+
+[dependencies]
+-> tui
+</syntaxhighlight>
+
+<code>bit run</code> auto-detects a project's entry point by checking, in order, <code>source-code/main.hl</code>, <code>src/main.hl</code>, <code>main.hl</code>, then falls back to a Rust <code>Cargo.toml</code> (<code>source-code/Cargo.toml</code> or <code>Cargo.toml</code>) and invokes <code>cargo run --release</code> instead — i.e. the <code>bit</code>/HackerLang project layout deliberately mirrors, and can wrap, a Cargo workspace.
+
+Individual libraries referenced from HackerLang source (<code>#&nbsp;&lt;bit/hashlib&gt;</code>) are resolved against this same index and installed on demand under <code>~/.hackeros/hacker-lang/libs/</code>.
+
+== Standard library ("main-libs") ==
+
+Bundled with the runtime (<code>/usr/lib/HackerOS/Hacker-Lang/main-libs/</code>), imported with <code># &lt;main/NAME&gt;</code>, and themselves plain <code>.hl</code> files: <code>cli</code>, <code>colors</code> (ANSI colour/style constants such as <code>COLOR_RED</code>, <code>COLOR_BOLD</code>, background colours, short aliases like <code>C_R</code>), <code>crypto</code>, <code>fs</code>, <code>hacker</code> (parses the HackerOS <code>.hacker</code> metadata format, v1–v3), <code>hbuild</code>, <code>hk-parser</code> (parses the <code>.hk</code> HackerOS config format), <code>json</code>, <code>net</code>, <code>proc</code>, <code>progress-bar</code>, <code>str</code>, and <code>sys</code>.
+
+== The `hl` command-line tool ==
+
+<syntaxhighlight lang="text">
+hl file.hl                  # run a script (default pipeline)
+hl run file.hl               # explicit run
+hl run file.bc                # run compiled bytecode directly
+hl run --no-jit file.hl       # force the tree-walking interpreter (debugging)
+hl compile file.hl             # .hl -> file.bc
+hl check file.hl                # syntax check + linter
+hl check --meta file.hl          # also validate `using <gen N>` / shebang
+hl ast file.hl                    # dump the AST as JSON
+hl repl                            # interactive REPL
+hl shell                            # use HL as a login/system shell
+hl exec name                         # run a "system script" from /usr/share/HackerOS/Scripts/Bin/
+hl search phrase                      # search system scripts
+hl search all                          # list all system scripts
+hl gen-info file.hl                     # report gen + shebang + AST node summary
+hl docs                                  # TUI documentation browser (implemented in Go)
+hl clean                                  # clear bytecode + library caches
+hl cache-info                              # cache statistics
+hl version                                  # version / gen info
+hl -c "~> Hi!"                               # run inline code
+</syntaxhighlight>
+
+<code>hl shell</code> turns the interpreter into an interactive login shell reading <code>~/.hlrc</code> on startup, with builtins <code>cd</code>, <code>vars</code>, <code>funcs</code>, <code>help</code>, <code>clear</code>, <code>exit</code>.
+
+== Linter ==
+
+<code>hl check</code> includes a Rust-style diagnostics printer with file/line/column pointers and fix-it hints, e.g. flagging <code>&gt; echo hello</code> (suggesting <code>~&gt; hello</code> instead, since spawning <code>echo</code> as a subprocess is considered an anti-pattern given the native <code>~&gt;</code> printer and the native <code>/&gt; echo</code> coreutil), <code>&gt; sudo cmd</code> (suggesting the dedicated <code>^&gt;</code> sudo operator), or use of <code>% PATH = ...</code> instead of the dedicated <code>=&gt;</code> export form.
+
+== Implementation ==
+
+The reference implementation is a [[Rust]] Cargo workspace:
+
+{| class="wikitable"
+! Crate !! Role
+|-
+| <code>parser</code> || lexer, recursive/hand-written parser, AST, gen/shebang handling
+|-
+| <code>core</code> || tree-walking executor, environment/variable model, quick functions, diagnostics
+|-
+| <code>compiler</code> || AST → bytecode module lowering, optimizer (constant folding / dead-code elimination / peephole passes), <code>.bc</code> (de)serialization, cache management
+|-
+| <code>jit</code> || bytecode interpreter ("cold path") and [[Cranelift]]-backed JIT ("warm path", ≥50 calls)
+|-
+| <code>coreutils</code> || native reimplementations of common Unix utilities used by <code>/&gt;</code>
+|-
+| <code>shell</code> || REPL, interactive shell, tab-completion, prompt
+|-
+| <code>cli</code> || the <code>hl</code> binary itself ([[clap]]-based argument parsing)
+|}
+
+A separate documentation tool (<code>source-code/docs/</code>) is written in [[Go]] using a terminal-UI framework, surfaced via <code>hl docs</code>.
+
+== Example ==
+
+<syntaxhighlight lang="text">
+#!/usr/bin/env hl
+using <gen 2>
+
+# <main/colors>
+# <main/sys>
+
+> uname -r |> @kernel
+> nproc    |> @cores
+$( @cores * 2 ) -> @threads
+
+~> @COLOR_BOLD System Info:@COLOR_RESET
+~> Kernel:  @kernel
+~> Cores:   @cores
+~> Threads: @threads
+
+% i: int = 0
+?~ @i < 3
+    $( @i + 1 ) -> @i
+    ~> tick @i
+done
+</syntaxhighlight>
+
+== See also ==
+
+* [[Category:Shell]] / shell-derived languages
+* [[Cranelift]]
+
+== External resources ==
+
+* HackerLang source repository: [https://github.com/HackerOS-Linux-System/Hacker-Lang.git github.com/HackerOS-Linux-System/Hacker-Lang]
+* HackerOS organization: [https://github.com/HackerOS-Linux-System github.com/HackerOS-Linux-System]
+* bit package index: [https://github.com/bit-io/repository github.com/bit-io/repository]
+* bit.io project: [https://github.com/bit-io github.com/bit-io]
+
+[[Category:Languages]]
+[[Category:2026]]
+[[Category:Line-oriented]]
