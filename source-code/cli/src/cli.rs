@@ -127,6 +127,55 @@ pub enum Commands {
         #[command(subcommand)]
         action: Option<EnvAction>,
     },
+
+    /// Buduj / sprawdzaj / weryfikuj archiwa `.hlib` (HackerOS Lib) —
+    /// natywny format bibliotek Hacker Lang, czytelny też dla H# i
+    /// HackerScript. Zobacz /HLIB_FORMAT.md w katalogu głównym repo.
+    /// (Nazwa `hlib`, nie `lib` — `hl lib` to już istniejący opis
+    /// systemu pakietów `bit`.)
+    Hlib {
+        #[command(subcommand)]
+        action: HlibAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HlibAction {
+    /// Zbuduj `.hlib` z pliku `.hl`: pakuje AST (bezpośrednio
+    /// interpretowalne przez `hl`), opcjonalny bytecode `.bc`, oraz
+    /// nagłówek eksportów (lista `FuncDef`/`ArenaFuncDef`).
+    Build {
+        file: PathBuf,
+        #[arg(short, long)]
+        output: Option<String>,
+        #[arg(long, default_value = "0.1.0")]
+        lib_version: String,
+        /// Dołącz też skompilowany bytecode (.bc) jako dodatkowy artefakt
+        #[arg(long)]
+        with_bytecode: bool,
+        #[arg(long)]
+        sign: Option<PathBuf>,
+    },
+    /// Wypisz manifest i listę wpisów archiwum `.hlib`.
+    Inspect { file: PathBuf },
+    /// Zweryfikuj sumy SHA-256 i (opcjonalnie) podpis Ed25519.
+    Verify {
+        file: PathBuf,
+        #[arg(long)]
+        pubkey: Option<String>,
+    },
+    /// Wygeneruj nową parę kluczy Ed25519 do podpisywania `.hlib`.
+    Keygen {
+        #[arg(short, long, default_value = "hlib_signing.key")]
+        out: PathBuf,
+    },
+    /// Rozpakuj `.hlib` i wygeneruj gotowy do `<< ` (file-import) plik
+    /// `.hl` udostępniający jego funkcje.
+    Bind {
+        file: PathBuf,
+        #[arg(short, long, default_value = "hlibs")]
+        into: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
