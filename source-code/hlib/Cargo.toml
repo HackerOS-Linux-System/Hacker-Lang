@@ -1,0 +1,29 @@
+[package]
+name = "hl-hlib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Hacker Lang's native reader/writer for the HackerOS .hlib library archive format. Vendored locally — not published to crates.io, and independent from H#'s and HackerScript's own .hlib modules (see src/lib.rs for why each toolchain keeps its own copy)."
+publish = false
+
+[lib]
+name = "hl_hlib"
+path = "src/lib.rs"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+sha2       = "0.10"
+tar        = "0.4"
+zstd       = "0.13"
+ed25519-dalek = { version = "=2.0.0", default-features = false, features = ["rand_core", "std"] }
+rand       = "0.8"
+zeroize    = "=1.7.0"
+base64ct   = "=1.6.0"
+jobserver  = "=0.1.32"
+cc         = "=1.0.100"
+hex        = "0.4"
+
+[dev-dependencies]
+tempfile = "=3.10.1"
