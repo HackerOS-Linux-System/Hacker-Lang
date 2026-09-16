@@ -4,6 +4,7 @@ mod run;
 mod compile;
 mod scripts;
 mod info;
+mod hlib_cmd;
 
 use anyhow::Result;
 use colored::Colorize;
@@ -229,6 +230,10 @@ fn main() -> Result<()> {
             println!("  Biblioteki main są plikami .hl w:");
             println!("    {}", HL_MAIN_LIBS_DIR.bright_white());
             println!();
+        }
+
+        Some(Commands::Hlib { action }) => {
+            hlib_cmd::run(action);
         }
 
         None => {
