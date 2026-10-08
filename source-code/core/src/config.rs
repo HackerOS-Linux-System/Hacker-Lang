@@ -22,12 +22,21 @@ pub fn envs_base_dir() -> PathBuf {
         .join("envs")
 }
 
-/// Katalog libs globalny
+/// Katalog libs globalny — TEN SAM co w `bit` (bit.io): `$BIT_HOME`, domyślnie
+/// `~/.hackeros/libs` (NIE `~/.hackeros/hacker-lang/libs` — ten odrębny katalog
+/// istniał tylko dla usunietego, wlasnego `source-code/bit.hl`; patrz
+/// `crate::libs::bit_base_dir`, ktora uzywa tej samej konwencji). Biblioteki, ktore
+/// `bit install`/`bit add` zainstalowal dla projektu w Hacker Lang, sa wiec od razu
+/// widoczne tutaj, bez zadnego recznego kroku.
 pub fn global_libs_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("BIT_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".hackeros")
-        .join("hacker-lang")
         .join("libs")
 }
 
@@ -101,15 +110,22 @@ impl HlConfig {
         }
     }
 
-    /// bit.lock (env lub globalny)
+    /// bit.lock (env lub globalny). Fallback: TEN SAM plik co `bit` sam czyta/pisze
+    /// (`$BIT_DIR/bit.lock`, domyślnie `~/.hackeros/bit/bit.lock` — patrz
+    /// bit-main/src/lock.h#::global_lock_path / util.h#::bit_dir), nie odrebny
+    /// `~/.hackeros/hacker-lang/meta/bit.lock` sprzed usuniecia `source-code/bit.hl`.
     pub fn effective_lock_path(&self) -> PathBuf {
         if let Some(env_path) = self.active_env_path() {
-            env_path.join("bit.lock")
-        } else {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".hackeros/hacker-lang/meta/bit.lock")
+            return env_path.join("bit.lock");
         }
+        if let Ok(dir) = std::env::var("BIT_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir).join("bit.lock");
+            }
+        }
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".hackeros/bit/bit.lock")
     }
 
     pub fn python_cmd(&self) -> &str { self.get("extern", "python").unwrap_or("python3") }
