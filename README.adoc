@@ -437,27 +437,35 @@ using <gen 2>
 
 === Repozytorium pakietów
 
-Lista pakietów: https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json
+Hacker Lang nie ma już własnej, odrębnej listy pakietów (dawny `source-code/bit.hl` —
+1:1 port `bit.py`, z własnym indeksem pod `bit-io/repository` — został usunięty).
+Biblioteki instaluje i rozwiązuje ten sam, wspólny `bit` (bit.io, https://github.com/HackerOS-Linux-System/bit),
+który obsługuje też H# i HackerScript — patrz "`bit` i bit.io" niżej.
 
-Format `repo-list.json`:
+Indeks: https://github.com/HackerOS-Linux-System/bit/blob/main/index/repository.json
+(nadpisywalny przez `BIT_INDEX_URL` / lokalnie przez `BIT_INDEX_FILE`).
+
+Format `index/repository.json` — jedna tablica `libraries`, każdy wpis płaski:
 
 [source,json]
 ----
 {
-  "hashlib": {
-    "type": "git",
-    "family": "github",
-    "url": "HackerOS-Linux-System/hashlib-bit.git",
-    "description": "Kryptografia: sha256, md5, blake3"
-  },
-  "obsidian": {
-    "type": "git",
-    "family": "github",
-    "url": "Bytes-Repository/obsidian-lib.git",
-    "description": "GUI dialogi dla HL"
-  }
+  "libraries": [
+    {
+      "name": "hashlib",
+      "target": "https://github.com/HackerOS-Linux-System/hashlib-bit",
+      "rev": "",
+      "dir": "",
+      "lang": "hl",
+      "description": "Kryptografia: sha256, md5, blake3"
+    }
+  ]
 }
 ----
+
+Pole `lang` (`h#` / `hl` / `hs` / puste = dowolny język) decyduje, dla kogo wpis jest
+widoczny, gdy kilka bibliotek nosi tę samą nazwę w różnych językach — `bit` zawsze
+woli wpis dla języka bieżącego projektu.
 
 Typy pakietów: `git` (github/gitlab), `tar` (archiwum), `link` (binarka)
 
@@ -705,4 +713,5 @@ Hacker Lang jest częścią projektu HackerOS.
 * Repozytorium: https://github.com/HackerOS-Linux-System/Hacker-Lang
 * HackerOS: https://github.com/HackerOS-Linux-System
 
-Library index for Hacker Lang is bit.io: https://github.com/bit-io
+Library index for Hacker Lang is the shared `bit` (bit.io) index, the same one H# and
+HackerScript use: https://github.com/HackerOS-Linux-System/bit
