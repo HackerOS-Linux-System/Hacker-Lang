@@ -5,12 +5,24 @@ use crate::env::{Env, Value};
 
 pub const MAIN_LIBS_DIR: &str = "/usr/lib/HackerOS/Hacker-Lang/main-libs";
 
-// Nowa ścieżka bit libs: ~/.hackeros/hacker-lang/libs/<name>/current/
-// (zamiast starego /usr/lib/HackerOS/Hacker-Lang/bit/<name>.so)
+// Ścieżka bit libs: TA SAMA co w `bit` (bit.io, bit-main/src/util.h#::libs_dir) —
+// `$BIT_HOME`, domyślnie `~/.hackeros/libs/<name>/current/` — NIE
+// `~/.hackeros/hacker-lang/libs/` (poprzedni, odrębny katalog tylko dla
+// Hacker Lang, z czasów własnego, usunietego `source-code/bit.hl`). `bit`
+// instaluje jedna biblioteke do JEDNEGO wspolnego miejsca niezaleznie od
+// jezyka projektu (H#, Hacker Lang czy HackerScript) - uzycie tej samej
+// sciezki tutaj jest JEDYNYM sposobem, zeby `# <bit/nazwa>` w kodzie .hl
+// widzialo biblioteke, ktora `bit install`/`bit add` wlasnie zainstalowal,
+// bez zadnego recznego kroku ani kopiowania.
 pub fn bit_base_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("BIT_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
     dirs::home_dir()
     .unwrap_or_else(|| PathBuf::from("/tmp"))
-    .join(".hackeros/hacker-lang/libs")
+    .join(".hackeros/libs")
 }
 
 pub fn bit_current_dir(name: &str) -> PathBuf {
@@ -123,10 +135,14 @@ fn load_main_lib(lib: &str, detail: Option<&str>, env: &mut Env) -> Result<()> {
     }
 }
 
-// ── Bit libs — ~/.hackeros/hacker-lang/libs/<name>/current/ ──────────────────
+// ── Bit libs — $BIT_HOME/<name>/current/ (domyslnie ~/.hackeros/libs/<name>/current/) ──
 //
-// Nowa struktura (zamiast /usr/lib/HackerOS/Hacker-Lang/bit/):
-//   ~/.hackeros/hacker-lang/libs/<name>/current/  ← symlink do <name>/<commit>/
+// TA SAMA struktura i TEN SAM katalog co `bit` (bit.io) sam uzywa dla kazdego
+// jezyka (H#, Hacker Lang, HackerScript) - patrz `bit_base_dir` wyzej. Dawniej
+// (przed usunieciem wlasnego `source-code/bit.hl`) byl to odrebny katalog,
+// `~/.hackeros/hacker-lang/libs/` - teraz Hacker Lang czyta z TEGO SAMEGO
+// miejsca, do ktorego instaluje prawdziwy `bit`:
+//   $BIT_HOME/<name>/current/  ← symlink do <name>/<commit>/
 //
 // Szuka w kolejności:
 //   1. current/lib.hl     (biblioteka HL)
@@ -347,9 +363,9 @@ pub fn cmd_lib_list() {
     }
     println!();
     println!("{}", "=== Biblioteki bit ===".bright_magenta().bold());
-    println!("  Instalacja: {}", "bit install <nazwa>".bright_cyan());
-    println!("  Lokalizacja: {}", "~/.hackeros/hacker-lang/libs/<name>/current/".bright_white());
-    println!("  Lista:      {}", "https://github.com/bit-io/repository/blob/main/bit-repo/repo-list.json".bright_black());
+    println!("  Instalacja: {}", "bit install <nazwa>   (lub: bit add <nazwa>)".bright_cyan());
+    println!("  Lokalizacja: {}", "$BIT_HOME/<name>/current/  (domyslnie ~/.hackeros/libs/<name>/current/)".bright_white());
+    println!("  Indeks:     {}", "https://github.com/HackerOS-Linux-System/bit  (index/repository.json, $BIT_INDEX_URL)".bright_black());
 }
 
 pub fn cmd_lib_install(repo: &str) {
