@@ -1,16 +1,4 @@
 #!/usr/bin/hl
-/// hlh — Hacker Lang Helper (gen 2)
-/// Narzędzie do generowania dokumentacji ze skryptów .hl oraz "tłumaczenia"
-/// (objaśniania) terse-składni Hacker Lang na czytelny, komentowany opis —
-/// linia po linii — dla osób uczących się języka lub przeglądających cudzy kod.
-///
-/// Użycie:
-///   hlh doc       <plik.hl>              — wygeneruj dokumentację Markdown
-///   hlh doc       <plik.hl> -o <out.md>  — jw., zapisz do pliku
-///   hlh translate <plik.hl>              — "przetłumacz" każdą linię kodu
-///   hlh translate <plik.hl> -o <out.txt> — jw., zapisz do pliku
-///   hlh help                             — ta pomoc
-
 using <gen 2>
 
 // bash
@@ -34,7 +22,7 @@ using <gen 2>
     ~>   hlh help                             — ta pomoc
     ::nl
     ::bold Przykład:
-    ~>   hlh doc source-code/bit.hl -o bit.md
+    ~>   hlh doc source-code/hlh.hl -o hlh.md
     ~>   hlh translate tests/performance.hl
 done
 
