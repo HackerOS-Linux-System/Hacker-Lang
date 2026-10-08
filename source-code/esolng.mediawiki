@@ -293,82 +293,77 @@ HackerLang gen&nbsp;2 is optionally typed at the variable-declaration site only 
 
 == The `bit` package manager and bit.io ==
 
-'''bit''' is HackerLang's package manager. Notably, its reference implementation (<code>source-code/bit.hl</code> in the compiler repository) is itself written '''in HackerLang''' — described in its own header comment as a "1:1 port" of an earlier Python implementation (<code>bit.py</code>) — making it a practical, non-trivial example HackerLang program in addition to being a system tool.
+'''bit''' is HackerLang's package manager — but, as of this round, no longer HackerLang's ''own'' one. HackerLang used to ship a self-contained reference implementation (<code>source-code/bit.hl</code>, a "1:1 port" of an earlier Python script, <code>bit.py</code>, talking to its own, separate index at <code>bit-io/repository</code>) that doubled as a non-trivial example HackerLang program. That file has been removed: HackerLang now depends on the ''same'' unified <code>bit</code> binary (written in H#) that H# and HackerScript already use, resolved against the same shared index, installed into the same shared directory. A HackerScript project went through the same consolidation earlier with its own built-in tool, <code>virus</code> (see HackerScript's own documentation) — HackerLang's <code>bit.hl</code> was the last holdout of a per-language package manager in this family, and is now gone for the same reason.
 
 === Layout on disk ===
 
 {| class="wikitable"
 ! Path !! Purpose
 |-
-| <code>~/.hackeros/hacker-lang/libs/</code> || installed packages, one directory per package, laid out as <code>libs/&lt;name&gt;/&lt;commit&gt;/</code> with a <code>current</code> symlink pointing at the active commit
+| <code>$BIT_HOME</code> (default <code>~/.hackeros/libs/</code>) || installed packages, '''shared across H#, HackerLang and HackerScript''' — one directory per package, laid out as <code>libs/&lt;name&gt;/&lt;commit&gt;/</code> with a <code>current</code> symlink pointing at the active commit
 |-
-| <code>~/.hackeros/hacker-lang/cache/</code> || compiled <code>.bc</code> cache '''and''' the downloaded package index (<code>repo-list.json</code>)
+| <code>~/.hackeros/hacker-lang/cache/</code> || HackerLang's own compiled <code>.bc</code> bytecode cache (unrelated to package installation — each language keeps its own compiler cache)
 |-
-| <code>~/.hackeros/hacker-lang/meta/</code> || <code>bit.lock</code>, a JSON lockfile (managed with <code>jq</code>) recording installed package name → {version, commit, installed_at}
+| <code>$BIT_DIR/bit.lock</code> (default <code>~/.hackeros/bit/bit.lock</code>) || the lockfile `bit` itself reads and writes, recording each installed library's version/commit/checksum
 |}
 
 === Repository format ===
 
 The master package index is fetched from
-<code>https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json</code>
-(source browsable at [https://github.com/bit-io/repository bit-io/repository]), a flat JSON object:
+<code>https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json</code>
+(overridable with the <code>BIT_INDEX_URL</code> environment variable, or read from a local file with <code>BIT_INDEX_FILE</code>), a single array under <code>"libraries"</code>:
 
 <syntaxhighlight lang="json">
 {
-  "hashlib": {
-    "type": "git",
-    "family": "github",
-    "url": "HackerOS-Linux-System/hashlib-bit.git",
-    "description": "Cryptography: sha256, md5, blake3"
-  },
-  "obsidian": {
-    "type": "git",
-    "family": "github",
-    "url": "Bytes-Repository/obsidian-lib.git",
-    "description": "GUI dialogs for HL"
-  }
+  "libraries": [
+    {
+      "name": "hashlib",
+      "target": "https://github.com/HackerOS-Linux-System/hashlib-bit",
+      "rev": "",
+      "dir": "",
+      "lang": "hl",
+      "description": "Cryptography: sha256, md5, blake3"
+    }
+  ]
 }
 </syntaxhighlight>
 
-Three package <code>type</code>s are supported: <code>git</code> (clone from GitHub/GitLab, pinned by short commit hash — this is the path implemented in <code>bit.hl</code>: a shallow <code>git clone --depth=1</code> into a versioned directory, hashed with <code>sha256sum</code>, then symlinked as <code>current</code>), <code>tar</code> (archive) and <code>link</code> (prebuilt binary).
+<code>target</code> is the git URL (shallow-cloned, pinned by <code>rev</code> — a tag/branch/commit, or the newest commit when empty — into a versioned directory, hashed with sha256 and symlinked as <code>current</code>, exactly like the old <code>bit.hl</code> used to do it); <code>dir</code> optionally names a sub-directory of that repository to use as the library root; <code>lang</code> (<code>h#</code> / <code>hl</code> / <code>hs</code>, or empty for "any language") lets several entries share one name across languages — <code>bit</code> always prefers the entry matching the current project's language.
 
 === Commands ===
 
 <syntaxhighlight lang="text">
-bit                    # auto-detect run.hl / build.hl / a source-code/ tree, then build+run
-bit install <name>...
+bit                     # read Bit.hk -> install dependencies -> [default-build] -> optionally run
+bit init <name> --lang hl       # new HackerLang project (Bit.hk + source-code/main.hl)
+bit build / run / check / test
+bit install <name>...            bit add <name|git-url|kind:name> [version]
 bit remove  <name>...
-bit upgrade [name]
-bit verify  [name]
-bit list
-bit installed
-bit search  <query>
-bit search  all
-bit update             # refresh repo-list.json
-bit info    <name>
-bit clean
-bit run                # find entry point + install bit.hk deps + run
-bit workspace          # show project's bit.hk and installed libs
-bit io                 # open the bit.io website in a browser
+bit upgrade [name]               bit outdated
+bit list / installed / search <query> / info <name> / update
+bit clean / cache
+bit doctor                       bit langs
+bit lsp / repair <code>          (H# and HackerScript only — see "gen" below for HackerLang)
 bit help
 </syntaxhighlight>
 
-A project directory can declare its own dependency list in a small INI-like file, <code>bit.hk</code>:
+A project directory declares itself with <code>Bit.hk</code> (the same <code>-></code>/<code>--></code> grammar as HackerScript's own <code>Virus.hk</code>):
 
 <syntaxhighlight lang="text">
-[project]
+[package]
 -> name    => MyProject
 -> version => 1.0.0
--> entry   => source-code/main.hl
--> type    => hl
+-> lang    => hl              ;; hl | hackerlang | "Hacker Lang" | "Hacker-Lang" (all equivalent)
+-> gen     => 2                ;; optional - the project's intended `using <gen N>` (1 or 2; default 2)
 
 [dependencies]
 -> tui
 </syntaxhighlight>
 
-<code>bit run</code> auto-detects a project's entry point by checking, in order, <code>source-code/main.hl</code>, <code>src/main.hl</code>, <code>main.hl</code>, then falls back to a Rust <code>Cargo.toml</code> (<code>source-code/Cargo.toml</code> or <code>Cargo.toml</code>) and invokes <code>cargo run --release</code> instead — i.e. the <code>bit</code>/HackerLang project layout deliberately mirrors, and can wrap, a Cargo workspace.
+<code>lang</code> accepts any of HackerLang's own spellings — <code>hl</code>, <code>hackerlang</code>, <code>Hacker Lang</code>, <code>Hacker-Lang</code> — case, spaces and dashes are all ignored when matching. The optional <code>gen</code> field records which HackerLang generation (see "Syntax generations" below) the project is meant to target; since <code>hl</code> itself only ever reads a file's ''own'' <code>using &lt;gen N&gt;</code> header (it has no project-wide override flag), <code>bit</code> uses this field to write the right header when scaffolding a new project (<code>bit init --lang hl --gen 1</code>) and to warn when a source file's declared gen doesn't match it.
 
-Individual libraries referenced from HackerLang source (<code>#&nbsp;&lt;bit/hashlib&gt;</code>) are resolved against this same index and installed on demand under <code>~/.hackeros/hacker-lang/libs/</code>.
+<code>bit build</code>/<code>bit run</code> auto-detect a HackerLang project's entry point (<code>source-code/main.hl</code>, <code>src/main.hl</code>, then <code>main.hl</code>), or fall back to a Rust <code>Cargo.toml</code> for HackerLang's own compiler sources.
+
+Individual libraries referenced from HackerLang source (<code>#&nbsp;&lt;bit/hashlib&gt;</code>, with the legacy spelling <code>#&nbsp;&lt;virus/hashlib&gt;</code> normalized to the same thing) are resolved against this same shared index and installed on demand under <code>$BIT_HOME/&lt;name&gt;/current/</code> — the same directory <code>bit install</code>/<code>bit add</code> itself uses, so a library the project declared in <code>Bit.hk</code> is visible to <code>#&nbsp;&lt;bit/...&gt;</code> the moment <code>bit</code> has installed it, with no separate step.
 
 == Standard library ("main-libs") ==
 
