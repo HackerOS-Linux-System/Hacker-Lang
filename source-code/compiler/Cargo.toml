@@ -28,7 +28,3 @@ serde_json.workspace = true
 dirs                 = { workspace = true, optional = true }
 colored.workspace    = true
 bincode.workspace    = true
-# cranelift-* USUNIĘTE: sprawdzone (grep) jako niewykorzystywane nigdzie w
-# tym crate — martwe zależności. Poza tym, że to zbędny balast, cranelift-
-# native w szczególności nie ma sensu (i prawdopodobnie się nie skompiluje)
-# dla wasm32 — jednego z docelowych targetów tego crate (playground).
