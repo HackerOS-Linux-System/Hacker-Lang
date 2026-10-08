@@ -14,7 +14,9 @@ pub type InsnOff = u32;
 
 /// Pula stałych z O(1) deduplikacją przez HashMap.
 /// Poprzednia implementacja używała iter().position() = O(n) per insert → O(n²) ogółem.
-/// Dla bit.hl (836 linii, ~500 unikalnych stringów) powodowało 8s+ kompilacji.
+/// Dla dawnego bit.hl (836 linii, ~500 unikalnych stringów — plik od tego czasu
+/// usunięty, patrz "The `bit` package manager and bit.io" w esolng.mediawiki)
+/// powodowało to 8s+ kompilacji.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConstPool {
     pub strings:      Vec<String>,
