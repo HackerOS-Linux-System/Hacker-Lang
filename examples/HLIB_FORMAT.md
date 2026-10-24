@@ -93,6 +93,8 @@ Every language's compiler supports importing a `.hlib` directly (`use "hlib -> n
 
 Only non-generic function exports can be bound this way (`generic: true` exports need the `ast` path — there is no fixed-width call signature to generate for them). If neither path applies, the import fails with a clear error rather than silently doing nothing.
 
+**Source-agnostic form.** In Hacker Lang `# <mold>` (or `# <mold:1.2.0>`) needs no namespace: the interpreter looks for a `.hlib` first (`hlibs/` of the project and its parents, the `bit` library directory, `~/.hackeros/Hacker-Lang/hlibs`, `/usr/lib/HackerOS/Hacker-Lang/hlibs`) and falls back to an installed `bit` library of the same name. `# <hlib/mold>` selects the `.hlib` explicitly. A same-language archive has its `ast` artifact deserialized and executed directly, so its functions are registered as if written in the program.
+
 ## 7. ABI stability — read this before assuming a `.so` is portable across languages
 
 A compiled `.so`'s *symbol names* are consistent (plain, unmangled — H# and HackerScript both emit plain C-visible symbols for `pub`/exported functions), but each language's **calling convention for that symbol** is not automatically the same:
