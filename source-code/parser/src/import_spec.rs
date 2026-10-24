@@ -121,4 +121,18 @@ mod tests {
         let d = parse_import_line("<main/progress-bar>").unwrap();
         assert_eq!(d.spec, "main/progress-bar");
     }
+
+    #[test]
+    fn test_hlib_namespace() {
+        let d = parse_import_line("<hlib/mold>").unwrap();
+        assert_eq!(d.spec, "hlib/mold");
+    }
+
+    #[test]
+    fn test_bare_name() {
+        let d = parse_import_line("<mold>").unwrap();
+        assert_eq!(d.spec, "mold");
+        let d = parse_import_line("mold").unwrap();
+        assert_eq!(d.spec, "mold");
+    }
 }
