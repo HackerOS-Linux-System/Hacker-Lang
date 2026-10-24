@@ -34,6 +34,10 @@ pub enum ImportSource {
     Main    { lib: String, detail: Option<String>, version: Option<String> },
     Bit     { name: String, version: Option<String> },
     GitHub  { path: String, version: Option<String> },
+    /// `# <hlib/mold>` — jawnie archiwum `.hlib` (HackerOS Lib).
+    Hlib    { name: String, version: Option<String> },
+    /// `# <mold>` — bez przestrzeni nazw: najpierw `.hlib`, potem biblioteka bit.
+    Auto    { name: String, version: Option<String> },
 }
 
 pub fn parse_import_spec(raw: &str) -> Option<ImportSource> {
@@ -42,6 +46,14 @@ pub fn parse_import_spec(raw: &str) -> Option<ImportSource> {
         let after = &raw[pos + 1..];
         if !after.contains('/') { (&raw[..pos], Some(after.to_string())) } else { (raw, None) }
     } else { (raw, None) };
+
+    // `# <mold>` / `# <mold:1.2.0>` — sama nazwa, bez przestrzeni nazw.
+    if !body.contains('/') {
+        let name = body.trim();
+        let ok = !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        return if ok { Some(ImportSource::Auto { name: name.to_string(), version }) } else { None };
+    }
 
     let slash = body.find('/')?;
     let namespace = &body[..slash];
@@ -56,6 +68,7 @@ pub fn parse_import_spec(raw: &str) -> Option<ImportSource> {
         }
         "bit" | "virus" => Some(ImportSource::Bit { name: rest.to_string(), version }),
         "github" | "community" => Some(ImportSource::GitHub { path: rest.to_string(), version }),
+        "hlib" => Some(ImportSource::Hlib { name: rest.to_string(), version }),
         _ => None,
     }
 }
@@ -87,6 +100,8 @@ fn dispatch_import(src: ImportSource, env: &mut Env) -> Result<()> {
         ImportSource::Main { lib, detail, .. }  => load_main_lib(&lib, detail.as_deref(), env),
         ImportSource::Bit  { name, version }     => load_bit_lib(&name, version.as_deref(), env),
         ImportSource::GitHub { path, version }   => load_github_lib(&path, version.as_deref(), env),
+        ImportSource::Hlib { name, version }     => load_hlib(&name, version.as_deref(), env),
+        ImportSource::Auto { name, version }     => load_auto_lib(&name, version.as_deref(), env),
     }
 }
 
@@ -209,6 +224,163 @@ name, name, name
 Spróbuj: bit upgrade {}",
 name, current_dir, name, name, name
     );
+}
+
+// ── .hlib (HackerOS Lib) — `# <hlib/nazwa>` oraz `# <nazwa>` ──────────────────
+//
+// Format: patrz examples/HLIB_FORMAT.md. Rozwiązywanie (spec §6):
+//   1. archiwum ma artefakt `ast` w TYM samym języku (Hacker Lang) → Node-y
+//      są deserializowane i wykonywane tak, jakby były wpisane w programie
+//      (FuncDef/ArenaFuncDef rejestrują funkcje) — zadnego `extern`, zadnego
+//      recznego `hl hlib bind`;
+//   2. brak takiego `ast`, ale jest `.so` dla tego hosta → `.so` jest
+//      wypakowany do cache, a jego sciezka ustawiona w `HLIB_<NAZWA>_PATH`
+//      (wywolanie: blok `[so]` — patrz ostrzezenie o ABI w §7 specyfikacji).
+//
+// Katalogi wyszukiwania (spec §8): `hlibs/` projektu (od biezacego katalogu w
+// gore), katalog biblioteki zainstalowanej przez `bit`, cache uzytkownika
+// `~/.hackeros/Hacker-Lang/hlibs/` i systemowy
+// `/usr/lib/HackerOS/Hacker-Lang/hlibs/`.
+
+pub const HLIB_SYSTEM_DIR: &str = "/usr/lib/HackerOS/Hacker-Lang/hlibs";
+
+fn hlib_search_dirs(name: &str) -> Vec<PathBuf> {
+    let mut dirs_out: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        for anc in cwd.ancestors() {
+            dirs_out.push(anc.join("hlibs"));
+        }
+    }
+    let bit_dir = bit_current_dir(name);
+    dirs_out.push(bit_dir.join(".bit/out"));
+    dirs_out.push(bit_dir);
+    if let Some(home) = dirs::home_dir() {
+        dirs_out.push(home.join(".hackeros/Hacker-Lang/hlibs"));
+    }
+    dirs_out.push(PathBuf::from(HLIB_SYSTEM_DIR));
+    dirs_out
+}
+
+fn find_hlib_file(name: &str, version: Option<&str>) -> std::result::Result<PathBuf, Vec<PathBuf>> {
+    let filenames: Vec<String> = match version {
+        Some(v) => vec![format!("{}-{}.hlib", name, v), format!("{}.hlib", name)],
+        None    => vec![format!("{}.hlib", name)],
+    };
+    let mut tried = Vec::new();
+    for dir in hlib_search_dirs(name) {
+        for f in &filenames {
+            let p = dir.join(f);
+            if p.is_file() { return Ok(p); }
+            tried.push(p);
+        }
+    }
+    Err(tried)
+}
+
+fn hlib_not_found_msg(name: &str, tried: &[PathBuf]) -> String {
+    format!(
+        "Biblioteka hlib '{}' nie znaleziona. Sprawdzono:\n{}\n\n\
+         Zbuduj ja: hl hlib build <plik.hl> -o hlibs/{}.hlib\n\
+         albo umiesc gotowe archiwum w jednym z powyzszych katalogow.",
+        name,
+        tried.iter().map(|p| format!("  {}", p.display())).collect::<Vec<_>>().join("\n"),
+        name,
+    )
+}
+
+fn host_target_triple() -> String {
+    format!("{}-unknown-linux-gnu", std::env::consts::ARCH)
+}
+
+fn load_hlib(name: &str, version: Option<&str>, env: &mut Env) -> Result<()> {
+    let path = match find_hlib_file(name, version) {
+        Ok(p)      => p,
+        Err(tried) => bail!("{}", hlib_not_found_msg(name, &tried)),
+    };
+    load_hlib_from_path(name, &path, env)
+}
+
+fn load_hlib_from_path(name: &str, path: &Path, env: &mut Env) -> Result<()> {
+    use hl_hlib::{ArtifactKind, HlibArchive, Language};
+
+    let archive = HlibArchive::open(path)
+        .map_err(|e| anyhow::anyhow!("nie mozna otworzyc .hlib '{}' ({}): {}", name, path.display(), e))?;
+    archive.manifest.check_supported()
+        .map_err(|e| anyhow::anyhow!(".hlib '{}': {}", name, e))?;
+    archive.verify_checksums()
+        .map_err(|e| anyhow::anyhow!(".hlib '{}' nie przeszedl weryfikacji sum kontrolnych: {}", name, e))?;
+
+    let m = &archive.manifest;
+    let prefix = name.to_uppercase().replace('-', "_");
+
+    // 1. Ten sam jezyk: wstaw AST bezposrednio.
+    if m.language == Language::Hackerlang {
+        if let Some(a) = m.artifacts_of_kind(ArtifactKind::Ast).next() {
+            let bytes = archive.entry_bytes(&a.path).ok_or_else(|| anyhow::anyhow!(
+                ".hlib '{}': artefakt ast '{}' jest w manifescie, ale brak go w archiwum", name, a.path))?;
+            let nodes: Vec<hl_parser::ast::Node> = serde_json::from_slice(bytes)
+                .map_err(|e| anyhow::anyhow!(".hlib '{}': nie mozna sparsowac artefaktu ast: {}", name, e))?;
+            info!("Laduje hlib '{}' z {:?} ({} wezlow)", name, path, nodes.len());
+            crate::executor::exec_nodes(&nodes, env)?;
+            env.set_var(&format!("HLIB_{}_LOADED", prefix), Value::Bool(true));
+            env.set_var(&format!("HLIB_{}_PATH", prefix), Value::String(path.display().to_string()));
+            eprintln!("\x1b[33m[hl hlib]\x1b[0m Zaladowano hlib/{} v{}", name, m.version);
+            return Ok(());
+        }
+    }
+
+    // 2. Inny jezyk / brak ast: natywny .so dla tego hosta.
+    let target = host_target_triple();
+    if let Some(so) = m.shared_object_for(&target) {
+        let bytes = archive.entry_bytes(&so.path).ok_or_else(|| anyhow::anyhow!(
+            ".hlib '{}': .so '{}' jest w manifescie, ale brak go w archiwum", name, so.path))?;
+        let cache = hl_cache_dir().join("hlib").join(format!("{}-{}", name, m.version));
+        std::fs::create_dir_all(&cache)?;
+        let file_name = Path::new(&so.path).file_name()
+            .map(|f| f.to_os_string())
+            .unwrap_or_else(|| format!("{}.so", name).into());
+        let out = cache.join(file_name);
+        std::fs::write(&out, bytes)?;
+        env.set_var(&format!("HLIB_{}_LOADED", prefix), Value::Bool(true));
+        env.set_var(&format!("HLIB_{}_PATH", prefix), Value::String(out.display().to_string()));
+        eprintln!("\x1b[33m[hl hlib]\x1b[0m Zaladowano hlib/{} v{} (.so: {})", name, m.version, out.display());
+        if m.language != Language::Hackerlang {
+            eprintln!(
+                "\x1b[33m[hl hlib]\x1b[0m uwaga: '{}' zbudowano w {} — Hacker Lang woła .so przez \
+                 hl_extern_call (ABI tekstowe), nie przez typowane symbole; patrz HLIB_FORMAT.md §7.",
+                name, m.language.as_str()
+            );
+        }
+        return Ok(());
+    }
+
+    bail!(
+        ".hlib '{}' nie ma uzywalnego artefaktu `ast` (jezyk producenta: {}) ani .so dla {}.",
+        name, m.language.as_str(), target
+    )
+}
+
+/// `# <nazwa>`: najpierw `.hlib`, potem biblioteka bit. Zrodlo, ktore ISTNIEJE,
+/// wygrywa — jesli sie nie zaladuje, zwracany jest jego prawdziwy blad (nie
+/// jest maskowany fallbackiem).
+fn load_auto_lib(name: &str, version: Option<&str>, env: &mut Env) -> Result<()> {
+    match find_hlib_file(name, version) {
+        Ok(p) => load_hlib_from_path(name, &p, env),
+        Err(tried) => {
+            if bit_current_dir(name).exists() {
+                return load_bit_lib(name, version, env);
+            }
+            bail!(
+                "Nie mozna rozwiazac `# <{}>`: brak .hlib i brak zainstalowanej biblioteki bit.\n\n\
+                 jako hlib:\n{}\n\njako bit: {} (nie istnieje)\n\n\
+                 Zainstaluj: bit install {}",
+                name,
+                tried.iter().map(|p| format!("  {}", p.display())).collect::<Vec<_>>().join("\n"),
+                bit_current_dir(name).display(),
+                name
+            )
+        }
+    }
 }
 
 // ── GitHub libs ───────────────────────────────────────────────────────────────
@@ -397,5 +569,81 @@ pub fn cmd_clean_cache() {
         println!("{} Cache wyczyszczony.", "✓".green());
     } else {
         println!("{}", "Cache jest pusty.".bright_black());
+    }
+}
+
+#[cfg(test)]
+mod import_source_tests {
+    use super::*;
+
+    #[test]
+    fn hlib_namespace() {
+        assert_eq!(
+            parse_import_spec("hlib/mold"),
+            Some(ImportSource::Hlib { name: "mold".into(), version: None })
+        );
+        assert_eq!(
+            parse_import_spec("hlib/mold:1.2.0"),
+            Some(ImportSource::Hlib { name: "mold".into(), version: Some("1.2.0".into()) })
+        );
+    }
+
+    #[test]
+    fn bare_name_is_auto() {
+        assert_eq!(
+            parse_import_spec("mold"),
+            Some(ImportSource::Auto { name: "mold".into(), version: None })
+        );
+        assert_eq!(
+            parse_import_spec("mold:2.0"),
+            Some(ImportSource::Auto { name: "mold".into(), version: Some("2.0".into()) })
+        );
+        // tekst z spacja to nie nazwa biblioteki
+        assert_eq!(parse_import_spec("jakis komentarz"), None);
+    }
+
+    #[test]
+    fn existing_namespaces_unchanged() {
+        assert!(matches!(parse_import_spec("bit/hashlib"), Some(ImportSource::Bit { .. })));
+        assert!(matches!(parse_import_spec("main/net"), Some(ImportSource::Main { .. })));
+        assert!(matches!(parse_import_spec("github/u/r"), Some(ImportSource::GitHub { .. })));
+    }
+
+    #[test]
+    fn missing_hlib_reports_search_paths() {
+        let mut env = Env::new();
+        let err = load_hlib("definitely-not-there-xyz", None, &mut env).unwrap_err().to_string();
+        assert!(err.contains("definitely-not-there-xyz.hlib"), "{err}");
+        assert!(err.contains("hlibs"), "{err}");
+    }
+
+    #[test]
+    fn auto_missing_mentions_both_sources() {
+        let mut env = Env::new();
+        let err = load_auto_lib("definitely-not-there-xyz", None, &mut env).unwrap_err().to_string();
+        assert!(err.contains("bit install"), "{err}");
+        assert!(err.contains(".hlib") || err.contains("hlib"), "{err}");
+    }
+
+    #[test]
+    fn end_to_end_hlib_ast_splice() {
+        // Buduje prawdziwe .hlib (AST Hacker Lang) i laduje je przez
+        // `# <nazwa>` sciezka — bez recznego `hl hlib bind`.
+        let dir = std::env::temp_dir().join(format!("hl-hlib-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("e2elib.hlib");
+
+        let nodes = hl_parser::parse_source(":: e2e_fn <4k> def\n~> hello\ndone\n").unwrap();
+        let ast = serde_json::to_vec(&nodes).unwrap();
+        let mut b = hl_hlib::HlibBuilder::new("e2elib", "0.1.0", hl_hlib::Language::Hackerlang);
+        b.add_ast(&ast).unwrap();
+        b.finish(&out, None).unwrap();
+
+        let mut env = Env::new();
+        load_hlib_from_path("e2elib", &out, &mut env).unwrap();
+        assert!(matches!(env.get_var("HLIB_E2ELIB_LOADED"), Value::Bool(true)));
+        // funkcja z biblioteki jest zarejestrowana tak, jakby byla w programie
+        assert!(env.arena_funcs.contains_key("e2e_fn"), "funkcja z .hlib nie zostala zarejestrowana");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
