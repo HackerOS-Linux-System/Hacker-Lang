@@ -319,8 +319,13 @@ fn resolve_export_value(val: &ExportValue, env: &mut Env) -> String {
 pub fn exec_nodes(nodes: &[Node], env: &mut Env) -> Result<ExecResult> {
     let mut last = ExecResult::ok();
     for node in nodes {
+        // Blok `? ok` / `? err` NIE zmienia statusu: kolejne `? err` / `? ok`
+        // testuja status ostatniej KOMENDY przed blokiem (niezaleznie od tego,
+        // czy blok sie wykonal i jaki kod zwrocila jego ostatnia komenda).
+        let is_cond = matches!(node, Node::Conditional { .. });
+        let prev_exit = env.last_exit;
         let r = exec_node(node, env)?;
-        env.last_exit = r.exit_code;
+        env.last_exit = if is_cond { prev_exit } else { r.exit_code };
         last = r;
     }
     Ok(last)
