@@ -1,0 +1,74 @@
+using <gen 2>
+% FAILS = 0
+
+: check def
+    >> test "@GOT" = "@WANT" && echo ok || echo fail |> @_R
+    ? switch @_R
+    | ok
+        ::green PASS @NAME
+    | *
+        ::red FAIL @NAME - jest [@GOT], oczekiwano [@WANT]
+        $( @FAILS + 1 ) -> @FAILS
+    done
+done
+
+;; 1. komenda pada: ? ok pominiety, ? err MUSI sie wykonac
+% GOT = -
+> false
+? ok
+    % GOT = ok
+done
+? err
+    % GOT = err
+done
+% NAME = false: ? ok pominiety, potem ? err wykonany
+% WANT = err
+-- check
+
+;; 2. komenda ok: ? ok wykonany, ? err NIE
+% GOT = -
+> true
+? ok
+    % GOT = ok
+done
+? err
+    % GOT = err
+done
+% NAME = true: ? ok wykonany, ? err pominiety
+% WANT = ok
+-- check
+
+;; 3. komenda pada: ? err wykonany (jego ciało konczy sie sukcesem), ? ok NIE moze sie wykonac
+% GOT = -
+> false
+? err
+    % GOT = err
+done
+? ok
+    % GOT = ok
+done
+% NAME = false: po wykonanym ? err blok ? ok nie moze sie wykonac
+% WANT = err
+-- check
+
+;; 4. komenda ok: ? ok wykonany, ale jego ciało konczy sie porazka - ? err NIE moze sie wykonac
+% GOT = -
+> true
+? ok
+    % GOT = ok
+    > false
+done
+? err
+    % GOT = err
+done
+% NAME = true: porazka wewnatrz ? ok nie uruchamia kolejnego ? err
+% WANT = ok
+-- check
+
+? switch @FAILS
+| 0
+    ::green Wszystkie testy conditional_status przeszly
+| *
+    ::red Niepowodzen: @FAILS
+    > exit 1
+done
