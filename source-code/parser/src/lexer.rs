@@ -68,7 +68,7 @@ pub enum Token {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PipeCmdMode { Plain, Sudo, WithVars, Builtin }
+pub enum PipeCmdMode { Plain, Sudo, WithVars, WithVarsSudo, WithVarsIsolated, Builtin }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommentKind { Line, Doc, Block }
@@ -559,7 +559,7 @@ impl Lexer {
                     self.skip_n(3);
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
-                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVarsSudo, var_name: var });
                     } else { tokens.push(Token::CmdWithVarsSudo(line)); }
                 }
                 '^' if self.peek_at(1) == Some('>') => {
@@ -575,7 +575,7 @@ impl Lexer {
                     self.skip_n(3);
                     let line = self.read_cmd();
                     if let Some((cmd, var)) = Self::split_pipe_to_var(&line) {
-                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVars, var_name: var });
+                        tokens.push(Token::CmdPipeToVar { cmd, mode: PipeCmdMode::WithVarsIsolated, var_name: var });
                     } else { tokens.push(Token::CmdWithVarsIsolated(line)); }
                 }
                 '-' if self.peek_at(1) == Some('>') => { self.skip_n(2); tokens.push(Token::CmdIsolated(self.read_cmd())); }
