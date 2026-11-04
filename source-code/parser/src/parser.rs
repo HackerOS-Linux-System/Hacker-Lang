@@ -226,6 +226,8 @@ impl Parser {
                     PipeCmdMode::Plain    => CommandMode::Plain,
                     PipeCmdMode::Sudo     => CommandMode::Sudo,
                     PipeCmdMode::WithVars => CommandMode::WithVars,
+                    PipeCmdMode::WithVarsSudo     => CommandMode::WithVarsSudo,
+                    PipeCmdMode::WithVarsIsolated => CommandMode::WithVarsIsolated,
                     PipeCmdMode::Builtin  => unreachable!(),
                 };
                 Ok(Some(Node::PipeToVar { command: cmd, mode: cmd_mode, var_name }))
