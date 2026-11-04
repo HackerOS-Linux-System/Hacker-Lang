@@ -1,0 +1,37 @@
+using <gen 2>
+% FAILS = 0
+
+: check def
+    >> test "@GOT" = "0" && echo ok || echo fail |> @_R
+    ? switch @_R
+    | ok
+        ::green PASS @NAME (uid=@GOT)
+    | *
+        ::red FAIL @NAME - uid=[@GOT], oczekiwano 0 (sudo zgubione)
+        $( @FAILS + 1 ) -> @FAILS
+    done
+done
+
+^> id -u |> @GOT
+% NAME = sudo z jednym znakiem (^>) + przechwycenie
+-- check
+^>> id -u |> @GOT
+% NAME = sudo z interpolacja (^>>) + przechwycenie
+-- check
+>> id -u |> @GOT
+>> test "@GOT" != "0" && echo ok || echo fail |> @_N
+? switch @_N
+| ok
+    ::green PASS zwykle >> + przechwycenie nie uzywa sudo (uid=@GOT)
+| *
+    ::red FAIL >> nie powinno miec sudo
+    $( @FAILS + 1 ) -> @FAILS
+done
+
+? switch @FAILS
+| 0
+    ::green Wszystkie testy sudo_capture przeszly
+| *
+    ::red Niepowodzen: @FAILS
+    > exit 1
+done
