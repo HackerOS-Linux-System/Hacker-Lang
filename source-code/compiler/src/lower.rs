@@ -141,6 +141,9 @@ impl Lowerer {
                 self.emit(Instruction::ExecCapture { cmd: cmd_reg, mode, dst_ec, dst_out });
                 let name_idx = self.module.consts.add_str(var_name.as_str());
                 self.emit(Instruction::SetVar { name: name_idx, src: dst_out });
+                // status przechwyconej komendy (jak w interpreterze drzewiastym)
+                let le_idx = self.module.consts.add_str("_last_exit_code");
+                self.emit(Instruction::SetVar { name: le_idx, src: dst_ec });
             }
 
             Node::Conditional { condition, body } => {
@@ -163,6 +166,9 @@ impl Lowerer {
                 self.lower_nodes(body);
                 let after = self.current_offset();
                 self.patch_jump(jump_ph, after);
+                // Blok warunkowy nie zmienia statusu: przywroc _last_exit_code sprzed bloku,
+                // zeby kolejne `? err` / `? ok` testowaly status ostatniej komendy.
+                self.emit(Instruction::SetVar { name: le_idx, src: last_ec_reg });
             }
 
             Node::ForIn { var, iterable, body } => {
