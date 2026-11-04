@@ -1,61 +1,136 @@
-;;; main/hk-parser.hl — Parser plikow .hk (HackerOS Configuration Format)
-;;; Instalacja: plik w /usr/lib/HackerOS/Hacker-Lang/main-libs/hk-parser.hl
-;;; Uzycie: # <main/hk-parser>
-;;; Format .hk oparty o implementacje Rust (hk-parser crate)
-using <gen 1>
+using <gen 2>
 
 % HK_PARSER_LOADED  = true
-% HK_PARSER_VERSION = gen 1
+% HK_PARSER_VERSION = gen 2 (v2)
 
 ;; ── Format .hk ────────────────────────────────────────────────────────────────
-;; Struktura pliku .hk:
-;;
-;;   ! Komentarz
-;;
+;;   ! komentarz
 ;;   [sekcja]
-;;   -> klucz => wartosc
-;;   -> klucz => 42
-;;   -> klucz => true
-;;   -> klucz => [1, 2, "trzy"]
-;;   -> zagniezdzona
-;;   --> podklucz => wartosc
+;;   -> klucz => wartosc            (klucze i wartosci moga byc w "cudzyslowie")
+;;   -> "Klucz ze spacja" => v0.7
+;;   -> zagniezdzona                (naglowek mapy; --> podklucze sa pomijane)
+;;   -> tablica => [ ... ]          (takze wieloliniowa - jest pomijana poprawnie)
 ;;
-;; Interpolacja: ${sekcja.klucz}  lub  ${env:ZMIENNA}
+;; ── API (zmienne wejsciowe: _hk_file, _hk_section, _hk_key) ───────────────────
+;;   hk_get           -> _hk_result (wartosc), _hk_found (true/false)
+;;   hk_print         -> wypisuje wartosc klucza
+;;   hk_has_section   -> _hk_found
+;;   hk_has_key       -> _hk_found
+;;   hk_sections      -> wypisuje nazwy sekcji
+;;   hk_keys          -> wypisuje klucze sekcji
+;;   hk_load_section  -> HK_<sekcja>_<slug klucza> = wartosc dla CALEJ sekcji,
+;;                       HK_<sekcja>_KEYS (lista slugow), HK_<sekcja>_COUNT
+;;   hk_slug          -> _hk_key => _hk_slug  ("HackerOS Store" -> hackeros_store)
+;;   hk_validate      -> _hk_found = true/false (+ komunikat)
+;;   hk_is_valid      -> _hk_found = true/false (cicho)
 ;;
-;; Wersjonowanie: HK_PARSER_VERSION = gen 1
+;; UWAGA: kod wyjscia funkcji NIE jest wiarygodny (znana cecha ? ok / ? err w HL,
+;; pominiety blok zeruje kod wyjscia). Wynik czytaj ze zmiennej _hk_found:
+;;   ? switch @_hk_found
+;;   | true  ...
+;;   | *     ...
+;;   done
 
-;; Odczytaj wartosc z pliku .hk uzywajac hk-tool (jesli dostepny)
-;; lub przez grep/awk jako fallback
+;; Program awk (jedna linia, bez apostrofow i znaku @ - wstawiany w '...').
+;; Tryby (zmienna mode): get has_key has_section sections keys load validate
+% _hk_prog = function t(s){gsub(/^[ \t\r]+|[ \t\r]+$/,"",s);return s} function u(s){s=t(s);if(length(s)>=2&&substr(s,1,1)=="\""&&substr(s,length(s),1)=="\"")s=substr(s,2,length(s)-2);return s} function d(s,i,c,n,q){n=0;q=0;for(i=1;i<=length(s);i++){c=substr(s,i,1);if(c=="\"")q=!q;else if(!q){if(c=="[")n++;else if(c=="]")n--}}return n} function sl(s){s=tolower(s);gsub(/[^a-z0-9]+/,"_",s);gsub(/^_+|_+$/,"",s);return s} BEGIN{ins=0;dep=0;hs=0;fnd=0;seen=0;nk=0;bad=0} {l=$0;sub(/^[ \t]+/,"",l);sub(/\r$/,"",l);if(dep>0){dep+=d(l);next} if(l==""||substr(l,1,1)=="!")next;if(substr(l,1,1)=="["){c=index(l,"]");if(c==0){bad=NR;next} nm=t(substr(l,2,c-2));if(nm==""){bad=NR;next} seen=1;ins=(nm==sec);if(!(nm in sn)){sn[nm]=1;if(mode=="sections")print nm} if(ins)hs=1;next} if(!seen){bad=NR;next} if(substr(l,1,1)!="-"){bad=NR;next} if(l!~/^->/)next;r=t(substr(l,3));p=index(r,"=>");if(p==0)next;k=u(substr(r,1,p-1));v=t(substr(r,p+2));if(substr(v,1,1)=="["&&d(v)>0){dep=d(v);next} if(!ins)next;v=u(v);if(k==key){fnd=1;val=v} if(mode=="keys")print k;if(mode=="load"){ks=sl(k);if(ks!=""){gsub(/@/,"(at)",v);print "% HK_" sl(sec) "_" ks " = " v;lst=lst (lst==""?"":" ") ks;nk++}}} END{if(mode=="load"&&hs){print "% HK_" sl(sec) "_KEYS = " lst;print "% HK_" sl(sec) "_COUNT = " nk} if(mode=="validate"){if(bad){print "linia " bad;exit 1}exit 0} if(mode=="get"){if(fnd)print val;exit(fnd?0:1)} if(mode=="has_key")exit(fnd?0:1);if(mode=="has_section"||mode=="load"||mode=="keys")exit(hs?0:1)}
+
+: hk_slug def
+    >> printf '%s' '@_hk_key' | tr A-Z a-z | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//' |> @_hk_slug
+done
+
+;; ustawia _hk_found na podstawie kodu wyjscia awk w trybie _hk_mode
+: _hk_check def
+    >> awk -v mode="@_hk_mode" -v sec="@_hk_section" -v key="@_hk_key" '@_hk_prog' "@_hk_file" > /dev/null 2>&1 && echo true || echo false |> @_hk_found
+done
+
 : hk_get def
-    ;; Uzycie: % _hk_file = plik.hk, % _hk_section = sekcja, % _hk_key = klucz, -- hk_get
-    ::which hk-tool
-    ? ok
-        >> hk-tool get @_hk_file @_hk_section @_hk_key
-    done
-    ? err
-        ;; Fallback: grep
-        >> grep -A100 "\[@_hk_section\]" @_hk_file | grep "-> @_hk_key =>" | head -1 | sed 's/.*=> //'
-    done
-done
-
-;; Sprawdz czy sekcja istnieje
-: hk_has_section def
-    >> grep -q "\[@_hk_section\]" @_hk_file
-done
-
-;; Listuj sekcje
-: hk_sections def
-    >> grep -o '\[.*\]' @_hk_file | tr -d '[]'
-done
-
-;; Validacja pliku .hk (podstawowa)
-: hk_validate def
+    % _hk_result =
+    % _hk_found = false
     ::exists @_hk_file
     ? ok
-        ::green Plik .hk istnieje: @_hk_file
-        -- hk_sections
+        % _hk_mode = get
+        -- _hk_check
+        ? switch @_hk_found
+        | true
+            >> awk -v mode=get -v sec="@_hk_section" -v key="@_hk_key" '@_hk_prog' "@_hk_file" |> @_hk_result
+        | *
+            % _hk_result =
+        done
     done
-    ? err
-        ::red Plik .hk nie istnieje: @_hk_file
+done
+
+: hk_print def
+    -- hk_get
+    ~> @_hk_result
+done
+
+: hk_has_section def
+    % _hk_found = false
+    % _hk_mode = has_section
+    ::exists @_hk_file
+    ? ok
+        -- _hk_check
+    done
+done
+
+: hk_has_key def
+    % _hk_found = false
+    % _hk_mode = has_key
+    ::exists @_hk_file
+    ? ok
+        -- _hk_check
+    done
+done
+
+: hk_sections def
+    >> awk -v mode=sections -v sec="" -v key="" '@_hk_prog' "@_hk_file"
+done
+
+: hk_keys def
+    >> awk -v mode=keys -v sec="@_hk_section" -v key="" '@_hk_prog' "@_hk_file"
+done
+
+: hk_load_section def
+    ;; Wczytuje cala sekcje do zmiennych HK_<sekcja>_<slug>
+    % _hk_found = false
+    % _hk_mode = load
+    ::exists @_hk_file
+    ? ok
+        -- _hk_check
+        ? switch @_hk_found
+        | true
+            >> mktemp --suffix=.hl /tmp/hk-load.XXXXXX |> @_hk_tmp
+            >> awk -v mode=load -v sec="@_hk_section" -v key="" '@_hk_prog' "@_hk_file" > @_hk_tmp
+            << @_hk_tmp
+            > rm -f @_hk_tmp
+        | *
+            % _hk_found = false
+        done
+    done
+done
+
+: hk_validate def
+    % _hk_found = false
+    % _hk_mode = validate
+    ::exists @_hk_file
+    ? ok
+        -- _hk_check
+        ? switch @_hk_found
+        | true
+            ::green Plik .hk poprawny: @_hk_file
+        | *
+            ::red Plik .hk niepoprawny: @_hk_file
+        done
+    done
+done
+
+: hk_is_valid def
+    ;; Cicha wersja hk_validate: tylko _hk_found (true/false), bez komunikatow
+    % _hk_found = false
+    % _hk_mode = validate
+    ::exists @_hk_file
+    ? ok
+        -- _hk_check
     done
 done
