@@ -1,0 +1,98 @@
+using <gen 2>
+# <main/hk-parser>
+
+% FAILS = 0
+% FIX = /tmp/hk-parser-fixture.hk
+>> printf '! komentarz\n[tools]\n-> "HackerOS Store" => v0.7\n-> hacker => v2.4.2\n-> H# => v0.9\n-> lista => [\n[1,2],\n"x"\n]\n-> mapa\n--> pod => ukryte\n-> po_mapie => 1\n\n[meta]\n-> name => "Moj Pakiet"\r\n-> hacker => inna_sekcja\n' > /tmp/hk-parser-fixture.hk
+
+: expect def
+    ;; porownuje _hk_result z EXPECTED
+    >> test "@_hk_result" = "@EXPECTED" && echo ok || echo fail |> @_E
+    ? switch @_E
+    | ok
+        ::green PASS @TNAME
+    | *
+        ::red FAIL @TNAME - oczekiwano [@EXPECTED], jest [@_hk_result]
+        $( @FAILS + 1 ) -> @FAILS
+    done
+done
+
+% _hk_file = @FIX
+% _hk_section = tools
+% _hk_key = hacker
+-- hk_get
+% TNAME = prosty klucz
+% EXPECTED = v2.4.2
+-- expect
+% _hk_key = HackerOS Store
+-- hk_get
+% TNAME = klucz w cudzyslowie ze spacja
+% EXPECTED = v0.7
+-- expect
+% _hk_key = H#
+-- hk_get
+% TNAME = klucz ze znakiem specjalnym
+% EXPECTED = v0.9
+-- expect
+% _hk_key = po_mapie
+-- hk_get
+% TNAME = klucz po mapie i tablicy wieloliniowej
+% EXPECTED = 1
+-- expect
+% _hk_key = pod
+-- hk_get
+% TNAME = podklucz mapy nie jest kluczem poziomu 1
+% EXPECTED =
+-- expect
+% _hk_section = meta
+% _hk_key = name
+-- hk_get
+% TNAME = wartosc w cudzyslowie + CRLF
+% EXPECTED = Moj Pakiet
+-- expect
+% _hk_key = hacker
+-- hk_get
+% TNAME = ten sam klucz w innej sekcji
+% EXPECTED = inna_sekcja
+-- expect
+% _hk_section = tools
+% _hk_key = brak
+-- hk_get
+% TNAME = brakujacy klucz
+% EXPECTED =
+-- expect
+>> test "@_hk_found" = "false" && echo ok || echo fail |> @_F
+? switch @_F
+| ok
+    ::green PASS found=false dla brakujacego klucza
+| *
+    ::red FAIL found powinno byc false
+    $( @FAILS + 1 ) -> @FAILS
+done
+-- hk_load_section
+>> test "@HK_tools_hackeros_store" = "v0.7" -a "@HK_tools_h" = "v0.9" -a "@HK_tools_COUNT" = "4" && echo ok || echo fail |> @_L
+? switch @_L
+| ok
+    ::green PASS hk_load_section (4 klucze skalarne, tablica i mapa pominiete)
+| *
+    ::red FAIL hk_load_section count=@HK_tools_COUNT store=@HK_tools_hackeros_store
+    $( @FAILS + 1 ) -> @FAILS
+done
+% _hk_file = /nonexistent.hk
+-- hk_is_valid
+>> test "@_hk_found" = "false" && echo ok || echo fail |> @_V
+? switch @_V
+| ok
+    ::green PASS nieistniejacy plik jest niepoprawny
+| *
+    ::red FAIL nieistniejacy plik
+    $( @FAILS + 1 ) -> @FAILS
+done
+> rm -f /tmp/hk-parser-fixture.hk
+? switch @FAILS
+| 0
+    ::green Wszystkie testy hk-parser przeszly
+| *
+    ::red Niepowodzen: @FAILS
+    > exit 1
+done
