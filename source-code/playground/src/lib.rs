@@ -56,7 +56,14 @@ pub fn run_hl(source: &str) -> RunResult {
     // prawdziwego pliku źródłowego — nazwa jest czysto kosmetyczna.
     let synthetic_path = Path::new("playground.hl");
 
-    let meta = match hl_parser::parse_source_with_meta(source) {
+    // Dyrektywy `gen` / `using <HackerOS ..>` / `take` → `using <gen N>` (jak w `hl run`).
+    let prepared = match hl_syntax::prepare(source).into_result() {
+        Ok(p) => p,
+        Err(e) => {
+            return RunResult { output: String::new(), error: format!("błąd parsowania: {}", e), exit_code: 1 }
+        }
+    };
+    let meta = match hl_parser::parse_source_with_meta(&prepared.source) {
         Ok(m) => m,
         Err(e) => {
             return RunResult {
@@ -66,6 +73,10 @@ pub fn run_hl(source: &str) -> RunResult {
             }
         }
     };
+
+    if let Err(e) = prepared.info.check_gen2_usage(&hl_parser::gen2_features_used(&meta.nodes)) {
+        return RunResult { output: String::new(), error: format!("błąd parsowania: {}", e), exit_code: 1 };
+    }
 
     let mut module = hl_compiler::lower_ast(&meta.nodes, synthetic_path, meta.gen.number());
     hl_compiler::optimize_module(&mut module);
