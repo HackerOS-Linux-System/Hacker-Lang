@@ -1,0 +1,17 @@
+#!/usr/bin/hl
+/// syntax_versions.hl — nagłówek pliku: gen / using / take
+/// Uruchom: hl run syntax_versions.hl
+///
+/// gen   <wersja>                 — wersja narzędzia hl (tylko znacznik)
+/// using <HackerOS Vwersja>       — wersja składni (V5.1 = najnowsza, V4.7 = gen 1)
+/// take  <HackerOS Vwersja/nazwa> — element składni pożyczony z innej wersji
+gen <1.1>
+using <HackerOS V5.1>
+take <HackerOS V4.1/goroutines>
+
+::hr 50
+~> Składnia:         @HL_SYNTAX
+~> Gen parsera:      @HL_SYNTAX_GEN
+~> Wersja hl:        @HL_TOOL_GEN
+~> Pożyczone (take): @HL_TAKE
+::hr 50
