@@ -1,0 +1,17 @@
+[package]
+name = "hl-syntax"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# Warstwa wersjonowania składni Hacker Lang.
+#
+# Celowo BEZ jakichkolwiek zależności (tylko std): crate jest używany zarówno
+# przez hl-core (interpreter), jak i hl-compiler (bytecode) i hl (CLI), a jego
+# zadaniem jest tylko przetłumaczenie nagłówka pliku .hl (`gen <..>`,
+# `using <..>`, `take <..>`) na to, co rozumie parser (`using <gen N>`).
+[lib]
+name = "hl_syntax"
+crate-type = ["rlib"]
+
+[dependencies]
