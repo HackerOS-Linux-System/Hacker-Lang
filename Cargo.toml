@@ -2,6 +2,7 @@
 members = [
     "source-code/core",
     "source-code/parser",
+    "source-code/syntax",
     "source-code/coreutils",
     "source-code/shell",
     "source-code/cli",
