@@ -234,6 +234,12 @@ impl Parser {
             }
 
             Token::HackerOsApi { tool, args } => {
+                if let Some(reason) = HackerOsTool::removed_reason(&tool) {
+                    return Err(ParseError::UnexpectedToken(
+                        self.pos,
+                        format!("`|| {}` — {}", tool, reason),
+                    ));
+                }
                 self.advance();
                 Ok(Some(Node::HackerOsApi {
                     tool: HackerOsTool::from_str(&tool),
