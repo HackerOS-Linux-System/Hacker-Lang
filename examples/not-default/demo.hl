@@ -1,0 +1,6 @@
+#!/usr/bin/hl
+/// demo.hl — użycie profilu składni spoza oficjalnych wersji
+/// Uruchom: HL_SYNTAX_PATH=examples/not-default hl run examples/not-default/demo.hl
+using <not-default/demo>
+
+~> Składnia: @HL_SYNTAX (parser gen @HL_SYNTAX_GEN)
