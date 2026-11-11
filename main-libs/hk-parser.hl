@@ -18,11 +18,15 @@ using <gen 2>
 ;;   hk_has_key       -> _hk_found
 ;;   hk_sections      -> wypisuje nazwy sekcji
 ;;   hk_keys          -> wypisuje klucze sekcji
+;;   hk_list          -> klucze sekcji (po jednym w linii) do _hk_result
 ;;   hk_load_section  -> HK_<sekcja>_<slug klucza> = wartosc dla CALEJ sekcji,
 ;;                       HK_<sekcja>_KEYS (lista slugow), HK_<sekcja>_COUNT
 ;;   hk_slug          -> _hk_key => _hk_slug  ("HackerOS Store" -> hackeros_store)
 ;;   hk_validate      -> _hk_found = true/false (+ komunikat)
 ;;   hk_is_valid      -> _hk_found = true/false (cicho)
+;;   hk_set           -> ustawia _hk_key = _hk_value w _hk_section (tworzy sekcje/klucz)
+;;   hk_unset         -> usuwa _hk_key z _hk_section
+;;                       (zapis: plik jest przepisywany przez plik tymczasowy; _hk_found=true gdy sie udalo)
 ;;
 ;; UWAGA: kod wyjscia funkcji NIE jest wiarygodny (znana cecha ? ok / ? err w HL,
 ;; pominiety blok zeruje kod wyjscia). Wynik czytaj ze zmiennej _hk_found:
@@ -91,6 +95,14 @@ done
     >> awk -v mode=keys -v sec="@_hk_section" -v key="" '@_hk_prog' "@_hk_file"
 done
 
+: hk_list def
+    % _hk_result =
+    ::exists @_hk_file
+    ? ok
+        >> awk -v mode=keys -v sec="@_hk_section" -v key="" '@_hk_prog' "@_hk_file" |> @_hk_result
+    done
+done
+
 : hk_load_section def
     ;; Wczytuje cala sekcje do zmiennych HK_<sekcja>_<slug>
     % _hk_found = false
@@ -133,4 +145,27 @@ done
     ? ok
         -- _hk_check
     done
+done
+
+;; ── Zapis ─────────────────────────────────────────────────────────────────────
+;; Program awk zapisu (tryby: set / unset). Klucz zapisywany zawsze w cudzyslowie.
+% _hk_wprog = function t(s){gsub(/^[ \t\r]+|[ \t\r]+$/,"",s);return s} function u(s){s=t(s);if(length(s)>=2&&substr(s,1,1)=="\""&&substr(s,length(s),1)=="\"")s=substr(s,2,length(s)-2);return s} function d(s,i,c,n,q){n=0;q=0;for(i=1;i<=length(s);i++){c=substr(s,i,1);if(c=="\"")q=!q;else if(!q){if(c=="[")n++;else if(c=="]")n--}}return n} function fl(){if(ins&&!done&&mode=="set"){print "-> \"" key "\" => " val;done=1}} BEGIN{ins=0;done=0;has=0;dep=0} {raw=$0;l=raw;sub(/^[ \t]+/,"",l);sub(/\r$/,"",l);if(dep>0){dep+=d(l);print raw;next} if(substr(l,1,1)=="["&&index(l,"]")>0){fl();c=index(l,"]");nm=t(substr(l,2,c-2));ins=(nm==sec);if(ins)has=1;print raw;next} if(ins&&l~/^->/){r=t(substr(l,3));p=index(r,"=>");if(p>0){k=u(substr(r,1,p-1));v=t(substr(r,p+2));if(k==key){if(mode=="set"&&!done){print "-> \"" key "\" => " val;done=1} next} if(substr(v,1,1)=="["&&d(v)>0){dep=d(v)}}} print raw} END{fl();if(mode=="set"&&!has){print "";print "[" sec "]";print "-> \"" key "\" => " val}}
+
+: _hk_write def
+    ;; tryb w _hk_mode (set/unset); wymaga _hk_file (moze nie istniec dla set)
+    % _hk_found = false
+    >> mktemp /tmp/hk-write.XXXXXX |> @_hk_wtmp
+    >> test -f "@_hk_file" && cat "@_hk_file" > "@_hk_wtmp.in" || : > "@_hk_wtmp.in"
+    >> awk -v mode="@_hk_mode" -v sec="@_hk_section" -v key="@_hk_key" -v val="@_hk_value" '@_hk_wprog' "@_hk_wtmp.in" > "@_hk_wtmp" && cat "@_hk_wtmp" > "@_hk_file" && echo true || echo false |> @_hk_found
+    > rm -f @_hk_wtmp @_hk_wtmp.in
+done
+
+: hk_set def
+    % _hk_mode = set
+    -- _hk_write
+done
+
+: hk_unset def
+    % _hk_mode = unset
+    -- _hk_write
 done
