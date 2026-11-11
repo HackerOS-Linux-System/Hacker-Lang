@@ -5,6 +5,7 @@ pub mod parser;
 pub mod shebang;
 pub mod import_spec;
 pub mod extern_spec;
+pub mod features;
 
 pub use ast::*;
 pub use gen::{Gen, GenError, GenFeature, extract_gen, parse_gen_declaration, HL_MAX_GEN, HL_DEFAULT_GEN};
@@ -13,6 +14,7 @@ pub use lexer::{Lexer, Token, LexError};
 pub use parser::{Parser, ParseError, parse_source, parse_source_with_meta};
 pub use import_spec::{parse_import_line, ImportDecl};
 pub use extern_spec::{ExternRuntime};
+pub use features::gen2_features_used;
 
 // ArenaSize jest częścią ast — re-export dla wygody
 pub use ast::ArenaSize;
