@@ -1,0 +1,6 @@
+;; Przykładowy profil składni `not-default/demo`.
+;; Zainstaluj jako ~/.hackeros/hacker-lang/syntax/not-default/demo.syntax
+;; albo wskaż katalog:  HL_SYNTAX_PATH=examples/not-default hl run examples/not-default/demo.hl
+base        = V5.1
+provides    = demo-feature
+description = Przykładowy profil (nic nie zmienia w parserze)
