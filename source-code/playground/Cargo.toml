@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # Prawdziwy parser i kompilator Hacker Lang — bez żadnych ustępstw:
 # dokładnie ten sam kod co reszta projektu, statycznie wlinkowany.
 hl-parser   = { path = "../parser" }
+hl-syntax   = { path = "../syntax" }
 # `default-features = false`: wyłącza moduł `cache` (i jego jedyną
 # zależność, `dirs`) — cache .bc na dysku nie ma sensu w przeglądarce, a
 # playground i tak nie woła nic z tego modułu (kompiluje w pamięci).
