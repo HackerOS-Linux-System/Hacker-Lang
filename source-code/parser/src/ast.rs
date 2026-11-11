@@ -29,70 +29,138 @@ pub struct MatchArm {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum HackerOsTool {
-    HHash, Hco, Hacker, Hsh, Hpkg, BlueEnvironment, Hnm, Hpm, Hedit,
-    Ngt, Eiq, Getit, Hdev, Anvil, A, Hbuild, Lpm, Chker, Isolator,
-    HackerOsSteam, Ulb, Gameframe, Hup, HackerOsBuilder, Other(String),
+    // ── Zostały z poprzedniej wersji API ─────────────────────────────────
+    HHash, Hco, Hacker, Hsh, BlueEnvironment, Hnm, Hpm, Hedit,
+    Ngt, Getit, Hdev, A, Chker, Isolator,
+    HackerOsSteam, Gameframe, Hup, HackerOsBuilder,
+    // ── Nowe (API v2) ────────────────────────────────────────────────────
+    CybersecurityTools, // zastępuje `eiq`
+    Hammer, HackerScript, Bit, Hwde, Hlib, HackerMode, GamingCli,
+    HackerOsComp, HackerOsSnapshots, HackerOsTv, HexAi, ProtonManager,
+    HackerOsKernel, HackerTerm, HackerOsWelcome, HackerOsGames, Hdm,
+    HackerOsEducator, HackerLauncher, HackerOsStore, HackerOs,
+    /// Nazwa spoza listy — uruchamiana, jeśli binarka jest w PATH.
+    Other(String),
+}
+
+/// Jedno źródło prawdy dla `||`: (nazwa w kodzie `.hl`, nazwa binarki, wariant).
+///
+/// Nazwa w kodzie może mieć spacje (`|| Hacker Mode`) i jest dopasowywana bez
+/// rozróżniania wielkości liter. Nazwa binarki NIE może mieć spacji — trafia
+/// do powłoki. Dla narzędzi dodanych w API v2 nazwy binarek to
+/// `nazwa-małymi-literami-z-myślnikami` — jeśli prawdziwa binarka nazywa się
+/// inaczej, popraw ją TYLKO tutaj.
+static TOOLS: &[(&str, &str, HackerOsTool)] = &[
+    ("H#",                  "H#",                  HackerOsTool::HHash),
+    ("hco",                 "hco",                 HackerOsTool::Hco),
+    ("hacker",              "hacker",              HackerOsTool::Hacker),
+    ("hsh",                 "hsh",                 HackerOsTool::Hsh),
+    ("Blue-Environment",    "Blue-Environment",    HackerOsTool::BlueEnvironment),
+    ("hnm",                 "hnm",                 HackerOsTool::Hnm),
+    ("hpm",                 "hpm",                 HackerOsTool::Hpm),
+    ("hedit",               "hedit",               HackerOsTool::Hedit),
+    ("ngt",                 "ngt",                 HackerOsTool::Ngt),
+    ("getit",               "getit",               HackerOsTool::Getit),
+    ("hdev",                "hdev",                HackerOsTool::Hdev),
+    ("a",                   "a",                   HackerOsTool::A),
+    ("chker",               "chker",               HackerOsTool::Chker),
+    ("isolator",            "isolator",            HackerOsTool::Isolator),
+    ("hackeros-steam",      "hackeros-steam",      HackerOsTool::HackerOsSteam),
+    ("gameframe",           "gameframe",           HackerOsTool::Gameframe),
+    ("hup",                 "hup",                 HackerOsTool::Hup),
+    ("hackeros-builder",    "hackeros-builder",    HackerOsTool::HackerOsBuilder),
+    ("cybersecurity-tools", "cybersecurity-tools", HackerOsTool::CybersecurityTools),
+    ("hammer",              "hammer",              HackerOsTool::Hammer),
+    ("HackerScript",        "hackerscript",        HackerOsTool::HackerScript),
+    ("bit",                 "bit",                 HackerOsTool::Bit),
+    ("HWDE",                "hwde",                HackerOsTool::Hwde),
+    ("hlib",                "hlib",                HackerOsTool::Hlib),
+    ("Hacker Mode",         "hacker-mode",         HackerOsTool::HackerMode),
+    ("gaming-cli",          "gaming-cli",          HackerOsTool::GamingCli),
+    ("HackerOS Comp",       "hackeros-comp",       HackerOsTool::HackerOsComp),
+    ("HackerOS Snapshots",  "hackeros-snapshots",  HackerOsTool::HackerOsSnapshots),
+    ("HackerOS TV",         "hackeros-tv",         HackerOsTool::HackerOsTv),
+    ("HexAi",               "hexai",               HackerOsTool::HexAi),
+    ("Proton Manager",      "proton-manager",      HackerOsTool::ProtonManager),
+    ("HackerOS Kernel",     "hackeros-kernel",     HackerOsTool::HackerOsKernel),
+    ("Hacker Term",         "hacker-term",         HackerOsTool::HackerTerm),
+    ("HackerOS Welcome",    "hackeros-welcome",    HackerOsTool::HackerOsWelcome),
+    ("HackerOS Games",      "hackeros-games",      HackerOsTool::HackerOsGames),
+    ("HDM",                 "hdm",                 HackerOsTool::Hdm),
+    ("HackerOS Educator",   "hackeros-educator",   HackerOsTool::HackerOsEducator),
+    ("Hacker Launcher",     "hacker-launcher",     HackerOsTool::HackerLauncher),
+    ("HackerOS Store",      "hackeros-store",      HackerOsTool::HackerOsStore),
+    ("HackerOS",            "hackeros",            HackerOsTool::HackerOs),
+];
+
+/// Narzędzia usunięte z API: (nazwa małymi literami, powód).
+static REMOVED_TOOLS: &[(&str, &str)] = &[
+    ("hpkg",  "narzędzie zostało usunięte z HackerOS API"),
+    ("anvil", "narzędzie zostało usunięte z HackerOS API"),
+    ("hbuild","narzędzie zostało usunięte z HackerOS API"),
+    ("lpm",   "narzędzie zostało usunięte z HackerOS API"),
+    ("ulb",   "narzędzie zostało usunięte z HackerOS API"),
+    ("eiq",   "zastąpione przez `|| cybersecurity-tools`"),
+];
+
+fn normalize_tool_name(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 impl HackerOsTool {
     pub fn from_str(s: &str) -> Self {
-        match s.trim() {
-            "H#"               => HackerOsTool::HHash,
-            "hco"              => HackerOsTool::Hco,
-            "hacker"           => HackerOsTool::Hacker,
-            "hsh"              => HackerOsTool::Hsh,
-            "hpkg"             => HackerOsTool::Hpkg,
-            "Blue-Environment" => HackerOsTool::BlueEnvironment,
-            "hnm"              => HackerOsTool::Hnm,
-            "hpm"              => HackerOsTool::Hpm,
-            "hedit"            => HackerOsTool::Hedit,
-            "ngt"              => HackerOsTool::Ngt,
-            "eiq"              => HackerOsTool::Eiq,
-            "getit"            => HackerOsTool::Getit,
-            "hdev"             => HackerOsTool::Hdev,
-            "anvil"            => HackerOsTool::Anvil,
-            "a"                => HackerOsTool::A,
-            "hbuild"           => HackerOsTool::Hbuild,
-            "lpm"              => HackerOsTool::Lpm,
-            "chker"            => HackerOsTool::Chker,
-            "isolator"         => HackerOsTool::Isolator,
-            "hackeros-steam"   => HackerOsTool::HackerOsSteam,
-            "ulb"              => HackerOsTool::Ulb,
-            "gameframe"        => HackerOsTool::Gameframe,
-            "hup"              => HackerOsTool::Hup,
-            "hackeros-builder" => HackerOsTool::HackerOsBuilder,
-            other              => HackerOsTool::Other(other.to_string()),
+        let n = normalize_tool_name(s);
+        match TOOLS.iter().find(|(name, _, _)| name.to_lowercase() == n) {
+            Some((_, _, tool)) => tool.clone(),
+            None => HackerOsTool::Other(s.trim().to_string()),
         }
     }
 
+    /// Nazwa binarki (bez spacji) — to jest uruchamiane i szukane w PATH.
     pub fn binary_name(&self) -> &str {
         match self {
-            HackerOsTool::HHash           => "H#",
-            HackerOsTool::Hco             => "hco",
-            HackerOsTool::Hacker          => "hacker",
-            HackerOsTool::Hsh             => "hsh",
-            HackerOsTool::Hpkg            => "hpkg",
-            HackerOsTool::BlueEnvironment => "Blue-Environment",
-            HackerOsTool::Hnm             => "hnm",
-            HackerOsTool::Hpm             => "hpm",
-            HackerOsTool::Hedit           => "hedit",
-            HackerOsTool::Ngt             => "ngt",
-            HackerOsTool::Eiq             => "eiq",
-            HackerOsTool::Getit           => "getit",
-            HackerOsTool::Hdev            => "hdev",
-            HackerOsTool::Anvil           => "anvil",
-            HackerOsTool::A               => "a",
-            HackerOsTool::Hbuild          => "hbuild",
-            HackerOsTool::Lpm             => "lpm",
-            HackerOsTool::Chker           => "chker",
-            HackerOsTool::Isolator        => "isolator",
-            HackerOsTool::HackerOsSteam   => "hackeros-steam",
-            HackerOsTool::Ulb             => "ulb",
-            HackerOsTool::Gameframe       => "gameframe",
-            HackerOsTool::Hup             => "hup",
-            HackerOsTool::HackerOsBuilder => "hackeros-builder",
-            HackerOsTool::Other(s)        => s.as_str(),
+            HackerOsTool::Other(s) => s.as_str(),
+            known => TOOLS.iter().find(|(_, _, t)| t == known).map(|(_, b, _)| *b).unwrap_or(""),
         }
+    }
+
+    /// Nazwa tak, jak się ją pisze po `||` w kodzie `.hl`.
+    pub fn display_name(&self) -> &str {
+        match self {
+            HackerOsTool::Other(s) => s.as_str(),
+            known => TOOLS.iter().find(|(_, _, t)| t == known).map(|(n, _, _)| *n).unwrap_or(""),
+        }
+    }
+
+    /// Wszystkie narzędzia API: (nazwa w kodzie, nazwa binarki).
+    pub fn catalog() -> impl Iterator<Item = (&'static str, &'static str)> {
+        TOOLS.iter().map(|(n, b, _)| (*n, *b))
+    }
+
+    /// Jeśli `name` to narzędzie usunięte z API — powód (do komunikatu błędu).
+    pub fn removed_reason(name: &str) -> Option<&'static str> {
+        let n = normalize_tool_name(name);
+        REMOVED_TOOLS.iter().find(|(r, _)| *r == n).map(|(_, why)| *why)
+    }
+
+    /// Najdłuższa znana nazwa narzędzia będąca początkiem `rest` (po `||`).
+    /// Zwraca długość w znakach. Nazwa musi kończyć się spacją lub końcem linii,
+    /// więc `|| HackerOSX` nie jest `HackerOS`, a `|| HackerOS Comp x` to
+    /// `HackerOS Comp` z argumentem `x`. Potrzebne dla nazw ze spacjami.
+    pub fn longest_prefix(rest: &str) -> Option<usize> {
+        let lower = rest.to_lowercase();
+        let mut best: Option<usize> = None;
+        for (name, _, _) in TOOLS {
+            let n = name.to_lowercase();
+            if lower.starts_with(&n) {
+                let boundary = lower[n.len()..].chars().next().map_or(true, char::is_whitespace);
+                let len = name.chars().count();
+                if boundary && best.map_or(true, |b| len > b) {
+                    best = Some(len);
+                }
+            }
+        }
+        best
     }
 }
 
