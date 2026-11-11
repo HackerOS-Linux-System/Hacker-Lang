@@ -194,8 +194,6 @@ done
 [source,hl]
 ----
 || hacker update
-|| hpkg install nmap
-|| lpm list
 || hsh -c "ls /tmp"
 || H# --version
 || hco status
@@ -205,9 +203,31 @@ done
 || hackeros-steam launch
 ----
 
-Dostępne narzędzia: `H#` `hco` `hacker` `hsh` `hpkg` `Blue-Environment`
-`hnm` `hpm` `hedit` `ngt` `eiq` `getit` `hdev` `anvil` `a` `hbuild`
-`lpm` `chker` `isolator` `hackeros-steam` `ulb` `gameframe` `hup` `hackeros-builder`
+Dostępne narzędzia (nazwy ze spacjami pisze się normalnie, wielkość liter nie ma znaczenia):
+
+`H#` `hco` `hacker` `hsh` `Blue-Environment` `hnm` `hpm` `hedit` `ngt` `getit`
+`hdev` `a` `chker` `isolator` `hackeros-steam` `gameframe` `hup` `hackeros-builder`
+`cybersecurity-tools` `hammer` `HackerScript` `bit` `HWDE` `hlib` `Hacker Mode`
+`gaming-cli` `HackerOS Comp` `HackerOS Snapshots` `HackerOS TV` `HexAi`
+`Proton Manager` `HackerOS Kernel` `Hacker Term` `HackerOS Welcome`
+`HackerOS Games` `HDM` `HackerOS Educator` `Hacker Launcher` `HackerOS Store`
+`HackerOS`
+
+[source,hl]
+----
+|| Hacker Mode
+|| HackerOS Comp update
+|| cybersecurity-tools
+----
+
+Przy nazwach wielowyrazowych wygrywa najdłuższe dopasowanie: `|| HackerOS Comp x`
+to narzędzie `HackerOS Comp` z argumentem `x`, a `|| HackerOS x` to `HackerOS`
+z argumentem `x`. Uruchamiana jest binarka o nazwie małymi literami z myślnikami
+zamiast spacji (`hacker-mode`, `hackeros-comp`); wyjątki (`H#`, `Blue-Environment`,
+`HackerScript` → `hackerscript`) i pełna tabela są w `parser/src/ast.rs`.
+
+Usunięte z API: `hpkg`, `anvil`, `hbuild`, `lpm`, `ulb` oraz `eiq` (zastąpione przez
+`cybersecurity-tools`). Ich użycie to błąd parsowania z odpowiednim komunikatem.
 
 === Komentarze
 
@@ -368,6 +388,7 @@ dzięki lekkiemu bytecode i zero-overhead cache (bincode deserializacja).
 ----
 source-code/
 ├── parser/    -- Lexer, Parser, AST, Gen, Shebang
+├── syntax/    -- Wersje składni: gen <..>, using <HackerOS V..>, take, not-default
 ├── core/      -- Executor (tree-walk), Env, Quick Functions, Diagnostics
 ├── compiler/  -- Bytecode compiler: AST → HlModule (.bc)
 │   ├── bytecode.rs   -- IR instrukcji (HlModule, Instruction, ConstPool)
@@ -423,7 +444,7 @@ Wariant 3 — source-code/ (rust-like):
 
 [source,hl]
 ----
-using <gen 2>
+using <HackerOS V5.1>
 
 ;; Docelowy format wyjściowy
 % BIT_BUILD_TARGET = bc     # bc | elf | so
@@ -469,17 +490,165 @@ woli wpis dla języka bieżącego projektu.
 
 Typy pakietów: `git` (github/gitlab), `tar` (archiwum), `link` (binarka)
 
-== System Genów
+== System Genów i wersje składni
+
+Plik `.hl` może na samej górze (przed pierwszym kodem) zadeklarować trzy rzeczy.
+Wszystkie są opcjonalne — bez nich plik działa w najnowszej składni (`V5.1` ≡ gen 2).
+
+[source,hl]
+----
+#!/usr/bin/env hl
+gen <1.1>                          ;; wersja narzędzia hl
+using <HackerOS V5.1>              ;; wersja składni
+take <HackerOS V4.1/goroutines>    ;; element składni pożyczony z innej wersji
+----
+
+=== `gen <wersja>` — wersja narzędzia `hl`
+
+[source,hl]
+----
+gen <1>
+gen <1.1>
+gen <wersja>
+----
+
+To *tylko znacznik wersji*, nie deklaracja składni — nie zmienia sposobu
+parsowania. Wersja może mieć 1–3 składniki (`1`, `1.1`, `1.1.2`). Jeśli skrypt
+deklaruje wersję nowszą niż uruchomiony `hl` (obecnie `gen 1.1`), dostajesz
+ostrzeżenie. Wartość trafia do zmiennej `@HL_TOOL_GEN`.
+
+=== `using <HackerOS Vwersja>` — wersja składni
+
+[source,hl]
+----
+using <HackerOS V5.1>     ;; najnowsza składnia (≡ gen 2, domyślna)
+using <HackerOS V4.7>     ;; składnia gen 1
+using <HackerOS V5.5>     ;; nowsza niż znana → ostrzeżenie, reguły V5.1
+----
+
+Dzięki temu składnia Hacker Langa jest związana z wersją HackerOS — kolejne
+wersje mogą ją zmieniać.
+
+|===
+|Zapis |Znaczenie
+
+|`using <HackerOS V5.1>`
+|najnowsza składnia, parser gen 2
+
+|`using <HackerOS V4.7>`
+|dotychczasowy gen 1, parser gen 1
+
+|`V4.x` (< V5.0)
+|rodzina gen 1; najstarsza obsługiwana to `V4.0`
+
+|`V5.x` (≥ V5.0, ≤ V5.1)
+|rodzina gen 2
+
+|wersja > `V5.1`
+|ostrzeżenie „nowsza niż znana", używane są reguły `V5.1`
+
+|wersja < `V4.0`
+|błąd
+|===
+
+Stara forma `using <gen N>` *nadal działa* bez zmian (`gen 1` ≡ `V4.7`,
+`gen 2` ≡ `V5.1`). W pliku może być tylko jedna deklaracja `using`.
+
+=== `take` — pożyczanie elementów składni
+
+[source,hl]
+----
+using <HackerOS V5.5>
+take <HackerOS V4.1/goroutines>     ;; goroutines w wersji ze starszej składni
+take <HackerOS V4.1/corountimes>    ;; to samo (alias)
+----
+
+`take <HackerOS Vwersja/funkcja>` dołącza element składni z innej wersji niż
+zadeklarowana w `using`. Sprawdzane jest, że:
+
+* wersja istnieje (`V4.0` … `V5.1`),
+* funkcja jest znana (lista: `hl version`; dostępne są też aliasy, np.
+  `corountimes`, `coroutines`, `async` → `goroutines`),
+* funkcja istniała już w podanej wersji (`take <HackerOS V4.1/arena>` to błąd —
+  arena jest od `V5.0`).
+
+Gen parsera dla pliku to największy gen spośród `using` i wszystkich `take`:
+`using <HackerOS V4.7>` + `take <HackerOS V5.1/arena>` daje parser gen 2
+(`hl check` zgłasza to jako podpowiedź). Lista wszystkich wybranych elementów
+trafia do zmiennej `@HL_TAKE`.
+
+Wymuszanie działa per element: gdy `take` podnosi parser z gen 1 do gen 2
+(`using <HackerOS V4.7>` + `take <HackerOS V5.1/arena>`), plik może użyć *tylko*
+pożyczonych elementów gen 2 — również w ciałach funkcji i pętli. Użycie
+niepożyczonego elementu (np. `|>` bez `take <HackerOS V5.0/pipe-var>`) kończy się
+błędem z podpowiedzią, jakiego `take` brakuje. Pliki, w których gen nie został
+podniesiony, działają po staremu.
+
+[NOTE]
+====
+Wyjątek: `multiline-string` nie ma własnego węzła w AST, więc jego użycie
+nie jest wykrywane (samo `take` jest akceptowane). Gdy kolejna wersja składni
+zmieni *znaczenie* elementu (a nie tylko jego dostępność), parsowanie według
+reguł starej wersji będzie wymagało dalszych zmian w `parser`.
+====
+
+=== `using <not-default/nazwa>` — profile składni
+
+[source,hl]
+----
+using <not-default/moja-skladnia>
+----
+
+Miejsce na specjalne składnie od zespołu lub społeczności. *Wbudowanych
+profili nie ma* — profil to plik `nazwa.syntax` w jednym z katalogów:
+
+. katalogi z `HL_SYNTAX_PATH` (rozdzielone `:`),
+. `~/.hackeros/hacker-lang/syntax/not-default/`,
+. `/usr/lib/HackerOS/Hacker-Lang/syntax/not-default/`.
+
+[source]
+----
+base        = V5.1          ;; wymagane — na jakiej składni oparty jest profil
+provides    = foo, bar      ;; opcjonalne — co profil wnosi
+description = Krótki opis   ;; opcjonalne
+----
+
+`base` wskazuje, którym genem parsera uruchomiony jest skrypt. Nazwa profilu
+może zawierać tylko litery, cyfry, `-`, `_`, `.` (bez `/` i `..`).
+
+=== Zmienne ustawiane przez `hl`
+
+|===
+|Zmienna |Przykład |Znaczenie
+
+|`@HL_SYNTAX`
+|`HackerOS V5.1`
+|składnia, według której działa plik
+
+|`@HL_SYNTAX_GEN`
+|`2`
+|gen parsera (z uwzględnieniem `take`)
+
+|`@HL_TOOL_GEN`
+|`1.1`
+|z `gen <..>` (tylko gdy zadeklarowane)
+
+|`@HL_TAKE`
+|`V4.1/goroutines`
+|lista `take` (tylko gdy są)
+|===
+
+=== Stan genów
 
 [cols="1,1,3"]
 |===
 |Gen |Status |Opis
 
-|gen 1
+|gen 1 (`V4.7`)
 |aktywny
 |Podstawowa składnia, `&`, `*>`, `_N`, `<<`, `:*`, `:**`, `*--`
 
-|gen 2 _(domyślny)_
+|gen 2 (`V5.1`, _domyślny_)
 |aktywny
 |Typowane zmienne (`%: typ`), `$()`, `\|>`, `@ in`, `?~`, `? switch`, `\|\|`
 
@@ -488,7 +657,7 @@ Typy pakietów: `git` (github/gitlab), `tar` (archiwum), `link` (binarka)
 |Domknięcia (planowane)
 |===
 
-Deklaracja genu (opcjonalna — domyślnie gen 2):
+Stary sposób deklaracji (nadal obsługiwany):
 
 [source,hl]
 ----
@@ -503,7 +672,7 @@ using <gen 2>
 [source,hl]
 ----
 #!/usr/bin/env hl
-using <gen 2>
+using <HackerOS V5.1>
 
 % name: str = HackerOS
 ~> Witaj, @name!
@@ -607,8 +776,7 @@ done
 using <gen 2>
 
 || hacker update
-|| hpkg install nmap
-|| lpm list
+|| hacker update
 ----
 
 == Powłoka
