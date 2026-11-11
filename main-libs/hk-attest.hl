@@ -1,0 +1,176 @@
+using <gen 2>
+// curl
+// git
+// openssl
+
+% HK_ATTEST_LOADED = true
+% ATT_ORG = HackerOS-Linux-System
+;; Zakotwiczenie zaufania: certyfikat podpisujacy GitHub Release Attestations
+;; (O=GitHub, Inc., CN=Attester, SAN https://dotcom.releases.github.com,
+;;  wydawca Fulcio Intermediate l1, wazny 2026-06-12 .. 2027-06-12).
+;; Odcisk SHA-256: A6:9A:47:36:75:24:E2:AD:7B:91:1D:C1:94:17:8E:76:50:1B:8D:D5:42:0F:E8:33:2C:74:01:57:80:5D:33:2A
+% ATT_ANCHOR_B64_1 = MIICKzCCAbCgAwIBAgIUFEsbikF1pCGydxjUbs+jmoS800MwCgYIKoZIzj0EAwMwODEVMBMGA1UEChMMR2l0SHViLCBJbmMuMR8wHQYDVQQDExZGdWxjaW8gSW50ZXJtZWRpYXRlIGwxMB4XDTI2MDYxMjAwMDAwMFoXDTI3MDYxMjAwMDAwMFowKjEVMBMGA1UEChMMR2l0SHViLCBJbmMuMREwDwYDVQQDEwhBdHRlc3RlcjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGUVEVNqcSQmA0J45gqVHzCQkSWaZn4DucVDFhO4Q5OWgVdOP4WF44OUvFXQm9lDfRrHMsIVHEbvMfL7SHOVuVWjgaUwgaIwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFDrgKNmcXl2HuRedxYt9HulXf/9IMB8GA1UdIwQYMBaAFMDhuFKkS08+3no4EQbPSY6hRZszMC0GA1UdEQQmMCSGImh0dHBzOi8vZG90Y29tLnJlbGVhc2VzLmdpdGh1Yi5jb20wCgYIKoZIzj0EAwMDaQAwZgIxAJnC2khPGWJqZiEFvgyv0rktYBinUh6AkDn43wYSgUhzm8aRUa+rF25Qk1ZeoGi3IAIxAIgIBMwOkMqDQ1DVCJydaIZu1bxtvgX9Anva7kRDZrboNxsAllbdnorYRTm9mxkZaQ==
+
+: att_init def
+    >> test -n "@HOS_GH_BASE" && echo "@HOS_GH_BASE" || echo https://github.com |> @_att_base
+    >> test -n "@HOS_RAW_BASE" && echo "@HOS_RAW_BASE" || echo https://raw.githubusercontent.com |> @_att_raw
+    >> test -n "@HOS_GIT_BASE" && echo "@HOS_GIT_BASE" || echo "@_att_base" |> @_att_gitbase
+    >> test -n "@HOS_ATTEST" && echo "@HOS_ATTEST" || echo enforce |> @_att_mode
+    >> test -n "@_att_work" && echo yes || echo no |> @_att_hw
+    ? switch @_att_hw
+    | no
+        >> mktemp -d /tmp/hk-attest.XXXXXX |> @_att_work
+    done
+    > rm -f @_att_work/anchor.pem
+    >> printf '%s' '@ATT_ANCHOR_B64_1' | base64 -d | openssl x509 -inform der >> "@_att_work/anchor.pem"
+    >> test -n "@HOS_ATTEST_ANCHOR" -a -f "@HOS_ATTEST_ANCHOR" && cat "@HOS_ATTEST_ANCHOR" >> "@_att_work/anchor.pem" || true
+    >> test -f /usr/share/HackerOS/Config-Files/attestation/anchors.pem && cat /usr/share/HackerOS/Config-Files/attestation/anchors.pem >> "@_att_work/anchor.pem" || true
+done
+
+;; blad -> komunikat; wynik kroku w _att_step (ok/fail)
+: att_fail def
+    % _att_ok = false
+    % _att_step = fail
+done
+
+;; 1. najnowsze wydanie (przekierowanie releases/latest -> releases/tag/<tag>)
+: att_latest def
+    >> curl -sSIL --retry 2 --connect-timeout 15 --max-time 30 -o /dev/null -w '%{url_effective}' "@_att_base/@ATT_ORG/@_att_repo/releases/latest" | sed -n 's|.*/releases/tag/||p' |> @_att_tag
+done
+
+: att_check_tag def
+    >> printf '%s' '@_att_tag' | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' && echo ok || echo bad |> @_att_tagok
+done
+
+;; kandydat: pobierz paczke z _att_link i sprawdz typ + roszczenia
+: att_try_link def
+    % _att_url = @_att_base@_att_link
+    >> curl -fsSL --retry 2 --connect-timeout 15 --max-time 40 -o "@_att_work/cand.json" "@_att_url" && echo ok || echo fail |> @_att_dl
+    ? switch @_att_dl
+    | ok
+        >> tr -d '\n' < "@_att_work/cand.json" | sed -n 's/.*\x22payload\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' | base64 -d > "@_att_work/cand.stmt" 2>/dev/null || true
+        >> sed -n 's/.*\x22predicateType\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/cand.stmt" | head -n1 |> @_att_ptype
+        >> sed -n 's/.*\x22uri\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/cand.stmt" | head -n1 |> @_att_uri
+        >> sed -n 's/.*\x22sha1\x22[[:space:]]*:[[:space:]]*\x22\([0-9a-f]*\)\x22.*/\1/p' "@_att_work/cand.stmt" | head -n1 |> @_att_sha1
+        >> sed -n 's/.*\x22repository\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/cand.stmt" | head -n1 |> @_att_prepo
+        >> sed -n 's/.*\x22tag\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/cand.stmt" | head -n1 |> @_att_ptag
+        >> printf 'pkg:github/%s/%s@%s' "@ATT_ORG" "@_att_repo" "@_att_tag" |> @_att_expuri
+        >> test "@_att_ptype" = "https://in-toto.io/attestation/release/v0.2" -a "@_att_uri" = "@_att_expuri" -a "@_att_prepo" = "@ATT_ORG/@_att_repo" -a "@_att_ptag" = "@_att_tag" && printf '%s' '@_att_sha1' | grep -Eq '^[0-9a-f]{40}$' && echo ok || echo no |> @_att_claims
+        ? switch @_att_claims
+        | ok
+            % _att_found = true
+            % _att_commit = @_att_sha1
+            > cp @_att_work/cand.json @_att_work/bundle.json
+            > cp @_att_work/cand.stmt @_att_work/stmt.json
+        done
+    done
+done
+
+;; 2. znajdz poswiadczenie wydania na stronie wydania
+: att_fetch def
+    % _att_found = false
+    % _att_commit =
+    >> curl -fsSL --retry 2 --connect-timeout 15 --max-time 40 "@_att_base/@ATT_ORG/@_att_repo/releases/expanded_assets/@_att_tag" | grep -oE '/@ATT_ORG/@_att_repo/attestations/[0-9]+/download' | sort -u |> @_att_links
+    @ l in @_att_links
+        ? switch @_att_found
+        | true
+            ;; juz mamy
+        | *
+            % _att_link = @l
+            -- att_try_link
+        done
+    done
+done
+
+;; 3. commit z poswiadczenia == commit tagu w gitcie
+: att_git def
+    >> git ls-remote --tags "@_att_gitbase/@ATT_ORG/@_att_repo.git" "refs/tags/@_att_tag" "refs/tags/@_att_tag^{}" 2>/dev/null | awk '{print $2" "$1}' | sort | tail -n1 | cut -d' ' -f2 |> @_att_gitsha
+    >> test "@_att_gitsha" = "@_att_commit" && echo ok || echo bad |> @_att_gitok
+done
+
+;; 4a. podpis DSSE (ECDSA) kluczem z certyfikatu zawartego w paczce
+: att_dsse def
+    >> cat "@_att_work/bundle.json" | tr -d '\n' > "@_att_work/flat.json"
+    >> sed -n 's/.*\x22payloadType\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/flat.json" |> @_att_dtype
+    >> sed -n 's/.*\x22sig\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/flat.json" | base64 -d > "@_att_work/sig.der" 2>/dev/null || true
+    >> sed -n 's/.*\x22certificate\x22[[:space:]]*:[[:space:]]*{[[:space:]]*\x22rawBytes\x22[[:space:]]*:[[:space:]]*\x22\([^\x22]*\)\x22.*/\1/p' "@_att_work/flat.json" | base64 -d > "@_att_work/leaf.der" 2>/dev/null || true
+    >> openssl x509 -inform der -in "@_att_work/leaf.der" -out "@_att_work/leaf.pem" 2>/dev/null && openssl x509 -in "@_att_work/leaf.pem" -noout -pubkey > "@_att_work/pub.pem" && echo ok || echo bad |> @_att_leafok
+    ? switch @_att_leafok
+    | ok
+        >> bash -c 'T="@_att_dtype"; { printf "DSSEv1 %d %s %d " "${#T}" "$T" "$(wc -c < "@_att_work/stmt.json")"; cat "@_att_work/stmt.json"; } > "@_att_work/pae.bin"'
+        >> openssl dgst -sha256 -verify "@_att_work/pub.pem" -signature "@_att_work/sig.der" "@_att_work/pae.bin" > /dev/null 2>&1 && echo ok || echo bad |> @_att_sigok
+    | *
+        % _att_sigok = bad
+    done
+done
+
+;; 4b. certyfikat zakotwiczony w zaufanym certyfikacie GitHuba + tozsamosc (SAN)
+: att_chain def
+    >> openssl verify -no_check_time -partial_chain -CAfile "@_att_work/anchor.pem" "@_att_work/leaf.pem" > /dev/null 2>&1 && echo ok || echo bad |> @_att_chainok
+    >> openssl x509 -in "@_att_work/leaf.pem" -noout -ext subjectAltName 2>/dev/null | grep -qF 'URI:https://dotcom.releases.github.com' && echo ok || echo bad |> @_att_sanok
+done
+
+;; wspolny wynik: _att_ok + _att_msg + _att_pass wg polityki
+: att_resolve def
+    -- att_init
+    % _att_ok = false
+    % _att_level = none
+    % _att_msg =
+    % _att_pass = false
+    ? switch @_att_mode
+    | off
+        % _att_ok = skipped
+        % _att_msg = weryfikacja attestation wylaczona (HOS_ATTEST=off)
+        % _att_pass = true
+    | *
+        >> test -n "@_att_tag" && echo preset || echo latest |> @_att_src
+        ? switch @_att_src
+        | latest
+            -- att_latest
+        done
+        -- att_check_tag
+        ? switch @_att_tagok
+        | ok
+            -- att_fetch
+            ? switch @_att_found
+            | true
+                -- att_git
+                ? switch @_att_gitok
+                | ok
+                    -- att_dsse
+                    ? switch @_att_sigok
+                    | ok
+                        -- att_chain
+                        >> test "@_att_chainok" = ok -a "@_att_sanok" = ok && echo ok || echo bad |> @_att_both
+                        ? switch @_att_both
+                        | ok
+                            % _att_ok = true
+                            % _att_level = signed
+                        | *
+                            % _att_msg = podpis poprawny, ale certyfikat NIE jest zakotwiczony w zaufanym certyfikacie GitHuba (lancuch=@_att_chainok, tozsamosc=@_att_sanok)
+                        done
+                    | *
+                        % _att_msg = podpis poswiadczenia jest NIEPRAWIDLOWY
+                    done
+                | *
+                    % _att_msg = commit z poswiadczenia (@_att_commit) rozni sie od commita tagu @_att_tag w gitcie (@_att_gitsha)
+                done
+            | *
+                % _att_msg = brak poswiadczenia release dla @_att_repo@@_att_tag (wydanie bez immutable releases?)
+            done
+        | *
+            % _att_msg = nie znaleziono najnowszego wydania repozytorium @_att_repo albo nietypowa nazwa tagu [@_att_tag]
+        done
+        ? switch @_att_ok
+        | true
+            % _att_pass = true
+        | *
+            ? switch @_att_mode
+            | warn
+                % _att_pass = true
+            | *
+                % _att_pass = false
+            done
+        done
+    done
+done
