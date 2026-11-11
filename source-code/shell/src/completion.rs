@@ -31,12 +31,14 @@ const HL_KEYWORDS: &[&str] = &[
     "? switch",
     // Gen 2 — HackerOS API
     "||",
-    "|| hacker", "|| hco", "|| hsh", "|| hpkg", "|| lpm",
-    "|| Blue-Environment", "|| hnm", "|| hpm", "|| hedit",
-    "|| ngt", "|| eiq", "|| getit", "|| hdev", "|| anvil",
-    "|| a", "|| hbuild", "|| chker", "|| isolator",
-    "|| hackeros-steam", "|| ulb", "|| gameframe",
-    "|| hup", "|| hackeros-builder", "|| H#",
+    "|| H#", "|| hco", "|| hacker", "|| hsh", "|| Blue-Environment", "|| hnm", "|| hpm",
+    "|| hedit", "|| ngt", "|| getit", "|| hdev", "|| a", "|| chker", "|| isolator",
+    "|| hackeros-steam", "|| gameframe", "|| hup", "|| hackeros-builder",
+    "|| cybersecurity-tools", "|| hammer", "|| HackerScript", "|| bit", "|| HWDE", "|| hlib",
+    "|| Hacker Mode", "|| gaming-cli", "|| HackerOS Comp", "|| HackerOS Snapshots",
+    "|| HackerOS TV", "|| HexAi", "|| Proton Manager", "|| HackerOS Kernel", "|| Hacker Term",
+    "|| HackerOS Welcome", "|| HackerOS Games", "|| HDM", "|| HackerOS Educator",
+    "|| Hacker Launcher", "|| HackerOS Store", "|| HackerOS",
     // Gen 2 — typowane zmienne
     "% name: int =", "% name: float =", "% name: str =", "% name: bool =",
     // Pozostale
