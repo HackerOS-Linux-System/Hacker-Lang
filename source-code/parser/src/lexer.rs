@@ -369,9 +369,18 @@ impl Lexer {
                 '|' if self.peek_at(1) == Some('|') => {
                     self.skip_n(2); self.skip_ws();
                     let mut tool = String::new();
-                    while let Some(c) = self.peek() {
-                        if c.is_alphanumeric() || c == '-' || c == '#' { tool.push(c); self.advance(); }
-                        else { break; }
+                    // Nazwy ze spacjami (`|| Hacker Mode`, `|| HackerOS Comp`): najpierw
+                    // najdłuższe dopasowanie do listy znanych narzędzi.
+                    let mut eol = self.pos;
+                    while eol < self.source.len() && self.source[eol] != '\n' { eol += 1; }
+                    let rest: String = self.source[self.pos..eol].iter().collect();
+                    if let Some(n) = crate::ast::HackerOsTool::longest_prefix(&rest) {
+                        for _ in 0..n { if let Some(c) = self.advance() { tool.push(c); } }
+                    } else {
+                        while let Some(c) = self.peek() {
+                            if c.is_alphanumeric() || c == '-' || c == '#' { tool.push(c); self.advance(); }
+                            else { break; }
+                        }
                     }
                     self.skip_ws();
                     tokens.push(Token::HackerOsApi { tool, args: self.read_line() });
