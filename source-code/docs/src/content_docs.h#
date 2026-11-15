@@ -1,0 +1,39 @@
+mod section
+
+;; ── kategoria HL-DOCS (NOWE w 2.0.0) ─────────────────────────────────────────
+;; Sekcja o samej przeglądarce — skróty, opcje i zmienne środowiskowe.
+;; Format wierszy: patrz doc.h#.
+
+pub fn docs_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "hl-docs — skróty i opcje",
+        category: "HL-DOCS",
+        content: "p|
+1|hl-docs — przeglądarka dokumentacji
+p|
+p|Napisana w H# (od wersji 2.0.0; wcześniej Go + Bubble Tea), bez zależności
+p|zewnętrznych — tryb raw, klawisze i rysowanie są w module tty/view.
+p|
+2|Uruchamianie
+C|hl docs            ;; przez interpreter
+c|hl-docs            ;; bezpośrednio
+c|hl-docs -v         ;; wersja
+p|
+2|Zmienne środowiskowe
+p|  ⟦o⟧HL_DOCS_MOUSE⟦/⟧  włącza kółko myszy (domyślnie WYŁĄCZONE — w części terminali,
+p|                   kontenerów i SSH raportowanie myszy psuje wejście z klawiatury)
+p|  ⟦o⟧NO_COLOR⟦/⟧        wyłącza kolory
+p|  ⟦o⟧COLORTERM⟦/⟧       truecolor / 24bit = pełne kolory, inaczej 256 kolorów
+p|
+2|Nawigacja
+p|  ⟦o⟧↑↓ j k⟦/⟧   menu: wybór · treść: przewijanie o 3 wiersze
+p|  ⟦o⟧Enter Tab⟦/⟧ otwórz sekcję (Tab w treści wraca do menu)
+p|  ⟦o⟧PgUp PgDn⟦/⟧ strona · ⟦o⟧u d⟦/⟧ pół strony · ⟦o⟧g G⟦/⟧ początek / koniec
+p|  ⟦o⟧n p⟦/⟧      następna / poprzednia kategoria
+p|  ⟦o⟧/⟦/⟧      szukaj na żywo (tytuł, kategoria, treść); Enter zatwierdza, Esc czyści
+p|
+T|💡 Wyszukiwanie przyjmuje polskie znaki i nie reaguje na wielkość liter.",
+    })
+    return out
+end
