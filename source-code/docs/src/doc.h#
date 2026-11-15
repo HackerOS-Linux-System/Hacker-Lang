@@ -1,0 +1,289 @@
+mod uni
+mod styles
+
+;; ── doc — renderowanie treści sekcji do gotowych wierszy terminala ───────────
+;; Format treści (po jednym wierszu `K|tekst`):
+;;   p  zwykły tekst        1  nagłówek H1        2  nagłówek H2
+;;   C  początek bloku kodu (c = kolejne wiersze)   T/t  wskazówka   W/w  ostrzeżenie
+;; Znaczniki w tekście: ⟦o⟧operator⟦/⟧ (zielony, pogrubiony), ⟦h⟧nagłówek 3⟦/⟧ (jw.).
+;; Wynik `render` to wiersze o DOKŁADNIE zadanej szerokości, z tłem — viewport
+;; może je wyświetlić bez dalszego dopełniania.
+
+;; Rozpoznaje znacznik w bajcie `i`: 1 = ⟦o⟧, 2 = ⟦h⟧, 3 = ⟦/⟧, 0 = brak. Wszystkie mają 7 bajtów.
+fn tag_at(s: string, i: int) -> int is
+    if i + 7 > s.len() is return 0 end
+    if byte_at(s, i) != 226 || byte_at(s, i + 1) != 159 || byte_at(s, i + 2) != 166 is return 0 end
+    if byte_at(s, i + 4) != 226 || byte_at(s, i + 5) != 159 || byte_at(s, i + 6) != 167 is return 0 end
+    let c: int = byte_at(s, i + 3)
+    if c == 111 is return 1 end
+    if c == 104 is return 2 end
+    if c == 47 is return 3 end
+    return 0
+end
+
+;; Tekst bez znaczników (do wyszukiwania i szerokości).
+pub fn strip_tags(s: string) -> string is
+    let n: int = s.len()
+    let mut out: string = ""
+    let mut run: int = 0
+    let mut i: int = 0
+    while i < n is
+        if tag_at(s, i) != 0 is
+            out = out + s[run..i]
+            i += 7
+            run = i
+        else is
+            i += 1
+        end
+    end
+    return out + s[run..n]
+end
+
+;; Tekst sekcji do wyszukiwania: bez prefiksów rodzaju i znaczników, małymi literami.
+pub fn plain(content: string) -> string is
+    let lines: [string] = str_split(content, "\n")
+    let mut out: string = ""
+    for l in lines is
+        if l.len() >= 2 is
+            out = out + strip_tags(l[2..l.len()]) + "\n"
+        end
+    end
+    return string_lower(out)
+end
+
+;; ── zawijanie ────────────────────────────────────────────────────────────────
+
+;; Komórki wiersza: znak + styl (0 zwykły, 1 inline-op/h3).
+pub struct Cells is
+    pub ch: [string]
+    pub st: [int]
+end
+
+fn to_cells(text: string) -> Cells is
+    let n: int = text.len()
+    let mut cs: Cells = Cells { ch: [], st: [] }
+    let mut style: int = 0
+    let mut i: int = 0
+    while i < n is
+        let t: int = tag_at(text, i)
+        if t == 1 || t == 2 is
+            style = 1
+            i += 7
+        elsif t == 3 is
+            style = 0
+            i += 7
+        else is
+            let l: int = uni::seq_len(byte_at(text, i))
+            let mut e: int = i + l
+            if e > n is e = n end
+            cs.ch.push(text[i..e])
+            cs.st.push(style)
+            i = e
+        end
+    end
+    return cs
+end
+
+;; Zwraca pary (start, koniec) wierszy po zawinięciu na granicy spacji (lub twardo).
+fn breaks(cs: Cells, width: int, indent: int) -> [int] is
+    let n: int = cs.ch.len()
+    let mut out: [int] = []
+    let mut start: int = 0
+    let mut i: int = 0
+    let mut w: int = 0
+    let mut last_sp: int = -1
+    let mut limit: int = width
+    while i < n is
+        let cw: int = uni::str_width(cs.ch[i])
+        if w + cw > limit && i > start is
+            if last_sp > start is
+                out.push(start)
+                out.push(last_sp)
+                start = last_sp + 1
+            else is
+                out.push(start)
+                out.push(i)
+                start = i
+            end
+            i = start
+            w = 0
+            last_sp = -1
+            limit = width - indent      ;; kontynuacje zachowują wcięcie pierwszego wiersza
+        else is
+            if cs.ch[i] == " " is last_sp = i end
+            w += cw
+            i += 1
+        end
+    end
+    out.push(start)
+    out.push(n)
+    return out
+end
+
+fn fill(profile: int, used: int, total: int) -> string is
+    if used >= total is return "" end
+    return styles::paint(profile, uni::spaces(total - used), -1, styles::bg(), false)
+end
+
+;; Maluje komórki [a, b) jednym przebiegiem na styl; zwraca (tekst, szerokość) jako tekst + szerokość w `w`.
+fn paint_cells(profile: int, cs: Cells, a: int, b: int, base_fg: int, base_bold: bool) -> string is
+    let mut out: string = ""
+    let mut run: string = ""
+    let mut run_style: int = -1
+    let mut i: int = a
+    while i < b is
+        if cs.st[i] != run_style is
+            if run != "" is out = out + flush_run(profile, run, run_style, base_fg, base_bold) end
+            run = ""
+            run_style = cs.st[i]
+        end
+        run = run + cs.ch[i]
+        i += 1
+    end
+    if run != "" is out = out + flush_run(profile, run, run_style, base_fg, base_bold) end
+    return out
+end
+
+fn flush_run(profile: int, run: string, style: int, base_fg: int, base_bold: bool) -> string is
+    if style == 1 is return styles::paint(profile, run, styles::green(), styles::bg(), true) end
+    return styles::paint(profile, run, base_fg, styles::bg(), base_bold)
+end
+
+fn width_of(cs: Cells, a: int, b: int) -> int is
+    let mut w: int = 0
+    let mut i: int = a
+    while i < b is
+        w += uni::str_width(cs.ch[i])
+        i += 1
+    end
+    return w
+end
+
+;; Dzieli string na kawałki po `w` kolumn (twarde zawijanie kodu).
+pub fn hard_wrap(s: string, w: int) -> [string] is
+    let mut out: [string] = []
+    if w <= 0 is return out end
+    let mut rest: string = s
+    loop is
+        if uni::str_width(rest) <= w is
+            out.push(rest)
+            break
+        end
+        let head: string = uni::clip(rest, w)
+        if head.len() == 0 is
+            out.push(rest)
+            break
+        end
+        out.push(head)
+        rest = rest[head.len()..rest.len()]
+    end
+    return out
+end
+
+fn text_rows(profile: int, text: string, width: int, fg: int, bold: bool, rows: [string]) is
+    let cs: Cells = to_cells(text)
+    let mut indent: int = 0
+    while indent < cs.ch.len() && cs.ch[indent] == " " is indent += 1 end
+    if indent > width / 2 is indent = 0 end
+    let br: [int] = breaks(cs, width, indent)
+    let mut k: int = 0
+    while k < br.len() is
+        let a: int = br[k]
+        let b: int = br[k + 1]
+        let mut w: int = width_of(cs, a, b)
+        let mut lead: string = ""
+        if k > 0 && indent > 0 is
+            lead = styles::paint(profile, uni::spaces(indent), -1, styles::bg(), false)
+            w += indent
+        end
+        rows.push(lead + paint_cells(profile, cs, a, b, fg, bold) + fill(profile, w, width))
+        k += 2
+    end
+end
+
+;; Pudełko (kod / wskazówka / ostrzeżenie): margines 2 kolumny, padding 1, tło `box_bg`.
+fn box_rows(profile: int, lines: [string], width: int, fg: int, box_bg: int, rows: [string]) is
+    let avail: int = width - 4 - 2
+    let mut wrapped: [string] = []
+    for l in lines is
+        for part in hard_wrap(plain_line(l), avail) is wrapped.push(part) end
+        if plain_line(l) == "" is wrapped.push("") end
+    end
+    let mut bw: int = 0
+    for l in wrapped is
+        let w: int = uni::str_width(l)
+        if w > bw is bw = w end
+    end
+    for l in wrapped is
+        let inner: string = " " + uni::pad_right(l, bw) + " "
+        let used: int = 2 + bw + 2
+        rows.push(styles::paint(profile, "  ", -1, styles::bg(), false) + styles::paint(profile, inner, fg, box_bg, false) + fill(profile, used, width))
+    end
+end
+
+fn plain_line(l: string) -> string is
+    return strip_tags(l)
+end
+
+;; Cała sekcja → wiersze o szerokości `width`.
+pub fn render(content: string, width: int, profile: int) -> [string] is
+    let lines: [string] = str_split(content, "\n")
+    let n: int = lines.len()
+    let mut rows: [string] = []
+    let mut i: int = 0
+    while i < n is
+        let l: string = lines[i]
+        if l.len() < 2 is
+            rows.push(fill(profile, 0, width))
+            i += 1
+        else is
+            let k: string = l[0..1]
+            let t: string = l[2..l.len()]
+            if k == "C" || k == "T" || k == "W" is
+                let cont: string = string_lower(k)
+                let mut blk: [string] = [t]
+                let mut j: int = i + 1
+                while j < n && lines[j].len() >= 2 && lines[j][0..1] == cont is
+                    blk.push(lines[j][2..lines[j].len()])
+                    j += 1
+                end
+                let mut fg: int = styles::cyan()
+                let mut bgc: int = styles::panel()
+                if k == "T" is
+                    fg = styles::yellow()
+                    bgc = styles::tip_bg()
+                end
+                if k == "W" is
+                    fg = styles::orange()
+                    bgc = styles::warn_bg()
+                end
+                box_rows(profile, blk, width, fg, bgc, rows)
+                i = j
+            elsif k == "1" is
+                text_rows(profile, t, width, styles::magenta(), true, rows)
+                i += 1
+            elsif k == "2" is
+                text_rows(profile, t, width, styles::accent(), true, rows)
+                i += 1
+            else is
+                text_rows(profile, t, width, styles::text(), false, rows)
+                i += 1
+            end
+        end
+    end
+    return rows
+end
+
+#[test]
+fn test_strip_tags() is
+    assert_eq(strip_tags("a ⟦o⟧~>⟦/⟧ b"), "a ~> b")
+end
+
+#[test]
+fn test_wrap_rows_have_exact_width() is
+    let rows: [string] = render("p|aaa bbb ccc ddd eee fff", 8, 0)
+    assert_true(rows.len() >= 3)
+    for r in rows is
+        assert_eq(uni::str_width(r), 8)
+    end
+end
