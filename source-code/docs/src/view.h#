@@ -1,0 +1,289 @@
+mod uni
+mod styles
+mod section
+mod model
+
+;; ── view — rysowanie ramki (view.go) ─────────────────────────────────────────
+;; `frame` składa cały ekran jako listę wierszy o szerokości dokładnie `width`
+;; (z tłem), więc rysowanie to jedno zapisanie wszystkich wierszy od lewego
+;; górnego rogu — bez czyszczenia ekranu, a więc bez migotania.
+
+fn p(m: model::Model, s: string, fg: int, bgc: int, bold: bool) -> string is
+    return styles::paint(m.profile, s, fg, bgc, bold)
+end
+
+;; Wiersz panelu: tekst już pomalowany (o szerokości `used`) + tło do `total`.
+fn fill(m: model::Model, painted: string, used: int, total: int, bgc: int) -> string is
+    if used >= total is return painted end
+    return painted + p(m, uni::spaces(total - used), -1, bgc, false)
+end
+
+fn blank(m: model::Model, w: int, bgc: int) -> string is
+    return p(m, uni::spaces(w), -1, bgc, false)
+end
+
+;; ── nagłówek ─────────────────────────────────────────────────────────────────
+
+fn header(m: model::Model) -> string is
+    let sw: int = model::sidebar_w()
+    let right: string = "gen 1 / gen 2 / ROLLING  hl-docs " + m.version
+    let rw: int = m.width - sw
+    let logo: string = p(m, uni::center("◆ HACKER LANG DOCS", sw), styles::magenta(), styles::panel(), true)
+    if rw <= 0 is return fill(m, logo, sw, m.width, styles::panel()) end
+    let r: string = uni::pad_left(right, rw - 2) + "  "
+    return logo + p(m, uni::pad_left(r, rw), styles::muted(), styles::panel(), false)
+end
+
+;; ── sidebar ──────────────────────────────────────────────────────────────────
+
+fn sidebar_row(m: model::Model, rows: model::MenuRows, i: int) -> string is
+    let inner: int = model::sidebar_w() - 1
+    let pn: int = styles::panel()
+    let border: string = p(m, "│", styles::border(), pn, false)
+    if i < 0 || i >= rows.kind.len() is return blank(m, inner, pn) + border end
+    let k: int = rows.kind[i]
+    if k == 0 is return blank(m, inner, pn) + border end
+    if k == 1 is
+        let t: string = "  " + uni::truncate(rows.text[i], inner - 3)
+        return p(m, uni::pad_right(t, inner), styles::yellow(), pn, true) + border
+    end
+    let mut mark: string = "  "
+    let is_sel: bool = rows.pos[i] == m.cursor
+    if is_sel && m.profile == 0 is mark = "> " end
+    let t: string = mark + uni::truncate(rows.text[i], inner - 3)
+    if is_sel is
+        return p(m, uni::pad_right(t, inner), styles::accent(), styles::selected(), true) + border
+    end
+    return p(m, uni::pad_right(t, inner), styles::text(), pn, false) + border
+end
+
+;; ── panel treści ─────────────────────────────────────────────────────────────
+
+fn pane_text(m: model::Model, s: string, fg: int, bold: bool, pad: int, rw: int) -> string is
+    let t: string = uni::clip(s, rw - pad)
+    let used: int = pad + uni::str_width(t)
+    return p(m, uni::spaces(pad), -1, styles::bg(), false) + p(m, t, fg, styles::bg(), bold) + fill(m, "", used, rw, styles::bg())
+end
+
+;; Ekran powitalny (widok menu): odpowiednik `welcome` z Go.
+fn welcome_rows(m: model::Model, rw: int, rows: [string]) is
+    let bgc: int = styles::bg()
+    let n: int = m.sections.len()
+    rows.push(blank(m, rw, bgc))
+    rows.push(blank(m, rw, bgc))
+    rows.push(blank(m, rw, bgc))
+    rows.push(pane_text(m, "Dokumentacja Hacker Lang", styles::magenta(), true, 3, rw))
+    rows.push(blank(m, rw, bgc))
+    rows.push(blank(m, rw, bgc))
+    rows.push(pane_text(m, "Wybierz temat z menu po lewej (" + to_string(n) + " sekcji).", styles::text(), false, 3, rw))
+    rows.push(pane_text(m, "Obslugiwane: gen 1, gen 2, ROLLING", styles::text(), false, 3, rw))
+    rows.push(blank(m, rw, bgc))
+    let hints: [string] = ["↑↓ / j k — nawigacja", "Enter — otwórz", "/ — szukaj", "? — skróty klawiszowe", "q — wyjdz"]
+    for h in hints is
+        rows.push(pane_text(m, h, styles::muted(), false, 3, rw))
+    end
+    rows.push(blank(m, rw, bgc))
+    let tip: string = " 💡 ROLLING = najnowsze funkcje pre-gen 3 "
+    let tw: int = uni::str_width(tip)
+    rows.push(p(m, uni::spaces(5), -1, bgc, false) + p(m, tip, styles::yellow(), styles::tip_bg(), false) + fill(m, "", 5 + tw, rw, bgc))
+end
+
+fn pane_rows(m: model::Model) -> [string] is
+    let rw: int = m.width - model::sidebar_w()
+    let bh: int = model::body_h(m)
+    let bgc: int = styles::bg()
+    let mut rows: [string] = []
+    if m.view == model::view_content() is
+        let sec: section::Section = m.sections[m.section_index]
+        rows.push(pane_text(m, sec.category + " › " + sec.title, styles::muted(), false, 2, rw))
+        let vh: int = model::view_h(m)
+        let mut i: int = 0
+        while i < vh is
+            let li: int = m.scroll + i
+            if li < m.vlines.len() is
+                rows.push(p(m, "  ", -1, bgc, false) + m.vlines[li] + fill(m, "", model::content_w(m) + 2, rw - 2, bgc))
+            else is
+                rows.push(blank(m, rw, bgc))
+            end
+            i += 1
+        end
+    else is
+        welcome_rows(m, rw, rows)
+    end
+    while rows.len() < bh is rows.push(blank(m, rw, bgc)) end
+    return rows
+end
+
+;; ── pasek statusu ────────────────────────────────────────────────────────────
+
+fn status_bar(m: model::Model) -> string is
+    let pn: int = styles::panel()
+    let mut left: string = ""
+    let mut left_fg: int = styles::muted()
+    let mut left_bold: bool = false
+    if m.search_mode is
+        left = "SZUKAJ: " + m.search_query + "_"
+        left_fg = styles::yellow()
+        left_bold = true
+    elsif m.view == model::view_content() is
+        left = "  " + m.sections[m.section_index].title
+        left_fg = styles::accent()
+    else is
+        left = "  " + to_string(m.filtered.len()) + " sekcji"
+        if m.search_query != "" is left = left + "  ·  filtr: " + m.search_query end
+    end
+    let mut hints: string = "↑↓/jk: nav  Enter: open  /: search  ?: help  q: quit"
+    if m.view == model::view_content() is
+        hints = "↑↓/jk: scroll  n/p: category  Esc: menu  ?: help  q: quit  " + to_string(model::scroll_pct(m)) + "%"
+    end
+    if m.search_mode is hints = "Enter: zatwierdź  Esc: wyczyść  ↑↓: wybór" end
+    hints = hints + "  "
+    let inner: int = m.width - 4
+    let mut hw: int = uni::str_width(hints)
+    let mut lw: int = inner - hw
+    if lw < 8 is
+        hints = ""
+        hw = 0
+        lw = inner
+    end
+    let l: string = uni::pad_right(uni::truncate(left, lw), lw)
+    return p(m, "  ", -1, pn, false) + p(m, l, left_fg, pn, left_bold) + p(m, hints, styles::muted(), pn, false) + p(m, "  ", -1, pn, false)
+end
+
+;; ── nakładka pomocy ──────────────────────────────────────────────────────────
+
+fn help_keys() -> [string] is
+    return ["↑↓ / j k", "Enter / Tab", "Esc", "/", "n / p", "g / G", "PgUp / PgDn", "?", "q / Ctrl+C"]
+end
+
+fn help_descs() -> [string] is
+    return [
+        "nawigacja w menu / przewijanie treści",
+        "otwórz zaznaczoną sekcję",
+        "wróć do menu",
+        "szukaj (tytuł, kategoria, treść)",
+        "następna / poprzednia kategoria (w treści)",
+        "góra / dół treści",
+        "przewiń stronę",
+        "ta pomoc",
+        "wyjście",
+    ]
+end
+
+fn help_frame(m: model::Model) -> [string] is
+    let keys: [string] = help_keys()
+    let descs: [string] = help_descs()
+    let pn: int = styles::panel()
+    let mut body: [string] = []
+    let mut widths: [int] = []
+    let mut inner: int = 0
+    ;; wiersze pudełka jako (pomalowany, szerokość)
+    let title: string = "Skróty klawiszowe"
+    let mut texts: [string] = []
+    texts.push("")
+    texts.push(p(m, title, styles::magenta(), pn, true))
+    widths.push(0)
+    widths.push(uni::str_width(title))
+    texts.push("")
+    widths.push(0)
+    let mut i: int = 0
+    while i < keys.len() is
+        texts.push(p(m, "  ", -1, pn, false) + p(m, uni::pad_right(keys[i], 14), styles::green(), pn, true) + p(m, "  " + descs[i], styles::text(), pn, false))
+        widths.push(2 + 14 + 2 + uni::str_width(descs[i]))
+        i += 1
+    end
+    texts.push("")
+    widths.push(0)
+    let note: string = "naciśnij dowolny klawisz, żeby zamknąć"
+    texts.push(p(m, note, styles::muted(), pn, false))
+    widths.push(uni::str_width(note))
+    for w in widths is
+        if w > inner is inner = w end
+    end
+    let bw: int = inner + 6
+    let bc: int = styles::accent()
+    let mut box: [string] = []
+    box.push(p(m, "╭" + uni::repeat("─", bw) + "╮", bc, -1, false))
+    box.push(box_line(m, "", 0, bw))
+    i = 0
+    while i < texts.len() is
+        box.push(box_line(m, texts[i], widths[i], bw))
+        i += 1
+    end
+    box.push(box_line(m, "", 0, bw))
+    box.push(p(m, "╰" + uni::repeat("─", bw) + "╯", bc, -1, false))
+    let total_w: int = bw + 2
+    let top: int = (m.height - box.len()) / 2
+    let left: int = (m.width - total_w) / 2
+    let mut out: [string] = []
+    let mut r: int = 0
+    while r < m.height is
+        let bi: int = r - top
+        if bi >= 0 && bi < box.len() && left >= 0 is
+            out.push(uni::spaces(left) + box[bi] + uni::spaces(m.width - left - total_w))
+        else is
+            out.push(uni::spaces(m.width))
+        end
+        r += 1
+    end
+    return out
+end
+
+fn box_line(m: model::Model, painted: string, w: int, bw: int) -> string is
+    let pn: int = styles::panel()
+    let bc: int = styles::accent()
+    let pad_l: string = p(m, uni::spaces(3), -1, pn, false)
+    let pad_r: string = p(m, uni::spaces(bw - 3 - w), -1, pn, false)
+    return p(m, "│", bc, pn, false) + pad_l + painted + pad_r + p(m, "│", bc, pn, false)
+end
+
+;; ── ramka ────────────────────────────────────────────────────────────────────
+
+pub fn frame(m: model::Model) -> [string] is
+    if !m.ready is return ["", "  Ladowanie..."] end
+    if m.width < 50 || m.height < 8 is
+        let mut tiny: [string] = []
+        let mut r: int = 0
+        while r < m.height is
+            if r == m.height / 2 is
+                tiny.push(uni::center("Za male okno (min 50x8)", m.width))
+            else is
+                tiny.push(uni::spaces(m.width))
+            end
+            r += 1
+        end
+        return tiny
+    end
+    if m.show_help is return help_frame(m) end
+    let mut rows: [string] = []
+    rows.push(header(m))
+    let mr: model::MenuRows = model::menu_rows(m)
+    let pane: [string] = pane_rows(m)
+    let bh: int = model::body_h(m)
+    let mut i: int = 0
+    while i < bh is
+        let ri: int = m.menu_off + i - 1
+        let mut sb: string = ""
+        if i == 0 || i == bh - 1 is
+            sb = sidebar_row(m, mr, -1)
+        else is
+            sb = sidebar_row(m, mr, ri)
+        end
+        rows.push(sb + pane[i])
+        i += 1
+    end
+    rows.push(status_bar(m))
+    return rows
+end
+
+;; Ramka → jeden ciąg do wypisania (pozycjonowanie wiersz po wierszu; w trybie
+;; raw `\n` nie wraca na początek wiersza).
+pub fn draw_string(rows: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < rows.len() is
+        out = out + "\x1b[" + to_string(i + 1) + ";1H" + rows[i]
+        i += 1
+    end
+    return out
+end
