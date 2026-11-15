@@ -1,0 +1,86 @@
+mod section
+
+pub fn basics_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "Witaj w Hacker Lang",
+        category: "PODSTAWY",
+        content: "p|
+1|◆ Hacker Lang — interpreter
+p|
+p|
+p|Hacker Lang (HL) to interpretowany jezyk skryptowy dla HackerOS.
+p|
+p|
+2|Szybki start
+C|hl run skrypt.hl
+c|hl repl
+c|hl exec update-system
+p|
+p|
+2|Kluczowe zasady
+p|  •  Nie ma echo — jest ⟦o⟧~>⟦/⟧
+p|  •  Sudo to operator ⟦o⟧^>⟦/⟧
+p|  •  Zmienne: ⟦o⟧%/@⟦/⟧ | Export: ⟦o⟧=>⟦/⟧
+p|  •  Tlo: ⟦o⟧&⟦/⟧ | Hsh: ⟦o⟧*>⟦/⟧
+p|  •  Gen 2: arytmetyka, for-in, while, switch, typed vars
+p|
+T|💡 Kazda linia zaczyna sie od operatora.
+p|
+p|Uzyj strzalek do nawigacji. ⟦o⟧q⟦/⟧ = wyjscie.",
+    })
+    out.push(section::Section {
+        title: "System Genow",
+        category: "PODSTAWY",
+        content: "p|
+1|System Genow
+p|
+p|
+p|
+2|Deklaracja
+p|  Gen to wersja funkcji jezyka. Deklaracja w pliku:
+p|
+C|using <gen 1>      ;; gen 1
+c|using <gen 2>      ;; gen 2 (domyslny)
+c|using <rolling>    ;; ROLLING — najnowsze
+p|
+p|
+2|Geny
+p|  ⟦o⟧gen 1⟦/⟧  — Podstawowa skladnia (komedy, zmienne, import, goroutines)
+p|  ⟦o⟧gen 2⟦/⟧  — Typowane zmienne, arytmetyka, for-in, while, switch, HackerOS API
+p|  ⟦o⟧ROLLING⟦/⟧  — Najnowsze funkcje (pre-gen 3), nie wszystkie sa stabilne
+p|
+p|
+2|Uwaga
+p|  Brak deklaracji = domyslny gen (gen 2).
+p|  Gen 1 jest pelnie wspierany w gen 2.",
+    })
+    out.push(section::Section {
+        title: "ROLLING — pre-gen 3",
+        category: "PODSTAWY",
+        content: "p|
+1|◆ ROLLING — najnowsze funkcje
+p|
+p|
+p|
+2|Czym jest ROLLING?
+p|  ROLLING zawiera wszystkie najnowsze funkcje wprowadzone
+p|  do Hacker Lang, ktore jeszcze nie sa czescia oficjalnego
+p|  gen 3. Uzywaj jesli chcesz testowac nowe mozliwosci.
+p|
+p|
+2|Deklaracja
+C|using <rolling>
+p|
+p|
+2|Zawiera
+p|  Wszystkie funkcje gen 1 i gen 2 + eksperymentalne dodatki.
+p|  API moze sie zmienic przed wydaniem gen 3.
+p|
+T|💡 ROLLING = gen 2 + wszystko co pojawi sie w gen 3
+p|
+W|⚠ ROLLING moze zawierac zmiany lamace kompatybilnosc!
+p|  Nie uzywaj w produkcji jesli zalezy ci na stabilnosci!",
+    })
+    return out
+end
