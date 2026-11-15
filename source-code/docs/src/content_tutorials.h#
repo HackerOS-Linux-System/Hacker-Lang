@@ -1,0 +1,151 @@
+mod section
+
+pub fn tutorial_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "Tutorial: gen 1 — pelny przyklad",
+        category: "TUTORIALE",
+        content: "p|
+1|Tutorial: gen 1 full
+p|
+p|
+p|
+2|Wszystkie funkcje gen 1
+C|#!/usr/bin/env hl
+c|/// Przyklad gen 1
+c|using <gen 1>
+c|
+c|// curl
+c|# <main/colors>
+c|<< helpers.hl
+c|
+c|% target = 192.168.1.1
+c|
+c|;; Tlo
+c|& python3 -m http.server 9000
+c|~> @COLOR_GREEN PID: @_bg_pid @COLOR_RESET
+c|
+c|;; Hsh
+c|*> notify-send \"Start\"
+c|
+c|;; Petla
+c|_3 > ping -c 1 @target
+c|
+c|;; Goroutine + channel
+c|:** wyniki
+c|:*
+c|    >> curl -s http://@target
+c|    *-- wyniki
+c|done
+c|*-- wyniki
+c|
+c|;; Funkcja
+c|: pokaz def
+c|    ~> Gotowe!
+c|done
+c|-- pokaz",
+    })
+    out.push(section::Section {
+        title: "Tutorial: gen 2 — pelny przyklad",
+        category: "TUTORIALE",
+        content: "p|
+1|Tutorial: gen 2 full
+p|
+p|
+p|
+2|Wszystkie funkcje gen 2
+C|#!/usr/bin/env hl
+c|/// Przyklad gen 2
+c|using <gen 2>
+c|
+c|# <main/colors>
+c|
+c|% count: int  = 0
+c|% limit: int  = 5
+c|% host:  str  = \"localhost\"
+c|
+c|;; For-in
+c|@ port in 80 443 8080 22 3306
+c|    ~> Skanuje port: @port
+c|    >> nc -z -w1 @host @port
+c|    ? ok
+c|        ::green Otwarty!
+c|    done
+c|done
+c|
+c|;; While
+c|?~ @count < @limit
+c|    $(@count + 1) -> @count
+c|    ~> Krok @count
+c|done
+c|
+c|;; Switch
+c|> hostname |> @myhost
+c|? switch @myhost
+c|| hackeros-dev
+c|    ~> Srodowisko dev
+c|| hackeros-prod
+c|    ~> Srodowisko prod
+c|| *
+c|    ~> Host: @myhost
+c|done
+c|
+c|;; Arytmetyka
+c|$(10 * @limit + @count) -> @result
+c|~> Wynik: @result",
+    })
+    out.push(section::Section {
+        title: "Tutorial: update-hackeros.hl",
+        category: "TUTORIALE",
+        content: "p|
+1|Tutorial: update-hackeros
+p|
+p|
+p|
+2|Jak dziala
+C|;; Skrypt uzywa:
+c|;; 1. ping google.com — test internetu
+c|;; 2. jq / grep — odczyt lokalnej wersji z JSON
+c|;; 3. curl — pobierz zdalna wersje
+c|;; 4. sort -V — porownanie semantyczne wersji
+c|;; 5. git clone — pobierz repo
+c|;; 6. hl run unpack.hl — uruchom aktualizacje
+c|
+c|;; Uruchomienie:
+c|hl exec update-hackeros
+c|;; lub:
+c|hl run /usr/share/HackerOS/Scripts/Bin/update-hackeros.hl
+p|
+p|
+2|Szczegoly
+p|  Skrypt porownuje wersje przez sort -V (semantyczne).
+p|  Aktualizacja przez git clone + hl run unpack.hl",
+    })
+    out.push(section::Section {
+        title: "Tutorial: bit — pakiety HL i Rust",
+        category: "TUTORIALE",
+        content: "p|
+1|Tutorial: bit package manager
+p|
+p|
+p|
+2|Instalacja pakietu HL
+C|;; Pakiet tui (type: hl):
+c|bit install tui
+c|;; → git clone https://github.com/bit-io/tui.git
+c|;; → sprawdza source-code/main.hl
+c|
+c|;; Uzycie w kodzie:
+c|# <bit/tui>
+c|-- tui_init
+p|
+p|
+2|Instalacja pakietu Rust
+C|;; Pakiet obsidian (type: rust):
+c|bit install obsidian
+c|;; → git clone ...
+c|;; → cd source-code && cargo build --release
+c|;; → kopiuje binarkę do BIT_HOME/obsidian/",
+    })
+    return out
+end
