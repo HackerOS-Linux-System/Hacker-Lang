@@ -1,0 +1,220 @@
+mod section
+
+pub fn gen1_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "Operatory gen 1 — print, cmd",
+        category: "GEN 1",
+        content: "p|
+1|Operatory gen 1 — podstawowe
+p|
+p|
+p|
+2|~> print
+C|~> Hello, world!
+c|~> Wersja: @HL_VERSION
+c|~> Uzytkownik: @USER
+p|
+p|
+2|Komendy
+p|  ⟦o⟧>⟦/⟧  — uruchom komende (brak interpolacji @var)
+p|  ⟦o⟧^>⟦/⟧  — uruchom z sudo
+p|  ⟦o⟧->⟦/⟧  — izolacja namespace (unshare)
+p|  ⟦o⟧^->⟦/⟧  — sudo + izolacja
+p|  ⟦o⟧>>⟦/⟧  — komenda z interpolacja @zmiennych
+p|  ⟦o⟧*>⟦/⟧  — uruchom przez hsh -c",
+    })
+    out.push(section::Section {
+        title: "Zmienne i export (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|Zmienne i export gen 1
+p|
+p|
+p|
+2|Zmienne lokalne
+C|% target = 192.168.1.1
+c|% name   = HackerOS
+c|% count  = 0
+c|~> Cel: @target
+p|
+p|
+2|Export do srodowiska
+C|=> PATH = /usr/local/bin:@PATH
+c|=> HOME = /root
+c|=> EDITOR = hedit
+p|
+p|
+2|Referencje
+p|  ⟦o⟧@nazwa⟦/⟧ — odwolanie (takze w stringach)
+p|  ⟦o⟧>> hostname |> @myhost⟦/⟧ — zmienna z wynikiem komendy",
+    })
+    out.push(section::Section {
+        title: "Tlo & i hsh *> (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|& background i *> hsh
+p|
+p|
+p|
+2|& — uruchom w tle
+C|& python3 -m http.server 8080
+c|& redis-server
+c|~> PID: @_bg_pid
+c|
+c|_3 & wget -q https://example.com/plik
+p|
+p|
+2|*> — uruchom przez hsh -c
+C|*> ls -la
+c|*> notify-send \"Gotowe!\"
+c|;; *> nie interpoluje @var — uzyj >> do interpolacji
+p|
+p|
+2|Uwaga
+p|  @_bg_pid zawiera PID ostatniego procesu w tle.",
+    })
+    out.push(section::Section {
+        title: "Petla _N (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|Petla _N — powtorz N razy
+p|
+p|
+p|
+2|Przyklad
+C|_10 > hacker update
+c|_5  ~> Powtarzam...
+c|_3  ::green OK
+c|_20 ::nl
+c|
+c|;; Z interpolacja:
+c|_10 >> curl -s http://@host/test
+p|
+p|
+2|Uwaga
+p|  Dziala z komendami, printem, quick-funkcjami.",
+    })
+    out.push(section::Section {
+        title: "Import pliku << (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|Import pliku — <<
+p|
+p|
+p|
+2|Skladnia
+C|<< utils.hl
+c|<< helpers/network.hl
+c|<< /usr/share/HackerOS/lib/common.hl
+c|
+c|;; Z detalami:
+c|<< config.hl | produkcja
+c|<< db.hl | mysql
+p|
+p|
+2|Uwaga
+p|  Detail dostepny przez @_import_detail.",
+    })
+    out.push(section::Section {
+        title: "Goroutines i Channels (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|Goroutines i Channels
+p|
+p|
+p|
+2|:* — goroutine
+C|:*
+c|    > nmap -sn 192.168.1.0/24
+c|done
+c|
+c|;; Z nazwa:
+c|:* scanner def
+c|    > nmap -sn 192.168.1.0/24
+c|done
+p|
+p|
+2|:** / *-- — channel
+C|:** wyniki
+c|
+c|:*
+c|    > ls /tmp
+c|    *-- wyniki
+c|done
+c|
+c|;; Odbierz:
+c|*-- wyniki
+p|
+p|
+2|Uwaga
+C|;; Goroutines to watki w interpretowanym HL.
+c|;; Uzyj & (background) dla prostych zadan parallelnych.",
+    })
+    out.push(section::Section {
+        title: "Importy bibliotek (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|Importy bibliotek
+p|
+p|
+p|
+2|Przestrzenie nazw
+C|# <main/net>          ;; biblioteka standardowa
+c|# <main/fs>
+c|# <main/sys>
+c|# <main/colors>
+c|# <main/cli>
+c|# <main/progress-bar>
+c|# <main/json>
+c|# <main/hk-parser>     ;; parser .hk
+c|# <main/hacker>        ;; parser .hacker
+c|# <bit/tui>            ;; pakiet bit
+c|# <github/user/repo>   ;; z GitHub
+p|
+p|
+2|Sciezka bibliotek main
+C|/usr/lib/HackerOS/Hacker-Lang/main-libs/
+p|
+p|
+2|Kompatybilnosc wstecz — stara skladnia takze dziala",
+    })
+    out.push(section::Section {
+        title: "Znany błąd: cd (gen 1)",
+        category: "GEN 1",
+        content: "p|
+1|Znany błąd gen 1: cd nie działa
+p|
+p|
+p|
+2|Objaw
+C|> cd /jakis/katalog
+c|;; error: No such file or directory (os error 2)
+p|
+p|
+2|Przyczyna
+p|  W gen 1 każda linia komendy (⟦o⟧>, ^>, ->, ^->, >>, *>⟦/⟧) uruchamia
+p|  SPAWNOWANY proces zewnętrzny — dokładnie tak jak w każdym języku,
+p|  które spawnuje polecenia zamiast interpretować je we własnej
+p|  powłoce. ⟦o⟧cd⟦/⟧ NIE istnieje jako samodzielny plik
+p|  wykonywalny na dysku (to wbudowana komenda powłoki bash/zsh/...),
+p|  więc próba jej spawnowania kończy się błędem systemowym.
+p|
+p|
+2|Dlaczego nie wystarczyłoby samo naprawienie spawnowania
+p|  Nawet gdyby \"cd\" dało się uruchomić jako proces, zmiana katalogu
+p|  roboczego W TYM PROCESIE i tak nigdy nie przetrwałaby do KOLEJNEJ
+p|  linii komendy — każda linia to osobny, niezależny proces,
+p|  dziedziczący katalog roboczy skryptu HL, nie katalog ustawiony
+p|  przez poprzednią komendę.
+p|
+p|
+2|To NIE jest literówka w Twoim skrypcie
+p|  To ograniczenie jest udokumentowane tu celowo — jeśli piszesz lub
+p|  utrzymujesz skrypt w stylu gen 1, ⟦o⟧cd⟦/⟧ po prostu
+p|  nie zadziała jako samodzielna linia komendy. Patrz sekcja \"cd —
+p|  wbudowana komenda (gen 2)\" w kategorii GEN 2 dla aktualnego,
+p|  działającego zachowania.",
+    })
+    return out
+end
