@@ -1,0 +1,163 @@
+pub fn seq_len(b0: int) -> int is
+    if b0 < 128 is return 1 end
+    if b0 >= 240 is return 4 end
+    if b0 >= 224 is return 3 end
+    if b0 >= 192 is return 2 end
+    return 1
+end
+
+;; Punkt kodowy zaczynający się w bajcie `i` (nieprawidłowy/uciety UTF-8 → sam bajt).
+pub fn cp_at(s: string, i: int) -> int is
+    let n: int = s.len()
+    let b0: int = byte_at(s, i)
+    let l: int = seq_len(b0)
+    if l == 1 || i + l > n is return b0 end
+    if l == 2 is
+        return ((b0 & 31) << 6) | (byte_at(s, i + 1) & 63)
+    end
+    if l == 3 is
+        return ((b0 & 15) << 12) | ((byte_at(s, i + 1) & 63) << 6) | (byte_at(s, i + 2) & 63)
+    end
+    return ((b0 & 7) << 18) | ((byte_at(s, i + 1) & 63) << 12) | ((byte_at(s, i + 2) & 63) << 6) | (byte_at(s, i + 3) & 63)
+end
+
+;; Szerokość punktu kodowego w kolumnach: 0 (łączące/ZWJ/selektory wariantów),
+;; 2 (CJK, hangul, emoji), inaczej 1. Odpowiada temu, co robi go-runewidth.
+pub fn cp_width(cp: int) -> int is
+    if cp < 32 || (cp >= 127 && cp < 160) is return 0 end
+    if cp < 768 is return 1 end
+    if cp <= 879 is return 0 end                       ;; łączące diakrytyki
+    if cp == 8205 || cp == 65039 || cp == 65038 is return 0 end   ;; ZWJ, VS16, VS15
+    if cp >= 8203 && cp <= 8207 is return 0 end
+    if cp >= 4352 && cp <= 4447 is return 2 end        ;; hangul jamo
+    if cp >= 11904 && cp <= 42191 is return 2 end      ;; CJK, kana, ...
+    if cp >= 44032 && cp <= 55203 is return 2 end      ;; hangul
+    if cp >= 63744 && cp <= 64255 is return 2 end
+    if cp >= 65281 && cp <= 65376 is return 2 end      ;; pełna szerokość
+    if cp >= 65504 && cp <= 65510 is return 2 end
+    if cp >= 126976 && cp <= 129791 is return 2 end    ;; emoji i piktogramy
+    if cp >= 131072 && cp <= 262141 is return 2 end
+    if cp == 9889 || cp == 9193 || cp == 9194 || cp == 9195 || cp == 9196 || cp == 9200 || cp == 9203 is return 2 end
+    return 1
+end
+
+;; Szerokość całego stringa w kolumnach.
+pub fn str_width(s: string) -> int is
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut w: int = 0
+    while i < n is
+        w += cp_width(cp_at(s, i))
+        i += seq_len(byte_at(s, i))
+    end
+    return w
+end
+
+;; Rozbija string na pojedyncze punkty kodowe (każdy jako osobny string).
+pub fn chars(s: string) -> [string] is
+    let mut out: [string] = []
+    let n: int = s.len()
+    let mut i: int = 0
+    while i < n is
+        let l: int = seq_len(byte_at(s, i))
+        let mut e: int = i + l
+        if e > n is e = n end
+        out.push(s[i..e])
+        i = e
+    end
+    return out
+end
+
+;; Przycina do `w` kolumn (bez dopisywania kropek).
+pub fn clip(s: string, w: int) -> string is
+    if w <= 0 is return "" end
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut used: int = 0
+    while i < n is
+        let l: int = seq_len(byte_at(s, i))
+        let cw: int = cp_width(cp_at(s, i))
+        if used + cw > w is break end
+        used += cw
+        i += l
+    end
+    if i >= n is return s end
+    return s[0..i]
+end
+
+;; Przycina do `w` kolumn; jeśli coś ucięto, ostatnie 3 kolumny to "...".
+pub fn truncate(s: string, w: int) -> string is
+    if str_width(s) <= w is return s end
+    if w <= 3 is return clip(s, w) end
+    return clip(s, w - 3) + "..."
+end
+
+;; Dopełnia spacjami z prawej do `w` kolumn (po przycięciu).
+pub fn pad_right(s: string, w: int) -> string is
+    let c: string = clip(s, w)
+    let k: int = w - str_width(c)
+    return c + spaces(k)
+end
+
+;; Dopełnia spacjami z lewej do `w` kolumn (wyrównanie do prawej).
+pub fn pad_left(s: string, w: int) -> string is
+    let c: string = clip(s, w)
+    let k: int = w - str_width(c)
+    return spaces(k) + c
+end
+
+pub fn center(s: string, w: int) -> string is
+    let c: string = clip(s, w)
+    let k: int = w - str_width(c)
+    if k <= 0 is return c end
+    let left: int = k / 2
+    return spaces(left) + c + spaces(k - left)
+end
+
+pub fn spaces(n: int) -> string is
+    return repeat(" ", n)
+end
+
+pub fn repeat(s: string, n: int) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        out = out + s
+        i += 1
+    end
+    return out
+end
+
+;; Usuwa ostatni punkt kodowy (backspace w polu wyszukiwania; Go ucinał bajt
+;; i psuł polskie znaki).
+pub fn drop_last(s: string) -> string is
+    let n: int = s.len()
+    if n == 0 is return s end
+    let mut i: int = n - 1
+    while i > 0 && (byte_at(s, i) & 192) == 128 is
+        i -= 1
+    end
+    return s[0..i]
+end
+
+;; Czy to wypisywalny znak (do pola wyszukiwania): nie-sterujący, niepusty.
+pub fn printable(ch: string) -> bool is
+    if ch.len() == 0 is return false end
+    let b: int = byte_at(ch, 0)
+    if b < 32 || b == 127 is return false end
+    return true
+end
+
+#[test]
+fn test_width_and_clip() is
+    assert_eq(str_width("Zażółć"), 6)
+    assert_eq(str_width("💡 ok"), 5)
+    assert_eq(truncate("Quick Functions :: — lista", 12), "Quick Fun...")
+    assert_eq(str_width(pad_right("ą→", 5)), 5)
+end
+
+#[test]
+fn test_drop_last_keeps_utf8() is
+    assert_eq(drop_last("Zażó"), "Zaż")
+    assert_eq(drop_last(""), "")
+end
