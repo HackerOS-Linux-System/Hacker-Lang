@@ -1,0 +1,104 @@
+mod section
+
+pub fn coreutils_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "/> — wbudowane coreutils",
+        category: "COREUTILS",
+        content: "p|
+1|◆ /> — wbudowane coreutils
+p|
+p|
+p|
+2|Czym się różni od >
+p|  Operator ⟦o⟧/>⟦/⟧ uruchamia narzędzie wbudowane w interpreter (crate
+p|  ⟦o⟧hl-coreutils⟦/⟧) zamiast fork/exec prawdziwej binarki. Działa identycznie
+p|  na każdym systemie, nawet bez zainstalowanych coreutils.
+p|
+p|
+2|Przykład
+C|/> cat plik.txt
+c|/> ls /etc
+c|/> grep -i blad log.txt |> @wynik
+p|
+p|
+2|Porównanie
+p|  ⟦o⟧/> echo hello⟦/⟧  — dostępne wbudowane narzędzie
+p|  ⟦o⟧> echo hello⟦/⟧   — wpadamy do prawdziwego /bin/echo (fork+exec)
+p|
+p|
+2|Uwaga
+p|  Każde narzędzie to osobny plik w ⟦o⟧source-code/coreutils/src/tools/⟦/⟧.",
+    })
+    out.push(section::Section {
+        title: "/> — pliki i tekst",
+        category: "COREUTILS",
+        content: "p|
+1|/> — pliki i tekst
+p|
+p|
+p|
+2|Odczyt / listowanie
+C|/> cat plik.txt
+c|/> ls -a /katalog
+c|/> stat plik.txt
+c|/> find /etc -name \"*.conf\"
+c|/> du -h /var/log
+p|
+p|
+2|Przetwarzanie tekstu
+C|/> grep -in blad log.txt
+c|/> head -n 5 plik.txt
+c|/> tail -n 20 plik.txt
+c|/> sort -r lista.txt
+c|/> uniq lista.txt
+c|/> cut -d: -f1 /etc/passwd
+c|/> tr 'a-z' 'A-Z' |> @wynik
+c|/> rev plik.txt
+c|/> wc -l plik.txt",
+    })
+    out.push(section::Section {
+        title: "/> — pliki i uprawnienia",
+        category: "COREUTILS",
+        content: "p|
+1|/> — zarządzanie plikami
+p|
+p|
+p|
+2|Kopiowanie / przenoszenie / usuwanie
+C|/> cp -r src dst
+c|/> mv stary nowy
+c|/> rm -rf katalog
+c|/> mkdir -p a/b/c
+c|/> touch nowy_plik.txt
+p|
+p|
+2|Uprawnienia
+C|/> chmod 755 skrypt.sh
+c|/> basename /usr/bin/hl
+c|/> dirname /usr/bin/hl",
+    })
+    out.push(section::Section {
+        title: "/> — system i generatory",
+        category: "COREUTILS",
+        content: "p|
+1|/> — system i generatory
+p|
+p|
+p|
+2|Informacje o systemie
+C|/> pwd
+c|/> which curl
+c|/> env
+c|/> date +%Y-%m-%d
+c|/> sleep 2
+p|
+p|
+2|Generowanie wyjścia
+C|/> seq 1 10
+c|/> printf '%s: %d\\n' test 42
+c|/> yes ok |> @wynik
+c|/> xargs -n1 echo <<< \"a b c\"",
+    })
+    return out
+end
