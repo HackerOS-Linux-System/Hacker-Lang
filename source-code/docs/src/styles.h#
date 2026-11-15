@@ -1,0 +1,62 @@
+pub fn bg() -> int is return 0x0d1117 end
+pub fn panel() -> int is return 0x161b22 end
+pub fn border() -> int is return 0x30363d end
+pub fn accent() -> int is return 0x58a6ff end
+pub fn green() -> int is return 0x3fb950 end
+pub fn yellow() -> int is return 0xd29922 end
+pub fn red() -> int is return 0xf85149 end
+pub fn magenta() -> int is return 0xbc8cff end
+pub fn cyan() -> int is return 0x79c0ff end
+pub fn orange() -> int is return 0xffa657 end
+pub fn muted() -> int is return 0x8b949e end
+pub fn text() -> int is return 0xe6edf3 end
+pub fn selected() -> int is return 0x1f6feb end
+pub fn tip_bg() -> int is return 0x1c1a00 end
+pub fn warn_bg() -> int is return 0x1a1200 end
+
+;; Wykrywa możliwości terminala ze zmiennych środowiskowych.
+pub fn detect_profile() -> int is
+    if env_get("NO_COLOR") != "" is return 0 end
+    let term: string = env_get("TERM")
+    if term == "dumb" is return 0 end
+    let ct: string = string_lower(env_get("COLORTERM"))
+    if ct == "truecolor" || ct == "24bit" is return 2 end
+    return 1
+end
+
+fn cube(v: int) -> int is
+    return (v * 5 + 127) / 255
+end
+
+;; 0xRRGGBB → indeks palety xterm-256 (kostka 6×6×6).
+pub fn to_256(c: int) -> int is
+    let r: int = (c >> 16) & 255
+    let g: int = (c >> 8) & 255
+    let b: int = c & 255
+    return 16 + 36 * cube(r) + 6 * cube(g) + cube(b)
+end
+
+fn color_seq(profile: int, c: int, is_bg: bool) -> string is
+    if c < 0 || profile == 0 is return "" end
+    if profile == 2 is
+        let r: int = (c >> 16) & 255
+        let g: int = (c >> 8) & 255
+        let b: int = c & 255
+        let lead: string = "38"
+        if is_bg is lead = "48" end
+        return "\x1b[" + lead + ";2;" + to_string(r) + ";" + to_string(g) + ";" + to_string(b) + "m"
+    end
+    let lead: string = "38"
+    if is_bg is lead = "48" end
+    return "\x1b[" + lead + ";5;" + to_string(to_256(c)) + "m"
+end
+
+;; Maluje tekst: fg/bg (−1 = domyślny), pogrubienie. Zawsze kończy resetem.
+pub fn paint(profile: int, s: string, fg: int, bgc: int, bold: bool) -> string is
+    if s == "" is return "" end
+    let mut pre: string = ""
+    if bold is pre = "\x1b[1m" end
+    pre = pre + color_seq(profile, bgc, true) + color_seq(profile, fg, false)
+    if pre == "" is return s end
+    return pre + s + "\x1b[0m"
+end
