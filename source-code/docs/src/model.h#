@@ -1,0 +1,360 @@
+mod uni
+mod doc
+mod section
+mod content
+
+;; ── model — stan aplikacji i obsługa klawiszy (model.go) ─────────────────────
+;; Elm-owa pętla bubbletea (Init/Update/View) → zwykła pętla w main.h#:
+;; `handle_key` robi to, co `Update(tea.KeyMsg)`, `resize` — `tea.WindowSizeMsg`.
+;; Struktury H# są referencjami, więc funkcje mutują `Model` wprost.
+
+pub fn view_menu() -> int is return 0 end
+pub fn view_content() -> int is return 1 end
+
+pub struct Model is
+    pub sections: [section::Section]
+    pub plain: [string]          ;; tekst do wyszukiwania, małymi literami (1:1 z sections)
+    pub view: int
+    pub cursor: int              ;; pozycja w `filtered`
+    pub section_index: int       ;; indeks w `sections` otwartej sekcji
+    pub filtered: [int]
+    pub menu_off: int            ;; pierwszy widoczny wiersz menu (przewijanie)
+    pub search_mode: bool
+    pub search_query: string
+    pub show_help: bool
+    pub width: int
+    pub height: int
+    pub ready: bool
+    pub vlines: [string]         ;; wyrenderowana treść otwartej sekcji
+    pub vwidth: int              ;; szerokość, dla której policzono vlines
+    pub scroll: int              ;; pierwszy widoczny wiersz vlines
+    pub profile: int
+    pub version: string
+    pub quit: bool
+end
+
+pub fn new_model(profile: int, version: string) -> Model is
+    let secs: [section::Section] = content::all()
+    let mut pl: [string] = []
+    let mut idx: [int] = []
+    let mut i: int = 0
+    while i < secs.len() is
+        pl.push(string_lower(secs[i].title + "\n" + secs[i].category + "\n") + doc::plain(secs[i].content))
+        idx.push(i)
+        i += 1
+    end
+    return Model {
+        sections: secs, plain: pl, view: view_menu(), cursor: 0, section_index: 0,
+        filtered: idx, menu_off: 0, search_mode: false, search_query: "", show_help: false,
+        width: 80, height: 24, ready: false, vlines: [], vwidth: 0, scroll: 0,
+        profile: profile, version: version, quit: false,
+    }
+end
+
+;; ── geometria (te same liczby używa view.h#) ─────────────────────────────────
+
+pub fn sidebar_w() -> int is return 30 end
+
+;; Wysokość obszaru treści: całość minus nagłówek i pasek statusu.
+pub fn body_h(m: Model) -> int is
+    let h: int = m.height - 2
+    if h < 3 is return 3 end
+    return h
+end
+
+;; Szerokość tekstu w panelu treści (panel − 2×padding 2).
+pub fn content_w(m: Model) -> int is
+    let w: int = m.width - sidebar_w() - 4
+    if w < 10 is return 10 end
+    return w
+end
+
+;; Liczba wierszy viewportu (breadcrumb zajmuje pierwszy wiersz panelu).
+pub fn view_h(m: Model) -> int is
+    let h: int = body_h(m) - 1
+    if h < 1 is return 1 end
+    return h
+end
+
+pub fn max_scroll(m: Model) -> int is
+    let r: int = m.vlines.len() - view_h(m)
+    if r < 0 is return 0 end
+    return r
+end
+
+pub fn scroll_by(m: Model, delta: int) is
+    let mut s: int = m.scroll + delta
+    if s > max_scroll(m) is s = max_scroll(m) end
+    if s < 0 is s = 0 end
+    m.scroll = s
+end
+
+;; Procent przewinięcia (0–100) — pokazywany w pasku statusu.
+pub fn scroll_pct(m: Model) -> int is
+    let mx: int = max_scroll(m)
+    if mx == 0 is return 100 end
+    return m.scroll * 100 / mx
+end
+
+;; ── menu: wiersze (kategorie + pozycje) i przewijanie ────────────────────────
+
+;; Płaska lista wierszy menu: kind 0 = odstęp, 1 = kategoria, 2 = pozycja.
+pub struct MenuRows is
+    pub kind: [int]
+    pub text: [string]
+    pub pos: [int]       ;; dla pozycji: indeks w `filtered`
+end
+
+pub fn menu_rows(m: Model) -> MenuRows is
+    let mut r: MenuRows = MenuRows { kind: [], text: [], pos: [] }
+    let mut cur_cat: string = ""
+    let mut first: bool = true
+    let mut i: int = 0
+    while i < m.filtered.len() is
+        let s: section::Section = m.sections[m.filtered[i]]
+        if s.category != cur_cat is
+            cur_cat = s.category
+            if !first is
+                r.kind.push(0)
+                r.text.push("")
+                r.pos.push(-1)
+            end
+            first = false
+            r.kind.push(1)
+            r.text.push(cur_cat)
+            r.pos.push(-1)
+        end
+        r.kind.push(2)
+        r.text.push(s.title)
+        r.pos.push(i)
+        i += 1
+    end
+    return r
+end
+
+;; Wiersze widocznego okna menu: odstęp górny + dolny zostają puste.
+pub fn menu_visible(m: Model) -> int is
+    let v: int = body_h(m) - 2
+    if v < 1 is return 1 end
+    return v
+end
+
+;; Zapewnia, że zaznaczona pozycja (i jej nagłówek kategorii) jest widoczna.
+;; W Go menu nie miało przewijania — przy >25 sekcjach kursor znikał poza ekranem.
+pub fn ensure_visible(m: Model) is
+    let r: MenuRows = menu_rows(m)
+    let vis: int = menu_visible(m)
+    let mut row: int = 0
+    let mut i: int = 0
+    while i < r.kind.len() is
+        if r.kind[i] == 2 && r.pos[i] == m.cursor is row = i end
+        i += 1
+    end
+    let mut top: int = row
+    if row >= 1 && r.kind[row - 1] == 1 is top = row - 1 end
+    if top < m.menu_off is m.menu_off = top end
+    if row >= m.menu_off + vis is m.menu_off = row - vis + 1 end
+    let mx: int = r.kind.len() - vis
+    if m.menu_off > mx is m.menu_off = mx end
+    if m.menu_off < 0 is m.menu_off = 0 end
+end
+
+;; ── wyszukiwanie ─────────────────────────────────────────────────────────────
+
+pub fn apply_search(m: Model) is
+    let mut out: [int] = []
+    let q: string = string_lower(m.search_query)
+    let mut i: int = 0
+    while i < m.sections.len() is
+        if q == "" || string_contains(m.plain[i], q) is out.push(i) end
+        i += 1
+    end
+    m.filtered = out
+    m.cursor = 0
+    m.menu_off = 0
+end
+
+;; ── sekcje ───────────────────────────────────────────────────────────────────
+
+;; Przelicza wyrenderowaną treść (po zmianie sekcji lub szerokości okna).
+pub fn rerender(m: Model) is
+    m.vwidth = content_w(m)
+    m.vlines = doc::render(m.sections[m.section_index].content, m.vwidth, m.profile)
+    if m.scroll > max_scroll(m) is m.scroll = max_scroll(m) end
+end
+
+pub fn open_section(m: Model, idx: int) is
+    m.section_index = idx
+    m.view = view_content()
+    m.scroll = 0
+    rerender(m)
+end
+
+pub fn open_cursor(m: Model) is
+    if m.filtered.len() > 0 is open_section(m, m.filtered[m.cursor]) end
+end
+
+pub fn resize(m: Model, w: int, h: int) is
+    m.width = w
+    m.height = h
+    m.ready = true
+    if m.view == view_content() is rerender(m) end
+    ensure_visible(m)
+end
+
+;; „n” / „p” w treści: pierwsza sekcja następnej / poprzedniej kategorii.
+pub fn jump_category(m: Model, dir: int) is
+    let mut order: [string] = []
+    let mut first_of: [int] = []
+    let mut i: int = 0
+    while i < m.sections.len() is
+        let c: string = m.sections[i].category
+        let mut seen: bool = false
+        for o in order is
+            if o == c is seen = true end
+        end
+        if !seen is
+            order.push(c)
+            first_of.push(i)
+        end
+        i += 1
+    end
+    let cur: string = m.sections[m.section_index].category
+    let mut cur_idx: int = 0
+    i = 0
+    while i < order.len() is
+        if order[i] == cur is cur_idx = i end
+        i += 1
+    end
+    let next: int = cur_idx + dir
+    if next < 0 || next >= order.len() is return end
+    open_section(m, first_of[next])
+    i = 0
+    while i < m.filtered.len() is
+        if m.filtered[i] == first_of[next] is m.cursor = i end
+        i += 1
+    end
+    ensure_visible(m)
+end
+
+;; ── klawisze ─────────────────────────────────────────────────────────────────
+
+pub fn handle_key(m: Model, key: string) is
+    if m.show_help is
+        if key == "?" || key == "esc" || key == "q" || key == "enter" || key == " " is
+            m.show_help = false
+        end
+        return
+    end
+    if m.search_mode is
+        handle_search_key(m, key)
+        return
+    end
+    let in_content: bool = m.view == view_content()
+    if key == "q" || key == "ctrl+c" is
+        m.quit = true
+    elsif key == "?" is
+        m.show_help = true
+    elsif key == "/" is
+        m.search_mode = true
+        m.search_query = ""
+        m.view = view_menu()
+        apply_search(m)
+    elsif key == "esc" is
+        if in_content is m.view = view_menu() end
+    elsif key == "up" || key == "k" is
+        if in_content is scroll_by(m, -3) else is move_cursor(m, -1) end
+    elsif key == "down" || key == "j" is
+        if in_content is scroll_by(m, 3) else is move_cursor(m, 1) end
+    elsif key == "wheelup" is
+        if in_content is scroll_by(m, -3) end
+    elsif key == "wheeldown" is
+        if in_content is scroll_by(m, 3) end
+    elsif key == "enter" || key == " " is
+        if !in_content is
+            open_cursor(m)
+        elsif key == " " is
+            scroll_by(m, view_h(m))           ;; viewport: spacja = strona w dół
+        end
+    elsif key == "tab" is
+        if in_content is m.view = view_menu() else is open_cursor(m) end
+    elsif key == "n" is
+        if in_content is jump_category(m, 1) end
+    elsif key == "p" is
+        if in_content is jump_category(m, -1) end
+    elsif key == "pgup" || key == "b" is
+        if in_content is scroll_by(m, -view_h(m)) else is move_cursor(m, -menu_visible(m)) end
+    elsif key == "pgdown" || key == "f" is
+        if in_content is scroll_by(m, view_h(m)) else is move_cursor(m, menu_visible(m)) end
+    elsif key == "u" || key == "ctrl+u" is
+        if in_content is scroll_by(m, -(view_h(m) / 2)) end
+    elsif key == "d" || key == "ctrl+d" is
+        if in_content is scroll_by(m, view_h(m) / 2) end
+    elsif key == "g" || key == "home" is
+        if in_content is m.scroll = 0 else is move_cursor(m, -100000) end
+    elsif key == "G" || key == "end" is
+        if in_content is m.scroll = max_scroll(m) else is move_cursor(m, 100000) end
+    end
+end
+
+fn move_cursor(m: Model, delta: int) is
+    if m.filtered.len() == 0 is return end
+    let mut c: int = m.cursor + delta
+    if c < 0 is c = 0 end
+    if c > m.filtered.len() - 1 is c = m.filtered.len() - 1 end
+    m.cursor = c
+    ensure_visible(m)
+end
+
+fn handle_search_key(m: Model, key: string) is
+    if key == "esc" || key == "ctrl+c" is
+        m.search_mode = false
+        m.search_query = ""
+        apply_search(m)
+    elsif key == "enter" is
+        m.search_mode = false
+    elsif key == "backspace" is
+        m.search_query = uni::drop_last(m.search_query)
+        apply_search(m)
+    elsif key == "up" is
+        move_cursor(m, -1)
+    elsif key == "down" is
+        move_cursor(m, 1)
+    elsif uni::printable(key) && key.len() <= 4 is
+        m.search_query = m.search_query + key
+        apply_search(m)
+    end
+end
+
+#[test]
+fn test_search_polish_and_case() is
+    let m: Model = new_model(0, "t")
+    m.search_query = "PĘTL"
+    apply_search(m)
+    assert_true(m.filtered.len() >= 1)
+    assert_true(m.filtered.len() < m.sections.len())
+end
+
+#[test]
+fn test_navigation_and_jump() is
+    let m: Model = new_model(0, "t")
+    resize(m, 100, 30)
+    handle_key(m, "down")
+    assert_eq(m.cursor, 1)
+    handle_key(m, "enter")
+    assert_eq(m.view, 1)
+    handle_key(m, "n")
+    assert_true(m.sections[m.section_index].category != m.sections[0].category)
+    handle_key(m, "esc")
+    assert_eq(m.view, 0)
+end
+
+#[test]
+fn test_menu_scrolls_with_cursor() is
+    let m: Model = new_model(0, "t")
+    resize(m, 100, 14)
+    handle_key(m, "G")
+    assert_true(m.menu_off > 0)
+    let r: MenuRows = menu_rows(m)
+    assert_true(r.kind.len() > menu_visible(m))
+end
