@@ -1,0 +1,37 @@
+mod section
+
+pub fn quick_func_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "Quick Functions :: — lista",
+        category: "QUICK FUNCTIONS",
+        content: "p|
+1|Quick Functions ::
+p|
+p|
+p|
+2|Uzycie
+C|::upper hello world
+c|;; HELLO WORLD
+c|
+c|::exists /etc/passwd
+c|? ok
+c|    ::green Plik istnieje!
+c|done
+c|
+c|::hr 40
+c|::bold Naglowek
+c|::hr 40
+p|
+p|
+2|Pelna lista
+p|  ⟦h⟧String:⟦/⟧  upper lower len trim rev repeat replace
+p|  ⟦h⟧String test:⟦/⟧  contains startswith endswith split lines words
+p|  ⟦h⟧Math:⟦/⟧  abs ceil floor round max min rand
+p|  ⟦h⟧System:⟦/⟧  env date time pid which
+p|  ⟦h⟧Plik:⟦/⟧  exists isdir isfile basename dirname read
+p|  ⟦h⟧Env:⟦/⟧  set get type unset
+p|  ⟦h⟧UI:⟦/⟧  nl hr bold red green yellow cyan",
+    })
+    return out
+end
