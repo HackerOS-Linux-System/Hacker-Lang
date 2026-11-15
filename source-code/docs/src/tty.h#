@@ -1,0 +1,309 @@
+mod uni
+
+;; ── tty — terminal: tryb raw, ekran alternatywny, klawisze, mysz, rozmiar ───
+;; Zastępuje to, co w wersji Go robił bubbletea (tea.WithAltScreen, parser
+;; wejścia, tea.WindowSizeMsg). Standardowy `std -> term` w H# nie ma jeszcze
+;; trybu raw ani `read_key` (są no-opami), więc robimy to bezpośrednio:
+;;
+;;   * tryb raw / restore  — `stty -F /dev/tty` (zapisujemy `stty -g`, przywracamy na wyjściu),
+;;   * odczyt klawiszy     — `read(2)` z limitem czasu (VMIN=0, VTIME=1 → 100 ms). Dzięki temu
+;;                           samotny Esc da się odróżnić od początku sekwencji `ESC [ A`
+;;                           (stdio `getchar` tu nie wystarcza: po pierwszym EOF stdio w musl
+;;                           „klei” znacznik EOF i kolejne odczyty już nic nie zwracają),
+;;   * rozmiar okna        — `ioctl(TIOCGWINSZ)`; gdy zawiedzie, `stty size`.
+;;
+;; Nazwy klawiszy są takie same jak `tea.KeyMsg.String()` w wersji Go:
+;;   "up" "down" "left" "right" "enter" "esc" "tab" "shift+tab" "backspace" "delete"
+;;   "pgup" "pgdown" "home" "end" "ctrl+c" "ctrl+d" "ctrl+u" ... oraz pojedyncze znaki.
+;; Dodatkowo mysz (tylko gdy włączona przez HL_DOCS_MOUSE): "wheelup" / "wheeldown".
+
+extern static [c] is
+    fn read(fd: int, buf: int, n: int) -> int
+    fn calloc(n: int, sz: int) -> int
+    fn isatty(fd: int) -> int
+    fn ioctl(fd: int, req: int, arg: int) -> int
+end
+
+;; Stan wejścia: bufor `read(2)` + kolejka klawiszy już rozpoznanych, ale jeszcze
+;; niewydanych (jeden `read` potrafi zwrócić kilka klawiszy naraz, np. wklejenie).
+pub struct Input is
+    pub buf: int
+    pub pending: [string]
+    pub saved: string        ;; wynik `stty -g` sprzed wejścia w tryb raw
+    pub raw: bool
+end
+
+pub fn is_interactive() -> bool is
+    return isatty(0) == 1 && isatty(1) == 1
+end
+
+@pointers
+pub fn new_input() -> Input is
+    return Input { buf: calloc(256, 1), pending: [], saved: "", raw: false }
+end
+
+fn stty(args: string) -> ProcResult is
+    return proc_run_cmd("stty -F /dev/tty " + args + " 2>/dev/null", 3)
+end
+
+;; Wejście w tryb raw: bez echa, bez buforowania linii, odczyt z limitem 100 ms.
+pub fn enter_raw(inp: Input) -> bool is
+    let g: ProcResult = stty("-g")
+    if g.exit_code != 0 is return false end
+    inp.saved = trim_ws(g.stdout)
+    let r: ProcResult = stty("raw -echo min 0 time 1")
+    if r.exit_code != 0 is return false end
+    inp.raw = true
+    return true
+end
+
+pub fn leave_raw(inp: Input) is
+    if !inp.raw is return end
+    inp.raw = false
+    if inp.saved != "" is
+        let r: ProcResult = stty(inp.saved)
+        if r.exit_code == 0 is return end
+    end
+    stty("sane")
+end
+
+fn trim_ws(s: string) -> string is
+    let mut a: int = 0
+    let mut b: int = s.len()
+    while a < b && is_ws(byte_at(s, a)) is a += 1 end
+    while b > a && is_ws(byte_at(s, b - 1)) is b -= 1 end
+    return s[a..b]
+end
+
+fn is_ws(c: int) -> bool is
+    return c == 32 || c == 10 || c == 13 || c == 9
+end
+
+;; ── Ekran ────────────────────────────────────────────────────────────────────
+
+pub fn out(s: string) is
+    __builtin_io_write_no_nl(s)
+end
+
+pub fn flush() is
+    __builtin_io_flush()
+end
+
+;; Ekran alternatywny + ukryty kursor (+ raportowanie myszy SGR, jeśli `mouse`).
+pub fn enter_screen(mouse: bool) is
+    let mut s: string = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"
+    if mouse is s = s + "\x1b[?1002h\x1b[?1006h" end
+    out(s)
+    flush()
+end
+
+pub fn leave_screen(mouse: bool) is
+    let mut s: string = ""
+    if mouse is s = "\x1b[?1006l\x1b[?1002l" end
+    out(s + "\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
+    flush()
+end
+
+;; ── Rozmiar okna ─────────────────────────────────────────────────────────────
+
+pub struct Size is
+    pub cols: int
+    pub rows: int
+end
+
+;; TIOCGWINSZ = 0x5413 = 21523 (Linux); struct winsize = 4 × u16: rows, cols, ...
+@pointers
+pub fn size() -> Size is
+    let b: int = calloc(8, 1)
+    let mut fd: int = 1
+    if isatty(1) != 1 is fd = 0 end
+    let r: int = ioctl(fd, 21523, b)
+    if r == 0 is
+        let rows: int = ptr_read_i16(b, 0) & 65535
+        let cols: int = ptr_read_i16(b, 2) & 65535
+        if rows > 0 && cols > 0 is
+            return Size { cols: cols, rows: rows }
+        end
+    end
+    return size_via_stty()
+end
+
+fn size_via_stty() -> Size is
+    let r: ProcResult = stty("size")
+    if r.exit_code == 0 is
+        let parts: [string] = str_split(trim_ws(r.stdout), " ")
+        if parts.len() >= 2 is
+            let rows: int = str_to_int(parts[0])
+            let cols: int = str_to_int(parts[1])
+            if rows > 0 && cols > 0 is return Size { cols: cols, rows: rows } end
+        end
+    end
+    return Size { cols: 80, rows: 24 }
+end
+
+;; ── Klawisze ─────────────────────────────────────────────────────────────────
+
+;; Czeka do ~100 ms. Zwraca nazwę klawisza albo "" (timeout / nic do odczytu).
+@pointers
+pub fn read_key(inp: Input) -> string is
+    if inp.pending.len() > 0 is return pop_front(inp) end
+    let n: int = read(0, inp.buf, 256)
+    if n <= 0 is return "" end
+    let mut bs: [int] = []
+    let mut i: int = 0
+    while i < n is
+        bs.push(ptr_read_i8(inp.buf, i) & 255)
+        i += 1
+    end
+    parse_keys(bs, inp.pending)
+    if inp.pending.len() == 0 is return "" end
+    return pop_front(inp)
+end
+
+fn pop_front(inp: Input) -> string is
+    let first: string = inp.pending[0]
+    let mut rest: [string] = []
+    let mut i: int = 1
+    while i < inp.pending.len() is
+        rest.push(inp.pending[i])
+        i += 1
+    end
+    inp.pending = rest
+    return first
+end
+
+fn is_final(b: int) -> bool is
+    return b >= 64 && b <= 126
+end
+
+;; Zamienia surowe bajty na nazwy klawiszy (dopisuje do `out_keys`). Czysta
+;; funkcja — testowana bez terminala (tests/tty_test.h#).
+pub fn parse_keys(bs: [int], out_keys: [string]) is
+    let n: int = bs.len()
+    let mut i: int = 0
+    while i < n is
+        let b: int = bs[i]
+        if b == 27 is
+            if i + 1 >= n is
+                out_keys.push("esc")
+                i += 1
+            elsif bs[i + 1] == 91 is
+                ;; CSI: ESC [ params final
+                let mut j: int = i + 2
+                let mut params: string = ""
+                while j < n && !is_final(bs[j]) is
+                    params = params + str_from_byte(bs[j])
+                    j += 1
+                end
+                if j >= n is
+                    out_keys.push("esc")      ;; urwana sekwencja → traktuj jak Esc
+                    i += 1
+                else is
+                    let fin: int = bs[j]
+                    let key: string = csi_key(params, fin)
+                    if key != "" is out_keys.push(key) end
+                    i = j + 1
+                end
+            elsif bs[i + 1] == 79 && i + 2 < n is
+                ;; SS3: ESC O A..D / H / F
+                let key: string = ss3_key(bs[i + 2])
+                if key != "" is out_keys.push(key) end
+                i += 3
+            else is
+                ;; Alt+znak — nie obsługujemy, ale nie wolno zgubić Esc
+                out_keys.push("esc")
+                i += 1
+            end
+        elsif b == 13 || b == 10 is
+            out_keys.push("enter")
+            i += 1
+        elsif b == 9 is
+            out_keys.push("tab")
+            i += 1
+        elsif b == 127 || b == 8 is
+            out_keys.push("backspace")
+            i += 1
+        elsif b < 32 is
+            out_keys.push("ctrl+" + str_from_byte(b + 96))
+            i += 1
+        elsif b >= 128 is
+            let l: int = uni::seq_len(b)
+            let mut s: string = ""
+            let mut k: int = 0
+            while k < l && i + k < n is
+                s = s + str_from_byte(bs[i + k])
+                k += 1
+            end
+            out_keys.push(s)
+            i += l
+        else is
+            out_keys.push(str_from_byte(b))
+            i += 1
+        end
+    end
+end
+
+fn ss3_key(c: int) -> string is
+    if c == 65 is return "up" end
+    if c == 66 is return "down" end
+    if c == 67 is return "right" end
+    if c == 68 is return "left" end
+    if c == 72 is return "home" end
+    if c == 70 is return "end" end
+    return ""
+end
+
+;; `params` = bajty między `ESC [` a znakiem końcowym, `fin` = znak końcowy.
+fn csi_key(params: string, fin: int) -> string is
+    if fin == 65 is return "up" end
+    if fin == 66 is return "down" end
+    if fin == 67 is return "right" end
+    if fin == 68 is return "left" end
+    if fin == 72 is return "home" end
+    if fin == 70 is return "end" end
+    if fin == 90 is return "shift+tab" end
+    if fin == 126 is
+        let code: int = str_to_int(params)
+        if code == 1 || code == 7 is return "home" end
+        if code == 4 || code == 8 is return "end" end
+        if code == 3 is return "delete" end
+        if code == 5 is return "pgup" end
+        if code == 6 is return "pgdown" end
+        return ""
+    end
+    ;; mysz SGR: ESC [ < b ; x ; y  (M = wciśnięcie / ruch, m = zwolnienie)
+    if (fin == 77 || fin == 109) && params.len() > 0 && byte_at(params, 0) == 60 is
+        let parts: [string] = str_split(params[1..params.len()], ";")
+        if parts.len() >= 1 && fin == 77 is
+            let btn: int = str_to_int(parts[0])
+            if (btn & 67) == 64 is return "wheelup" end
+            if (btn & 67) == 65 is return "wheeldown" end
+        end
+        return ""
+    end
+    return ""
+end
+
+#[test]
+fn test_parse_keys() is
+    let mut ks: [string] = []
+    parse_keys([27, 91, 65, 106, 27, 91, 53, 126, 27, 79, 66, 195, 179, 13, 3, 27], ks)
+    assert_eq(ks.len(), 8)
+    assert_eq(ks[0], "up")
+    assert_eq(ks[1], "j")
+    assert_eq(ks[2], "pgup")
+    assert_eq(ks[3], "down")
+    assert_eq(ks[4], "ó")
+    assert_eq(ks[5], "enter")
+    assert_eq(ks[6], "ctrl+c")
+    assert_eq(ks[7], "esc")
+end
+
+#[test]
+fn test_parse_mouse_wheel() is
+    let mut ks: [string] = []
+    parse_keys([27, 91, 60, 54, 52, 59, 49, 48, 59, 53, 77, 27, 91, 60, 54, 53, 59, 49, 59, 49, 77], ks)
+    assert_eq(ks.len(), 2)
+    assert_eq(ks[0], "wheelup")
+    assert_eq(ks[1], "wheeldown")
+end
