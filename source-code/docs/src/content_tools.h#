@@ -1,0 +1,111 @@
+mod section
+
+pub fn tools_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "bit — Package Manager",
+        category: "NARZĘDZIA",
+        content: "p|
+1|bit — Package Manager
+p|
+p|
+p|
+2|Komendy
+C|bit install <nazwa>
+c|bit remove  <nazwa>
+c|bit upgrade [nazwa]
+c|bit verify  [nazwa]
+c|bit list
+c|bit installed
+c|bit search  <fraza>
+c|bit update
+c|bit info    <nazwa>
+c|bit clean
+c|bit run     <nazwa>
+c|bit workspace
+c|bit io
+c|bit help
+p|
+p|
+2|bit io — otwórz stronę bit-io
+C|bit io
+c|;; próbuje po kolei: xdg-open, gio open, open, wslview
+c|;; otwiera https://bit-io.github.io/website/
+p|
+p|
+2|Użycie w .hl
+C|# <bit/tui>
+c|# <bit/regex>
+c|# <bit/json-parser>
+p|
+p|
+2|Format repo-list.json
+C|{{
+c|  \"tui\":  {{ \"url\": \"https://github.com/bit-io/tui.git\",  \"type\": \"hl\" }},
+c|  \"obsidian\": {{ \"url\": \"...\", \"type\": \"rust\" }}
+c|}}
+p|
+p|
+2|Typy pakietów
+p|  •  typ hl   — kod Hacker Lang (source-code/main.hl)
+p|  •  typ rust — kod Rust        (source-code/src/main.rs + Cargo.toml)
+p|
+p|
+2|Uwaga
+p|  Wywołaj bit bez argumentów = projekt mode (auto-detect).",
+    })
+    out.push(section::Section {
+        title: "hlh — dokumentacja i tłumacz składni",
+        category: "NARZĘDZIA",
+        content: "p|
+1|◆ hlh — Hacker Lang Helper
+p|
+p|
+p|
+2|Czym jest
+p|  ⟦o⟧hlh⟦/⟧ to narzędzie (source-code/hlh.hl) do generowania dokumentacji
+p|  Markdown ze skryptów .hl oraz \"tłumaczenia\" terse-składni na czytelne,
+p|  komentowane objaśnienia — linia po linii. Przydatne przy nauce języka
+p|  lub przeglądaniu cudzego kodu.
+p|
+p|
+2|Komendy
+C|hlh doc       <plik.hl>              ;; dokumentacja Markdown
+c|hlh doc       <plik.hl> -o out.md    ;; zapisz do pliku
+c|hlh translate <plik.hl>              ;; objaśnij każdą linię
+c|hlh translate <plik.hl> -o out.txt   ;; zapisz do pliku
+c|hlh help
+p|
+p|
+2|Uwaga
+p|  Bez ⟦o⟧-o <ścieżka>⟦/⟧ wynik trafia na stdout zamiast do pliku.",
+    })
+    out.push(section::Section {
+        title: "Testowanie hl poza HackerOS",
+        category: "NARZĘDZIA",
+        content: "p|
+1|Testowanie hl bez HackerOS
+p|
+p|
+p|
+2|Guard HackerOS
+p|  ⟦o⟧hl⟦/⟧ odmawia działania, jeśli nie wykryje prawdziwego
+p|  HackerOS (katalogi /usr/share/HackerOS, /usr/lib/HackerOS,
+p|  /usr/bin/hacker oraz NAME=\"HackerOS\" w /etc/os-release).
+p|
+p|
+2|Opcja 1 — zmienna środowiskowa
+C|HL_NOT_ON_HACKEROS=YES hl run skrypt.hl
+p|
+p|
+2|Opcja 2 — prawdziwe katalogi testowe
+C|sudo ./scripts/setup-hackeros-env.sh
+c|;; tworzy katalogi + wpis w /etc/os-release
+p|
+p|
+2|Uwaga
+p|  Domyślne zachowanie (bez tej zmiennej) jest identyczne jak wcześniej —
+p|  guard jest zawsze aktywny w normalnej instalacji HackerOS.",
+    })
+    return out
+end
