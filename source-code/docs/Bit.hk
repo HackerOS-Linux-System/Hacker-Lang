@@ -1,1 +1,31 @@
+[package]
+-> name        => hl-docs
+-> version     => 2.0.0
+-> description => Dokumentacja Hacker Lang w terminalu (TUI) — H#, bez zależności zewnętrznych.
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => MPL-2.0
+-> lang        => h#
 
+[edition]
+-> edition   => 2026
+-> toolchain => 0.9
+
+[layout]
+-> src => src
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
+
+[commands]
+-> check
+--> run => bit check
+--> description => Sprawdź składnię i typy wszystkich modułów
+-> test
+--> run => for f in src/uni.h# src/tty.h# src/doc.h# src/model.h#; do h# test $f || exit 1; done
+--> description => Testy jednostkowe (#[test]) modułów uni, tty, doc, model
+-> install-local
+--> run => install -Dm755 cache/build/release/hl-docs /usr/lib/HackerOS/Hacker-Lang/hl-docs
+--> description => Zainstaluj binarkę tam, gdzie szuka jej `hl docs`
