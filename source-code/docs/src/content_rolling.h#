@@ -1,0 +1,68 @@
+mod section
+
+pub fn rolling_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "ROLLING — co nowego",
+        category: "ROLLING",
+        content: "p|
+1|◆ ROLLING — kanał pre-gen 3
+p|
+p|
+p|
+2|Opis
+p|  ROLLING to kanał najnowszych funkcji Hacker Lang,
+p|  ktore wejda do gen 3. Uzywaj ⟦o⟧using <rolling>⟦/⟧.
+p|
+p|
+2|Zawiera
+p|  • Wszystkie funkcje gen 1 i gen 2
+p|  • Eksperymentalne rozszerzenia skladni
+p|  • Nowe quick-functions przed oficjalnym wydaniem
+p|  • Rozszerzona integracja z HackerOS API
+p|
+p|
+2|Deklaracja
+C|#!/usr/bin/env hl
+c|using <rolling>
+c|
+c|;; Masz dostep do wszystkich funkcji gen 1 + gen 2
+c|;; + najnowszych eksperymentalnych dodatków
+p|
+p|
+2|Status
+p|  Nowe funkcje beda tu dokumentowane na biezaco.",
+    })
+    out.push(section::Section {
+        title: "ROLLING — gen 3 roadmap",
+        category: "ROLLING",
+        content: "p|
+1|Gen 3 — roadmap
+p|
+p|
+p|
+2|Planowane
+p|  Planowane funkcje gen 3 (nie wszystkie dostepne w ROLLING):
+p|
+C|;; Gen 3 — planowane funkcje:
+c|
+c|;; Async/await:
+c|;; @~ komenda             -- asynchroniczna komenda
+c|
+c|;; Closures:
+c|;; :> nazwa = {{ ... }}    -- closure
+c|
+c|;; Rozszerzone typy:
+c|;; % m: map = {{ k: v }}   -- mapa
+c|;; % l: list = [1,2,3]  -- lista
+c|
+c|;; Natywny HTTP:
+c|;; >> http.get https://...  |> @response
+p|
+p|
+2|Sledz
+p|  Sledz zmiany na:
+p|  ⟦o⟧https://github.com/HackerOS-Linux-System⟦/⟧",
+    })
+    return out
+end
