@@ -1,0 +1,34 @@
+mod section
+mod content_basics
+mod content_gen1
+mod content_gen2
+mod content_quickfuncs
+mod content_coreutils
+mod content_tools
+mod content_jit
+mod content_rolling
+mod content_tutorials
+mod content_docs
+
+;; Łączy sekcje ze wszystkich plików content_*.h# w jedną listę, w kolejności
+;; w jakiej mają się pojawiać w menu (odpowiednik allSections() z Go). Podział
+;; na kategorie robi model: grupuje po polu `category` w kolejności występowania.
+pub fn all() -> [section::Section] is
+    let mut out: [section::Section] = []
+    let parts: [[section::Section]] = [
+        content_basics::basics_sections(),
+        content_gen1::gen1_sections(),
+        content_gen2::gen2_sections(),
+        content_quickfuncs::quick_func_sections(),
+        content_coreutils::coreutils_sections(),
+        content_tools::tools_sections(),
+        content_jit::jit_sections(),
+        content_rolling::rolling_sections(),
+        content_tutorials::tutorial_sections(),
+        content_docs::docs_sections(),
+    ]
+    for p in parts is
+        for s in p is out.push(s) end
+    end
+    return out
+end
