@@ -1,0 +1,210 @@
+mod section
+
+pub fn gen2_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "Typowane zmienne (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|Typowane zmienne gen 2
+p|
+p|
+p|
+2|Skladnia
+C|% count: int   = 42
+c|% price: float = 9.99
+c|% name:  str   = \"HackerOS\"
+c|% flag:  bool  = true
+c|
+c|;; Bez adnotacji = Any (jak gen 1):
+c|% version = 4.6
+p|
+p|
+2|Typy
+p|  ⟦o⟧% n: typ = val⟦/⟧ — int, float, str, bool, list, map, any (domyslne)",
+    })
+    out.push(section::Section {
+        title: "Arytmetyka $( ) (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|Arytmetyka natywna gen 2
+p|
+p|
+p|
+2|Skladnia
+C|$(2 + 2)                    ;; wypisuje 4
+c|$(10 * @count) -> @result  ;; przypisz do var
+c|
+c|% a: int = 10
+c|% b: int = 3
+c|$(@a + @b) -> @sum
+c|~> Suma: @sum
+p|
+p|
+2|Uwaga
+p|  Wyrazenie obliczone przez sh lub python3 jako fallback.",
+    })
+    out.push(section::Section {
+        title: "Pipe do zmiennej |> (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|Pipe do zmiennej — |>
+p|
+p|
+p|
+2|Skladnia
+C|> hostname |> @myhost
+c|~> Host: @myhost
+c|
+c|>> curl -s https://ifconfig.me |> @public_ip
+c|~> IP: @public_ip
+c|
+c|^> id -u |> @uid
+c|~> UID: @uid
+p|
+p|
+2|Uwaga
+p|  Przechwytuje stdout komendy do zmiennej HL.",
+    })
+    out.push(section::Section {
+        title: "For-in loop (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|For-in loop gen 2
+p|
+p|
+p|
+2|Skladnia
+C|@ item in /usr/bin /usr/local/bin /opt/bin
+c|    ~> Katalog: @item
+c|    ::exists @item
+c|    ? ok
+c|        ::green Istnieje!
+c|    done
+c|done
+c|
+c|;; Z zmienna:
+c|% dirs = /etc /tmp /var
+c|@ dir in @dirs
+c|    ~> > @dir
+c|done
+p|
+p|
+2|Uwaga
+p|  Iteruje po slow whitespace-separated w stringu.",
+    })
+    out.push(section::Section {
+        title: "While loop ?~ (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|While loop gen 2 — ?~
+p|
+p|
+p|
+2|Skladnia
+C|% running: bool = true
+c|% i: int = 0
+c|
+c|?~ @running == true
+c|    ~> Iteracja: @i
+c|    $(@i + 1) -> @i
+c|    > test \"@i\" = \"5\"
+c|    ? ok
+c|        % running = false
+c|    done
+c|done
+p|
+p|
+2|Operatory warunku
+p|  Max 100 000 iteracji (zabezpieczenie przed petla nieskonczona).",
+    })
+    out.push(section::Section {
+        title: "Switch/case (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|Switch/case gen 2
+p|
+p|
+p|
+2|Skladnia
+C|? switch @os
+c|| linux
+c|    ~> Jestem na Linuksie!
+c|| windows
+c|    ~> Hmm, Windows?
+c|| *
+c|    ~> Nieznany system: @os
+c|done
+c|
+c|;; Wartosci tekstowe:
+c|? switch @cmd
+c|| install
+c|    -- do_install
+c|| remove
+c|    -- do_remove
+c|| *
+c|    -- show_help
+c|done
+p|
+p|
+2|Uwaga
+p|  Wildcard ⟦o⟧| *⟦/⟧ dopasowuje wszystko.",
+    })
+    out.push(section::Section {
+        title: "HackerOS API || (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|HackerOS API — ||
+p|
+p|
+p|
+2|Dostepne narzedzia
+C||| hacker update
+c||| hco install gimp
+c||| lpm install vlc
+c||| hsh ls -la
+c||| hpkg search kernel
+c||| H# file.txt
+c||| hedit config.conf
+c||| hdev run projekt
+p|
+p|
+2|Uwaga
+p|  Sprawdza czy narzedzie jest zainstalowane (which).",
+    })
+    out.push(section::Section {
+        title: "cd — wbudowana komenda (gen 2)",
+        category: "GEN 2",
+        content: "p|
+1|cd — teraz działa jak powinno
+p|
+p|
+p|
+2|Skladnia
+C|> cd source-code/docs
+c|> go build
+c|;; katalog roboczy zmieniony przez pierwsza linie
+c|;; obowiazuje takze w drugiej
+p|
+p|
+2|Co się zmieniło
+p|  ⟦o⟧cd⟦/⟧ w KAŻDYM trybie komendy (⟦o⟧>, ^>, ->, ^->, >>, *>⟦/⟧)
+p|  jest teraz obsługiwane wbudowanie, w procesie interpretera —
+p|  dokładnie tak, jak powłoki (bash/zsh/...) traktują je jako komendę
+p|  wbudowaną, a nie zewnętrzny program.
+p|
+p|
+2|Trwałość między liniami
+p|  Zmiana katalogu wykonana przez ⟦o⟧cd⟦/⟧ PRZETRWA do
+p|  kolejnych linii komendy w tym samym skrypcie — bo dzieje się w
+p|  procesie hl, nie w jednorazowym spawnowanym podprocesie, który i
+p|  tak by zniknął po zakończeniu linii.
+p|
+p|
+2|Historia
+p|  Patrz sekcja \"Znany błąd: cd (gen 1)\" w kategorii GEN 1 — to samo
+p|  ograniczenie w starszych skryptach jest tam udokumentowane
+p|  osobno, jako część historii języka, a nie aktualnego zachowania.",
+    })
+    return out
+end
