@@ -1,0 +1,5 @@
+pub struct Section is
+    pub title: string
+    pub category: string
+    pub content: string
+end
