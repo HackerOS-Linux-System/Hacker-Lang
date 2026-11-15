@@ -1,0 +1,97 @@
+mod tty
+mod model
+mod view
+mod styles
+
+;; ── hl-docs — przeglądarka dokumentacji Hacker Lang (H# + TUI) ───────────────
+;; Wersja treści/aplikacji niezależna od wersji samego Hacker Lang (HL_VERSION/
+;; HL_GEN w interpreterze) — podbijana przy każdym większym rozszerzeniu.
+;;   1.1.0  kategoria JIT
+;;   1.1.1  dispatch O(1) + ponawianie prób
+;;   1.1.2  wątkowanie skoków (compiler) + ponowne użycie kontekstu Cranelift (jit)
+;;   1.2.0  trace linking, pomijanie zbędnych load'ów, ograniczony inlining CallFunc
+;;   1.2.1  mysz domyślnie WYŁĄCZONA (strzałki nie reagowały w kontenerach/SSH)
+;;   2.0.0  przepisane z Go + Bubble Tea na H# (własny tryb raw, bez zależności);
+;;          menu z przewijaniem, wyszukiwanie na żywo z polskimi znakami,
+;;          wyszukiwanie po tekście bez kodów ANSI, kategoria HL-DOCS,
+;;          pasek postępu przewijania, profile kolorów (truecolor/256/NO_COLOR)
+
+extern static [c] is
+    fn exit(code: int) -> int
+end
+
+fn docs_version() -> string is return "2.0.0" end
+
+fn usage() is
+    write("hl-docs " + docs_version() + " — dokumentacja Hacker Lang (TUI)")
+    write("")
+    write("użycie: hl-docs [-v | -version | --version] [-h | --help]")
+    write("")
+    write("  HL_DOCS_MOUSE=1   włącz obsługę kółka myszy (domyślnie wyłączona)")
+    write("  NO_COLOR=1        bez kolorów")
+end
+
+fn main() is
+    let args: [string] = env_args()
+    let mut i: int = 1
+    while i < args.len() is
+        let a: string = args[i]
+        if a == "-v" || a == "-version" || a == "--version" is
+            write("hl-docs " + docs_version())
+            return
+        end
+        if a == "-h" || a == "-help" || a == "--help" is
+            usage()
+            return
+        end
+        write("hl-docs: nieznana opcja " + a)
+        usage()
+        exit(2)
+    end
+
+    if !tty::is_interactive() is
+        write("hl-docs wymaga interaktywnego terminala (stdin/stdout nie są TTY).")
+        exit(1)
+    end
+
+    ;; Mysz domyślnie WYŁĄCZONA — raportowanie myszy potrafi rozregulować całe wejście
+    ;; w terminalach, które go nie negocjują (kontenery, SSH/tmux). Jawny opt-in.
+    let mouse: bool = env_get("HL_DOCS_MOUSE") != ""
+
+    let inp: tty::Input = tty::new_input()
+    if !tty::enter_raw(inp) is
+        write("hl-docs: nie udało się przełączyć terminala w tryb raw (stty -F /dev/tty).")
+        exit(1)
+    end
+    tty::enter_screen(mouse)
+
+    let m: model::Model = model::new_model(styles::detect_profile(), docs_version())
+    let mut sz: tty::Size = tty::size()
+    model::resize(m, sz.cols, sz.rows)
+    paint(m)
+
+    while !m.quit is
+        let key: string = tty::read_key(inp)
+        if key == "" is
+            ;; timeout 100 ms: brak SIGWINCH, więc sprawdzamy rozmiar okna
+            let now: tty::Size = tty::size()
+            if now.cols != sz.cols || now.rows != sz.rows is
+                sz = now
+                model::resize(m, sz.cols, sz.rows)
+                tty::out("\x1b[2J")     ;; po zmianie rozmiaru nie zostają resztki starej ramki
+                paint(m)
+            end
+        else is
+            model::handle_key(m, key)
+            if !m.quit is paint(m) end
+        end
+    end
+
+    tty::leave_screen(mouse)
+    tty::leave_raw(inp)
+end
+
+fn paint(m: model::Model) is
+    tty::out(view::draw_string(view::frame(m)))
+    tty::flush()
+end
