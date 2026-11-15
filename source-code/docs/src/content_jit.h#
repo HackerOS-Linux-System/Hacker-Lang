@@ -1,0 +1,352 @@
+mod section
+
+pub fn jit_sections() -> [section::Section] is
+    let mut out: [section::Section] = []
+    out.push(section::Section {
+        title: "JIT — jak to działa",
+        category: "JIT",
+        content: "p|
+1|◆ JIT — dwupoziomowa kompilacja natywna
+p|
+p|
+p|
+2|Ogólna zasada
+p|  Interpreter bytecode wykonuje skrypt instrukcja po instrukcji, ale
+p|  śledzi, które fragmenty są \"gorące\" i kompiluje je do prawdziwego
+p|  kodu maszynowego (przez Cranelift) zamiast dalej je interpretować.
+p|  Działa to na DWÓCH niezależnych poziomach:
+p|
+p|
+2|Dwa poziomy
+p|  ⟦o⟧Trace JIT⟦/⟧  — gorąca PĘTLA wewnątrz funkcji (albo top-level) jest
+p|       kompilowana sama w sobie, niezależnie od tego, co ją otacza.
+p|  ⟦o⟧Whole-function JIT⟦/⟧  — funkcja czysto obliczeniowa wołana wielokrotnie
+p|       (nawet bez gorącej pętli w środku) jest kompilowana W CAŁOŚCI.
+p|
+p|
+2|Wspólny silnik
+p|  Oba poziomy dzielą jeden trwały silnik JIT (jeden ⟦o⟧JITModule⟦/⟧
+p|  na cały czas życia interpretera) — kompilacje po pierwszej są
+p|  szybsze, bo ISA i księgowość Cranelift nie są budowane od zera
+p|  za każdym razem, a wygenerowany kod nie wycieka po zakończeniu
+p|  skryptu.
+p|
+p|
+2|Jakość kodu
+p|  Wygenerowany kod maszynowy powstaje z ⟦o⟧opt_level=speed⟦/⟧
+p|  — Cranelift stosuje pełny zestaw optymalizacji backendu przy
+p|  emisji instrukcji, nie tylko dobór instrukcji do kompilacji.
+p|
+p|
+2|Przezroczystość
+p|  JIT jest w pełni przezroczysty: wynik wykonania skryptu jest
+p|  identyczny niezależnie od tego, czy dany fragment akurat trafił
+p|  do JIT, czy wciąż jest interpretowany.",
+    })
+    out.push(section::Section {
+        title: "Strojenie JIT — zmienne środowiskowe",
+        category: "JIT",
+        content: "p|
+1|Strojenie JIT
+p|
+p|
+p|
+2|Zmienne środowiskowe
+C|HL_NO_JIT=1                     ;; wyłącz JIT całkowicie (czysty interpreter)
+c|HL_JIT_TRACE_THRESHOLD=<n>       ;; próg wywołań dla tras pętli (domyślnie 50)
+c|HL_JIT_FUNC_THRESHOLD=<n>        ;; próg wywołań dla całych funkcji (domyślnie 50)
+c|HL_JIT_STATS=1                    ;; wypisz statystyki JIT na stderr po wykonaniu
+p|
+p|
+2|Przykład
+p|  ⟦o⟧hl run skrypt.hl⟦/⟧
+C|HL_JIT_STATS=1 hl run benchmark.hl
+c|;; [hl jit stats] trasy pętli: 3 | funkcje: 2 | ...
+p|  ⟦o⟧HL_NO_JIT=1 hl run skrypt.hl⟦/⟧
+C|HL_JIT_TRACE_THRESHOLD=10 hl run skrypt.hl  ;; kompiluj wcześniej
+p|
+p|
+2|Adaptacyjny próg dla ciasnych pętli
+p|  Ciasne pętle (⟦o⟧<= 8⟦/⟧ instrukcji) rozgrzewają się
+p|  o połowę szybciej niż domyślny próg — wykonują dużo więcej
+p|  iteracji na jednostkę \"rozgrzewki\" niż duże pętle, więc szybsze
+p|  przejście na kod natywny szybciej się zwraca. Dzieje się to
+p|  automatycznie, bez potrzeby ustawiania czegokolwiek.
+p|
+T|💡 Progi to strojenie WYDAJNOŚCI, nie poprawności.
+p|  Progi kompilacji nie mają wpływu na POPRAWNOŚĆ — tylko na to, jak
+p|  szybko dany fragment przechodzi z interpretacji na kod natywny.
+p|  Niższy próg = szybszy rozruch JIT-a, kosztem częstszych (tańszych,
+p|  ale nie darmowych) prób kompilacji.",
+    })
+    out.push(section::Section {
+        title: "Bezpieczeństwo kompilacji JIT",
+        category: "JIT",
+        content: "p|
+1|Bezpieczeństwo JIT
+p|
+p|
+p|
+2|Zasada
+p|  JIT NIGDY nie kompiluje fragmentu, który mógłby wykonać efekt
+p|  uboczny albo operować na stringach — kwalifikują się WYŁĄCZNIE:
+p|  ładowanie stałych liczbowych/bool, GetVar/SetVar, arytmetyka,
+p|  porównania, kontrola przepływu (Jump/JumpIfFalse/JumpIfTrue/Return).
+p|
+p|
+2|Nigdy nie kwalifikuje się
+p|  •  ExecCmd / ExecCapture — komendy systemowe
+p|  •  LoadStr / Concat / ToString / CallQuick — operacje na stringach
+p|  •  CallFunc — wywołania innych funkcji (whole-function JIT
+p|       nigdy więc nie rekursuje z powrotem do interpretera)
+p|  •  ForInStart / ForInNext / HackerOsCall
+p|
+p|
+2|Weryfikacja zmiennych
+p|  Zanim jakikolwiek fragment zostanie skompilowany, interpreter
+p|  sprawdza KAŻDĄ używaną w nim zmienną: musi już mieć przydzielony
+p|  slot (być choć raz ustawiona) I jej aktualna wartość musi być
+p|  czystą liczbą. Jeśli którykolwiek warunek zawiedzie — JIT po
+p|  prostu NIE kompiluje tego fragmentu i skrypt dalej działa
+p|  poprawnie przez interpretację, bez żadnego ryzyka.
+p|
+p|
+2|Synergia z optymalizatorem
+p|  Dzięki ⟦o⟧constant foldingu⟦/⟧ w optymalizatorze (source-code/compiler),
+p|  warunki oparte na znanych stałych (np. ⟦o⟧while true⟦/⟧) są
+p|  składane w ⟦o⟧LoadBool⟦/⟧ na etapie kompilacji do bytecode —
+p|  co poszerza zbiór pętli/funkcji kwalifikujących się do JIT,
+p|  bo ⟦o⟧Truthy⟦/⟧ sam w sobie NIE jest jit-eligible (ma
+p|  specjalną ścieżkę dla stringów-warunków w interpreterze).",
+    })
+    out.push(section::Section {
+        title: "Dispatch JIT — O(1) i ponawianie prób",
+        category: "JIT",
+        content: "p|
+1|Dispatch JIT — wydajność sprawdzeń
+p|
+p|
+p|
+2|Dlaczego to ważne
+p|  Sprawdzenie \"czy ten fragment jest już skompilowany\" wykonuje się
+p|  na KAŻDEJ iteracji KAŻDEJ pętli wstecznej i na KAŻDE wywołanie
+p|  KAŻDEJ funkcji w skrypcie — niezależnie od tego, czy dany fragment
+p|  faktycznie trafił do JIT. To jest najgorętsza możliwa ścieżka w
+p|  całym interpreterze.
+p|
+p|
+2|Tablice zamiast map
+p|  Zamiast mapy haszującej, interpreter trzyma te informacje w
+p|  zwykłych tablicach (⟦o⟧Vec<Option<_>>⟦/⟧) indeksowanych
+p|  BEZPOŚREDNIO przez offset instrukcji / indeks nazwy — zero
+p|  hashowania, zero kolizji, dostęp w stałym czasie niezależnie od
+p|  tego, ile fragmentów już skompilowano.
+p|
+p|
+2|Ponawianie prób (retry-with-backoff)
+p|  Pierwsza próba kompilacji może się nie powieść z przyczyny
+p|  DYNAMICZNEJ — np. zmienna użyta w pętli nie jest jeszcze
+p|  stabilnie liczbowa przy pierwszym przejściu przez próg. Taka
+p|  przyczyna może zniknąć sama w kolejnych iteracjach/wywołaniach.
+p|
+p|
+2|Limit prób
+p|  Do ⟦o⟧MAX_JIT_RETRIES = 4⟦/⟧ prób ponownych na fragment, zanim
+p|  JIT trwale się podda. Przyczyny STRUKTURALNE (np. instrukcja
+p|  ⟦o⟧ExecCmd⟦/⟧ w ciele) nigdy się same nie naprawiają —
+p|  te blokują się trwale od razu, bez marnowania prób.",
+    })
+    out.push(section::Section {
+        title: "Kompilator → JIT: wątkowanie skoków",
+        category: "JIT",
+        content: "p|
+1|Wątkowanie skoków (jump threading)
+p|
+p|
+p|
+2|Co to robi
+p|  Zanim bytecode w ogóle trafi do interpretera/JIT-a, optymalizator
+p|  (source-code/compiler) przechodzi przez moduł i ZWIJA łańcuchy
+p|  \"doskoków\": ⟦o⟧Jump → Jump → Jump⟦/⟧ wskazujący na
+p|  inny bezwarunkowy skok jest przekierowywany PROSTO na ostateczny
+p|  cel, pomijając pośrednie przeskoki.
+p|
+p|
+2|Współpraca ze zwijaniem gałęzi
+p|  Ten sam mechanizm łapie też skoki powstałe z ⟦o⟧dead branch elimination⟦/⟧
+p|  — gdy warunek pętli/gałęzi jest znany na etapie kompilacji
+p|  (np. ⟦o⟧while true⟦/⟧), warunkowy skok zwija się w
+p|  bezwarunkowy, a NOWO powstały skok jest wątkowany dokładnie tak
+p|  samo jak te napisane wprost w źródle.
+p|
+p|
+2|Dlaczego to pomaga JIT-owi
+p|  Trace JIT liczy rozmiar trasy jako odległość między skokiem
+p|  wstecznym a jego celem — im mniej pośrednich doskoków po drodze,
+p|  tym krótsza (i częściej mieszcząca się pod limitem) trasa, i tym
+p|  mniej bloków musi zbudować Cranelift przy kompilacji.
+p|
+p|
+2|Bezpieczeństwo transformacji
+p|  Ta transformacja NIGDY nie przesuwa ani nie usuwa żadnej
+p|  instrukcji — zmienia WYŁĄCZNIE pole docelowe samego skoku.
+p|  Żadne inne miejsce w module nie wymaga korekty. Limit liczby
+p|  \"skoków po skoku\" (64) gwarantuje, że pass zawsze się kończy,
+p|  nawet dla spreparowanych cyklicznych łańcuchów.",
+    })
+    out.push(section::Section {
+        title: "Wydajność samej kompilacji",
+        category: "JIT",
+        content: "p|
+1|Wydajność kompilacji, nie tylko kodu wynikowego
+p|
+p|
+p|
+2|Dlaczego to teraz ważniejsze
+p|  Odkąd JIT ponawia nieudane próby kompilacji (patrz strojenie
+p|  wyżej), pojedyncza trasa lub funkcja może być kompilowana WIĘCEJ
+p|  niż raz w czasie życia jednego skryptu. Sam koszt kompilacji też
+p|  się liczy, nie tylko szybkość wygenerowanego kodu.
+p|
+p|
+2|Ponowne użycie kontekstu Cranelift
+p|  Silnik JIT trzyma jeden ⟦o⟧Context⟦/⟧
+p|  Cranelift przez cały czas życia interpretera i tylko go ⟦o⟧czyści⟦/⟧
+p|  między kolejnymi kompilacjami, zamiast alokować od zera za każdym
+p|  razem — dotyczy to zarówno kontekstu kompilacji, jak i kontekstu
+p|  budowniczego funkcji.
+p|
+p|
+2|To nie prowizorka
+p|  To jest udokumentowany, zalecany przez Cranelift wzorzec dla
+p|  JIT-ów kompilujących wiele fragmentów w czasie życia jednego
+p|  procesu — nie prowizorka.",
+    })
+    out.push(section::Section {
+        title: "Trace linking — natywne łańcuchowanie tras",
+        category: "JIT",
+        content: "p|
+1|Trace linking
+p|
+p|
+p|
+2|Problem
+p|  Gdy skompilowana trasa pętli KOŃCZY działanie (wychodzi z pętli),
+p|  normalnie wraca do Rust, który sprawdza, dokąd dalej. Trace
+p|  linking pozwala jej, w PEWNYCH przypadkach, doskoczyć PROSTO do
+p|  INNEJ już skompilowanej trasy — w kodzie natywnym, bez powrotu
+p|  do pętli dispatchu.
+p|
+p|
+2|Mechanizm
+p|  Każdy skompilowany fragment dostaje wskaźnik do współdzielonej
+p|  ⟦o⟧tablicy linków⟦/⟧: ⟦o⟧link_table[i] != 0⟦/⟧ oznacza \"pod offsetem ⟦o⟧i⟦/⟧
+p|  jest już skompilowana trasa\". Przy KAŻDYM wyjściu wygenerowany kod
+p|  SPRAWDZA tę tablicę i, jeśli cel jest tam wpisany, woła go
+p|  bezpośrednio.
+p|
+p|
+2|Retroaktywność
+p|  Sprawdzenie dzieje się w RUNTIME, nie przy kompilacji — trasa A
+p|  skompilowana PRZED trasą B automatycznie zacznie się do niej
+p|  doskakiwać przy swoim NASTĘPNYM wykonaniu, gdy tylko B zostanie
+p|  wpisana do tablicy. Nie trzeba niczego łatać w już wyemitowanym
+p|  kodzie maszynowym A.
+p|
+p|
+2|Zakres
+p|  Dotyczy WYŁĄCZNIE tras pętli, nigdy całych funkcji — offset
+p|  zwracany przez whole-function JIT to zawsze koniec ciała funkcji,
+p|  którego wołający i tak nie traktuje jako celu skoku (to relacja
+p|  wywołanie/powrót, nie \"kontynuuj od tego miejsca\").",
+    })
+    out.push(section::Section {
+        title: "Pomijanie zbędnych odczytów z pamięci",
+        category: "JIT",
+        content: "p|
+1|Pomijanie zbędnych load'ów
+p|
+p|
+p|
+2|Problem
+p|  Na starcie skompilowanego fragmentu KAŻDY użyty rejestr jest
+p|  domyślnie ładowany z pamięci — nawet jeśli jego pierwsze użycie
+p|  w kodzie i tak go NADPISUJE, zanim ktokolwiek go przeczyta. Taki
+p|  odczyt jest zmarnowany.
+p|
+p|
+2|Rozwiązanie
+p|  Jeśli rejestr jest zapisywany PRZED jakimkolwiek odczytem — w
+p|  obrębie bloku wejściowego, czyli JEDYNEGO możliwego punktu
+p|  wejścia do skompilowanej funkcji (dla trasy pętli to dokładnie
+p|  cel jej własnego skoku wstecznego, więc wykonuje się na KAŻDEJ
+p|  iteracji) — początkowa wartość z pamięci jest z definicji
+p|  niezauważalna, więc ładowanie jej w ogóle się pomija.
+p|
+p|
+2|Celowo ograniczony zakres
+p|  Analiza jest CELOWO ograniczona do prostego przebiegu liniowego
+p|  jednego bloku — żadnego ogólnego dataflow z punktem stałym po
+p|  grafie z cyklami. To wystarcza na najczęstszy, najbardziej
+p|  wartościowy przypadek (rejestry pomocnicze przeliczane na nowo
+p|  na starcie każdej iteracji), a jednocześnie jest na tyle proste,
+p|  że da się to zweryfikować przez zwykłą inspekcję kodu.
+p|
+p|
+2|Siatka bezpieczeństwa
+p|  Nawet gdyby powyższy dowód miał defekt, pominięty odczyt zastępuje
+p|  tania stała 0.0 — NIGDY nieokreślona wartość SSA. Skutkiem
+p|  ewentualnego błędu byłby co najwyżej zły wynik, nigdy odczyt
+p|  niezainicjalizowanej pamięci ani cofnięcie się do niezdefiniowanego
+p|  zachowania. Dotyczy WYŁĄCZNIE rejestrów — zmienne HL
+p|  (GetVar/SetVar) zawsze są ładowane, bez wyjątków.",
+    })
+    out.push(section::Section {
+        title: "Inlining pojedynczego wywołania funkcji",
+        category: "JIT",
+        content: "p|
+1|Inlining wywołań funkcji
+p|
+p|
+p|
+2|Problem
+p|  ⟦o⟧CallFunc⟦/⟧ był świadomie wykluczony z whole-function JIT — żeby
+p|  skompilowany natywnie kod nigdy nie musiał wracać do interpretera.
+p|  Zdjęcie tego ograniczenia bez ograniczeń otwierałoby drogę do
+p|  rekursji i cykli w kodzie natywnym.
+p|
+p|
+2|Reguła kwalifikacji
+p|  Funkcja kwalifikuje się do wklejenia wywołania, gdy ma DOKŁADNIE
+p|  JEDNO ⟦o⟧CallFunc⟦/⟧, którego cel:
+p|  •  istnieje i daje się rozwiązać w tym samym module,
+p|  •  NIE jest samą sobą (bez samo-wywołań),
+p|  •  sam jest w pełni jit-eligible — a więc z DEFINICJI nie
+p|       zawiera ŻADNEGO CallFunc.
+p|
+p|
+2|Dlaczego to bezpieczne
+p|  Skoro wklejana funkcja sama nigdy nie zawiera CallFunc, inlining
+p|  jest z góry ograniczony do JEDNEGO POZIOMU głębokości — nie ma
+p|  możliwości łańcucha ani cyklu, więc nie trzeba wykrywać cykli
+p|  osobnym mechanizmem: sama reguła to gwarantuje statycznie.
+p|
+p|
+2|Jak to działa
+p|  Ciało wywoływanej funkcji jest wklejane bezpośrednio w miejscu
+p|  wywołania (jej rejestry NIGDY nie kolidują z rejestrami wołającego
+p|  — numeracja rejestrów jest globalnie unikalna w całym module, więc
+p|  nie trzeba niczego przenumerowywać), a jej końcowy ⟦o⟧Return⟦/⟧
+p|  zamienia się w zwykły skok do miejsca zaraz po wywołaniu —
+p|  zamiast wyjścia z całej skompilowanej funkcji.
+p|
+p|
+2|Ograniczenie do jednego miejsca
+p|  Ograniczone do JEDNEGO miejsca wywołania na funkcję: najczęstszy
+p|  i najbardziej wartościowy wzorzec — wywołanie pomocniczej funkcji
+p|  WEWNĄTRZ gorącej pętli — to i tak JEDNA instrukcja CallFunc w
+p|  bytecode, niezależnie od tego, ile razy pętla wykona się w
+p|  praktyce.",
+    })
+    return out
+end
