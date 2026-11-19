@@ -261,20 +261,19 @@ fn hlib_search_dirs(name: &str) -> Vec<PathBuf> {
     dirs_out
 }
 
+/// Wyszukuje `.hlib` przez `HlibStore` (najwyższa wersja spełniająca wymaganie).
+/// `# <mold:1.2.0>` = dokładnie 1.2.0; `# <mold:^1.2>` = zakres semver.
 fn find_hlib_file(name: &str, version: Option<&str>) -> std::result::Result<PathBuf, Vec<PathBuf>> {
-    let filenames: Vec<String> = match version {
-        Some(v) => vec![format!("{}-{}.hlib", name, v), format!("{}.hlib", name)],
-        None    => vec![format!("{}.hlib", name)],
+    use hl_hlib::{HlibStore, VersionReq};
+    let dirs = hlib_search_dirs(name);
+    let req = match version {
+        Some(v) => match VersionReq::parse_import(v) { Ok(r) => r, Err(_) => return Err(dirs) },
+        None => VersionReq::any(),
     };
-    let mut tried = Vec::new();
-    for dir in hlib_search_dirs(name) {
-        for f in &filenames {
-            let p = dir.join(f);
-            if p.is_file() { return Ok(p); }
-            tried.push(p);
-        }
+    match HlibStore::new(dirs.clone()).find(name, &req) {
+        Ok(e)  => Ok(e.path),
+        Err(_) => Err(dirs.into_iter().map(|d| d.join(format!("{}[-<wersja>].hlib", name))).collect()),
     }
-    Err(tried)
 }
 
 fn hlib_not_found_msg(name: &str, tried: &[PathBuf]) -> String {
@@ -297,18 +296,37 @@ fn load_hlib(name: &str, version: Option<&str>, env: &mut Env) -> Result<()> {
         Ok(p)      => p,
         Err(tried) => bail!("{}", hlib_not_found_msg(name, &tried)),
     };
-    load_hlib_from_path(name, &path, env)
+    load_hlib_from_path(name, version, &path, env)
 }
 
-fn load_hlib_from_path(name: &str, path: &Path, env: &mut Env) -> Result<()> {
-    use hl_hlib::{ArtifactKind, HlibArchive, Language};
+fn load_hlib_from_path(name: &str, version: Option<&str>, path: &Path, env: &mut Env) -> Result<()> {
+    use hl_hlib::{ArtifactKind, HlibArchive, Language, TrustPolicy, VersionReq};
+
+    // nazwa trafia do ścieżek cache i nazw zmiennych — tylko bezpieczne znaki
+    hl_hlib::validate::validate_name(name).map_err(|e| anyhow::anyhow!(".hlib '{}': {}", name, e))?;
 
     let archive = HlibArchive::open(path)
         .map_err(|e| anyhow::anyhow!("nie mozna otworzyc .hlib '{}' ({}): {}", name, path.display(), e))?;
-    archive.manifest.check_supported()
-        .map_err(|e| anyhow::anyhow!(".hlib '{}': {}", name, e))?;
-    archive.verify_checksums()
-        .map_err(|e| anyhow::anyhow!(".hlib '{}' nie przeszedl weryfikacji sum kontrolnych: {}", name, e))?;
+    if archive.manifest.name != name {
+        bail!(".hlib '{}' ({}): archiwum zawiera biblioteke '{}' v{}", name, path.display(),
+              archive.manifest.name, archive.manifest.version);
+    }
+    if let Some(v) = version {
+        let req = VersionReq::parse_import(v).map_err(|e| anyhow::anyhow!(".hlib '{}': {}", name, e))?;
+        let got = archive.manifest.version_parsed().map_err(|e| anyhow::anyhow!(".hlib '{}': {}", name, e))?;
+        if !req.matches(&got) {
+            bail!(".hlib '{}' v{} nie spelnia zadanego `{}`", name, got, req);
+        }
+    }
+    // Sumy (scisle) + polityka zaufania z HL_HLIB_TRUSTED_KEYS[_FILE] / HL_HLIB_REQUIRE_SIGNED.
+    // Bez polityki: tylko integralnosc (jak dotad); z polityka: fail-closed.
+    let policy = TrustPolicy::from_env()
+        .map_err(|e| anyhow::anyhow!("zla konfiguracja zaufania .hlib: {}", e))?;
+    let trust = archive.verify(&policy)
+        .map_err(|e| anyhow::anyhow!(".hlib '{}' nie przeszedl weryfikacji ({}): {}", name, e.code(), e))?;
+    if let hl_hlib::TrustStatus::Trusted(fp) = &trust {
+        info!("hlib '{}' podpisany zaufanym kluczem {}", name, fp);
+    }
 
     let m = &archive.manifest;
     let prefix = name.to_uppercase().replace('-', "_");
@@ -334,13 +352,13 @@ fn load_hlib_from_path(name: &str, path: &Path, env: &mut Env) -> Result<()> {
     if let Some(so) = m.shared_object_for(&target) {
         let bytes = archive.entry_bytes(&so.path).ok_or_else(|| anyhow::anyhow!(
             ".hlib '{}': .so '{}' jest w manifescie, ale brak go w archiwum", name, so.path))?;
-        let cache = hl_cache_dir().join("hlib").join(format!("{}-{}", name, m.version));
-        std::fs::create_dir_all(&cache)?;
-        let file_name = Path::new(&so.path).file_name()
-            .map(|f| f.to_os_string())
-            .unwrap_or_else(|| format!("{}.so", name).into());
-        let out = cache.join(file_name);
-        std::fs::write(&out, bytes)?;
+        m.check_abi().map_err(|e| anyhow::anyhow!(".hlib '{}': {}", name, e))?;
+        let _ = bytes;
+        // katalog cache zawiera skrot archiwum — podmieniony plik nie trafi do starego cache
+        let cache = hl_cache_dir().join("hlib")
+            .join(format!("{}-{}-{}", name, m.version, &archive.archive_sha256()[..16]));
+        let out = archive.extract_entry(&so.path, &cache)
+            .map_err(|e| anyhow::anyhow!(".hlib '{}': nie mozna wypakowac .so: {}", name, e))?;
         env.set_var(&format!("HLIB_{}_LOADED", prefix), Value::Bool(true));
         env.set_var(&format!("HLIB_{}_PATH", prefix), Value::String(out.display().to_string()));
         eprintln!("\x1b[33m[hl hlib]\x1b[0m Zaladowano hlib/{} v{} (.so: {})", name, m.version, out.display());
@@ -365,7 +383,7 @@ fn load_hlib_from_path(name: &str, path: &Path, env: &mut Env) -> Result<()> {
 /// jest maskowany fallbackiem).
 fn load_auto_lib(name: &str, version: Option<&str>, env: &mut Env) -> Result<()> {
     match find_hlib_file(name, version) {
-        Ok(p) => load_hlib_from_path(name, &p, env),
+        Ok(p) => load_hlib_from_path(name, version, &p, env),
         Err(tried) => {
             if bit_current_dir(name).exists() {
                 return load_bit_lib(name, version, env);
@@ -640,10 +658,39 @@ mod import_source_tests {
         b.finish(&out, None).unwrap();
 
         let mut env = Env::new();
-        load_hlib_from_path("e2elib", &out, &mut env).unwrap();
+        load_hlib_from_path("e2elib", None, &out, &mut env).unwrap();
         assert!(matches!(env.get_var("HLIB_E2ELIB_LOADED"), Value::Bool(true)));
         // funkcja z biblioteki jest zarejestrowana tak, jakby byla w programie
         assert!(env.arena_funcs.contains_key("e2e_fn"), "funkcja z .hlib nie zostala zarejestrowana");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn build_e2e(dir: &std::path::Path, name: &str, version: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let out = dir.join(format!("{}-{}.hlib", name, version));
+        let nodes = hl_parser::parse_source(":: sec_fn <4k> def\n~> hi\ndone\n").unwrap();
+        let mut b = hl_hlib::HlibBuilder::new(name, version, hl_hlib::Language::Hackerlang);
+        b.add_ast(&serde_json::to_vec(&nodes).unwrap()).unwrap();
+        b.finish(&out, None).unwrap();
+        out
+    }
+
+    #[test]
+    fn loader_rejects_name_mismatch_and_unsatisfied_version() {
+        let dir = std::env::temp_dir().join(format!("hl-hlib-sec-{}", std::process::id()));
+        let out = build_e2e(&dir, "seclib", "1.2.0");
+        let mut env = Env::new();
+        // archiwum 'seclib' podszywane pod 'other'
+        let e = load_hlib_from_path("other", None, &out, &mut env).unwrap_err().to_string();
+        assert!(e.contains("zawiera biblioteke"), "{e}");
+        // wersja spoza zakresu
+        let e = load_hlib_from_path("seclib", Some("^2"), &out, &mut env).unwrap_err().to_string();
+        assert!(e.contains("nie spelnia"), "{e}");
+        // zakres spełniony
+        load_hlib_from_path("seclib", Some("^1.1"), &out, &mut env).unwrap();
+        // nazwa ze ścieżką jest odrzucana zanim cokolwiek zostanie dotknięte
+        let e = load_hlib_from_path("../seclib", None, &out, &mut env).unwrap_err().to_string();
+        assert!(e.contains("invalid library name"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
