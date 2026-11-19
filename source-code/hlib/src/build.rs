@@ -1,35 +1,31 @@
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::Path;
-
-use sha2::{Digest, Sha256};
 
 use crate::error::{HlibError, Result};
 use crate::manifest::{
     Artifact, ArtifactKind, Dependency, ExportedSymbol, Language, Manifest, SignatureInfo,
     HLIB_SPEC_VERSION,
 };
+use crate::fsutil;
+use crate::limits::Limits;
+use crate::read::{sha256_hex, CHECKSUMS_ENTRY, MANIFEST_ENTRY, SIGNATURE_ENTRY};
 use crate::sign;
+use crate::validate::{validate_entry_path, validate_name, validate_target};
+use crate::version::{Version, VersionReq};
 
-const CHECKSUMS_ENTRY: &str = "CHECKSUMS.sha256";
-const SIGNATURE_ENTRY: &str = "SIGNATURE.ed25519";
-const MANIFEST_ENTRY: &str = "manifest.json";
-
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
+/// Znacznik czasu builda: `SOURCE_DATE_EPOCH` (reproducible builds), inaczej zegar.
+fn now_rfc3339() -> String {
+    let epoch_override = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|v| v.trim().parse::<u64>().ok());
+    rfc3339_from_unix(epoch_override.unwrap_or_else(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+    }))
 }
 
-fn now_rfc3339() -> String {
+fn rfc3339_from_unix(secs: u64) -> String {
     // Deliberately dependency-light: hand-rolled RFC 3339 UTC timestamp
     // instead of pulling in a full date/time crate just for this one
     // call. Good enough for "when was this archive built" provenance —
     // not used for anything that requires calendar arithmetic.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
     let days = secs / 86_400;
     let rem = secs % 86_400;
     let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -87,6 +83,10 @@ pub struct HlibBuilder {
     entries: Vec<PendingEntry>,
     artifacts: Vec<Artifact>,
     seen_paths: BTreeMap<String, ()>,
+    created_at: Option<String>,
+    compression_level: i32,
+    abi_version: u32,
+    limits: Limits,
 }
 
 impl HlibBuilder {
@@ -103,7 +103,43 @@ impl HlibBuilder {
             entries: Vec::new(),
             artifacts: Vec::new(),
             seen_paths: BTreeMap::new(),
+            created_at: None,
+            compression_level: 19,
+            abi_version: crate::manifest::HLIB_ABI_VERSION,
+            limits: Limits::DEFAULT,
         }
+    }
+
+    /// Jak `new`, ale od razu waliduje nazwę i wersję.
+    pub fn try_new(name: impl Into<String>, version: impl Into<String>, language: Language) -> Result<Self> {
+        let (name, version) = (name.into(), version.into());
+        validate_name(&name)?;
+        Version::parse(&version)?;
+        Ok(Self::new(name, version, language))
+    }
+
+    /// Nadpisuje `created_at` (RFC 3339 UTC) — dla reprodukowalnych buildów.
+    pub fn set_created_at(&mut self, ts: impl Into<String>) -> &mut Self {
+        self.created_at = Some(ts.into());
+        self
+    }
+
+    /// Poziom zstd 1..=22 (domyślnie 19).
+    pub fn set_compression_level(&mut self, level: i32) -> &mut Self {
+        self.compression_level = level.clamp(1, 22);
+        self
+    }
+
+    pub fn set_abi_version(&mut self, v: u32) -> &mut Self {
+        self.abi_version = v;
+        self
+    }
+
+    /// Limity rozmiaru *budowanego* archiwum (domyślnie takie same jak przy czytaniu,
+    /// żeby nie zbudować pliku, którego własny czytnik by nie otworzył).
+    pub fn set_limits(&mut self, limits: Limits) -> &mut Self {
+        self.limits = limits;
+        self
     }
 
     pub fn set_language_version(&mut self, v: impl Into<String>) -> &mut Self {
@@ -139,6 +175,25 @@ impl HlibBuilder {
     /// the concrete layout every reader can rely on). Returns an error
     /// if `rel_path` was already added — every path must be unique.
     fn add_entry(&mut self, rel_path: String, kind: ArtifactKind, target: Option<String>, data: Vec<u8>) -> Result<&mut Self> {
+        validate_name(&self.name)?;
+        if let Some(t) = &target {
+            validate_target(t)?;
+        }
+        validate_entry_path(&rel_path)?;
+        if data.len() as u64 > self.limits.max_entry_bytes {
+            return Err(HlibError::LimitExceeded {
+                what: "entry size",
+                actual: data.len() as u64,
+                limit: self.limits.max_entry_bytes,
+            });
+        }
+        if self.entries.len() >= self.limits.max_entries {
+            return Err(HlibError::LimitExceeded {
+                what: "entry count",
+                actual: self.entries.len() as u64 + 1,
+                limit: self.limits.max_entries as u64,
+            });
+        }
         if self.seen_paths.insert(rel_path.clone(), ()).is_some() {
             return Err(HlibError::DuplicatePath(rel_path));
         }
@@ -194,6 +249,12 @@ impl HlibBuilder {
         self.add_entry(path, ArtifactKind::Extra, None, data.to_vec())
     }
 
+    /// Jak `add_extra`, ale z pliku na dysku.
+    pub fn add_extra_file(&mut self, rel_name: &str, file: &Path) -> Result<&mut Self> {
+        let data = std::fs::read(file).map_err(|e| HlibError::Io { path: file.to_path_buf(), source: e })?;
+        self.add_extra(rel_name, &data)
+    }
+
     /// Finalizes the archive: builds `manifest.json`, computes
     /// `CHECKSUMS.sha256` over every artifact + the manifest itself,
     /// optionally signs it with `signing_key_hex` (32-byte Ed25519
@@ -201,7 +262,31 @@ impl HlibBuilder {
     /// everything, zstd-compresses the tar, and writes the result to
     /// `output_path`. Returns the `Manifest` that was embedded, so
     /// callers can print a summary without re-opening the file.
-    pub fn finish(mut self, output_path: &Path, signing_key_hex: Option<&str>) -> Result<Manifest> {
+    pub fn finish(self, output_path: &Path, signing_key_hex: Option<&str>) -> Result<Manifest> {
+        let (bytes, manifest) = self.finish_to_vec(signing_key_hex)?;
+        fsutil::write_atomic(output_path, &bytes, 0o644)?;
+        Ok(manifest)
+    }
+
+    /// Jak `finish`, ale zwraca gotowe bajty `.hlib` (bez dotykania dysku) —
+    /// przydatne do serwerów rejestru, testów i `HlibStore::install_bytes`.
+    pub fn finish_to_vec(mut self, signing_key_hex: Option<&str>) -> Result<(Vec<u8>, Manifest)> {
+        validate_name(&self.name)?;
+        Version::parse(&self.version)?;
+        for d in &self.dependencies {
+            validate_name(&d.name)?;
+            VersionReq::parse(&d.version_req)?;
+        }
+        let mut seen_exports = std::collections::BTreeSet::new();
+        for e in &self.exports {
+            if e.name.trim().is_empty() {
+                return Err(HlibError::ManifestMismatch("export with an empty name".into()));
+            }
+            if !seen_exports.insert((e.name.clone(), format!("{:?}", e.kind))) {
+                return Err(HlibError::DuplicatePath(format!("export `{}`", e.name)));
+            }
+        }
+
         // CHECKSUMS.sha256 covers every *artifact* entry added via the
         // `add_*` helpers — deliberately NOT `manifest.json` itself.
         // `manifest.json` already embeds each artifact's own sha256 (see
@@ -255,10 +340,10 @@ impl HlibBuilder {
             version: self.version.clone(),
             language: self.language,
             language_version: self.language_version.clone(),
-            abi_version: 1,
+            abi_version: self.abi_version,
             description: self.description.clone(),
             authors: self.authors.clone(),
-            created_at: now_rfc3339(),
+            created_at: self.created_at.clone().unwrap_or_else(now_rfc3339),
             dependencies: self.dependencies.clone(),
             artifacts: self.artifacts.clone(),
             exports: self.exports.clone(),
@@ -284,36 +369,31 @@ impl HlibBuilder {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(entry.data.len() as u64);
                 header.set_mode(0o644);
+                header.set_uid(0);
+                header.set_gid(0);
                 header.set_mtime(0);
                 header.set_cksum();
-                builder
-                    .append_data(&mut header, &entry.path, entry.data.as_slice())
-                    .map_err(|e| HlibError::Io {
-                        path: output_path.to_path_buf(),
-                        source: e,
-                    })?;
+                builder.append_data(&mut header, &entry.path, entry.data.as_slice())?;
             }
-            builder.finish().map_err(|e| HlibError::Io {
-                path: output_path.to_path_buf(),
-                source: e,
-            })?;
+            builder.finish()?;
+        }
+        if tar_bytes.len() as u64 > self.limits.max_unpacked_bytes {
+            return Err(HlibError::LimitExceeded {
+                what: "unpacked size",
+                actual: tar_bytes.len() as u64,
+                limit: self.limits.max_unpacked_bytes,
+            });
         }
 
-        let compressed = zstd::stream::encode_all(tar_bytes.as_slice(), 19).map_err(|e| HlibError::Io {
-            path: output_path.to_path_buf(),
-            source: e,
-        })?;
-
-        let mut file = std::fs::File::create(output_path).map_err(|e| HlibError::Io {
-            path: output_path.to_path_buf(),
-            source: e,
-        })?;
-        file.write_all(&compressed).map_err(|e| HlibError::Io {
-            path: output_path.to_path_buf(),
-            source: e,
-        })?;
-
-        Ok(final_manifest)
+        let compressed = zstd::stream::encode_all(tar_bytes.as_slice(), self.compression_level)?;
+        if compressed.len() as u64 > self.limits.max_archive_bytes {
+            return Err(HlibError::LimitExceeded {
+                what: "archive size",
+                actual: compressed.len() as u64,
+                limit: self.limits.max_archive_bytes,
+            });
+        }
+        Ok((compressed, final_manifest))
     }
 }
 
