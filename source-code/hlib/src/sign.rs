@@ -1,21 +1,15 @@
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
+use sha2::{Digest, Sha256};
 
 use crate::error::{HlibError, Result};
 
-/// Generates a fresh Ed25519 keypair for signing `.hlib` archives.
-/// Returns `(signing_key_hex, verifying_key_hex)` — both lowercase hex,
-/// 64 and 32 bytes respectively before encoding. The signing key is
-/// secret; only the verifying (public) key should ever be distributed
-/// or committed to a trust store.
+/// Generuje parę kluczy Ed25519: `(signing_key_hex, verifying_key_hex)`.
 pub fn generate_keypair() -> (String, String) {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
-    (
-        hex::encode(signing_key.to_bytes()),
-        hex::encode(verifying_key.to_bytes()),
-    )
+    (hex::encode(signing_key.to_bytes()), hex::encode(verifying_key.to_bytes()))
 }
 
 pub fn signing_key_from_hex(hex_str: &str) -> Result<SigningKey> {
@@ -34,18 +28,30 @@ pub fn verifying_key_from_hex(hex_str: &str) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(&arr).map_err(|e| HlibError::BadKey(e.to_string()))
 }
 
-/// Signs `message` (in practice, the raw bytes of `CHECKSUMS.sha256`)
-/// and returns the raw 64-byte Ed25519 signature.
+/// Klucz publiczny odpowiadający kluczowi prywatnemu (hex → hex).
+pub fn public_key_of(signing_key_hex: &str) -> Result<String> {
+    Ok(hex::encode(signing_key_from_hex(signing_key_hex)?.verifying_key().to_bytes()))
+}
+
+/// Odcisk klucza publicznego: `SHA256:<hex całego skrótu>` — do wyświetlania,
+/// pinowania i porównywania w logach.
+pub fn fingerprint(public_key_hex: &str) -> Result<String> {
+    let key = verifying_key_from_hex(public_key_hex)?;
+    Ok(format!("SHA256:{}", hex::encode(Sha256::digest(key.to_bytes()))))
+}
+
+/// Podpisuje `message` (w praktyce bajty `CHECKSUMS.sha256`).
 pub fn sign(signing_key: &SigningKey, message: &[u8]) -> [u8; 64] {
     let sig: Signature = signing_key.sign(message);
     sig.to_bytes()
 }
 
-/// Verifies a raw 64-byte Ed25519 signature over `message`.
+/// Weryfikuje 64-bajtowy podpis. Używa `verify_strict` (odrzuca podpisy
+/// o małym rzędzie / niekanoniczne — brak „malleability”).
 pub fn verify(verifying_key: &VerifyingKey, message: &[u8], signature_bytes: &[u8]) -> Result<bool> {
     let arr: [u8; 64] = signature_bytes
         .try_into()
         .map_err(|_| HlibError::BadKey("signature must be exactly 64 bytes".into()))?;
     let sig = Signature::from_bytes(&arr);
-    Ok(verifying_key.verify(message, &sig).is_ok())
+    Ok(verifying_key.verify_strict(message, &sig).is_ok())
 }
