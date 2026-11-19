@@ -8,6 +8,9 @@ use crate::error::{HlibError, Result};
 /// backwards-incompatible way.
 pub const HLIB_SPEC_VERSION: u32 = 1;
 
+/// Najwyższa generacja natywnego ABI (`.so`), jaką ten czytnik rozumie.
+pub const HLIB_ABI_VERSION: u32 = 1;
+
 /// Which HackerOS language toolchain produced (and can natively consume)
 /// this `.hlib`. A single `.hlib` always has exactly one *producer*
 /// language, but is meant to be readable by all three — that's the
@@ -20,6 +23,19 @@ pub enum Language {
     Hsharp,
     Hackerlang,
     Hackerscript,
+}
+
+impl std::fmt::Display for Language {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Language {
+    type Err = HlibError;
+    fn from_str(s: &str) -> Result<Self> {
+        Language::from_str(s)
+    }
 }
 
 impl Language {
@@ -246,6 +262,58 @@ impl Manifest {
             });
         }
         Ok(())
+    }
+
+    /// Odrzuca archiwa z natywnym ABI nowszym niż znane (przed `dlopen`).
+    pub fn check_abi(&self) -> Result<()> {
+        if self.abi_version > HLIB_ABI_VERSION {
+            return Err(HlibError::UnsupportedAbiVersion {
+                found: self.abi_version,
+                supported: HLIB_ABI_VERSION,
+            });
+        }
+        Ok(())
+    }
+
+    /// Pełna walidacja strukturalna manifestu (nazwa, wersja, ścieżki,
+    /// unikalność, format sum, zależności). Wywoływana przez `HlibArchive::open`.
+    pub fn validate(&self) -> Result<()> {
+        use crate::validate::*;
+        validate_name(&self.name)?;
+        crate::version::Version::parse(&self.version)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for a in &self.artifacts {
+            validate_entry_path(&a.path)?;
+            if !is_hex_sha256(&a.sha256) {
+                return Err(HlibError::ManifestMismatch(format!("artifact `{}` has a malformed sha256", a.path)));
+            }
+            if let Some(t) = &a.target {
+                validate_target(t)?;
+            }
+            if !seen.insert(a.path.as_str()) {
+                return Err(HlibError::DuplicatePath(a.path.clone()));
+            }
+        }
+        for d in &self.dependencies {
+            validate_name(&d.name)?;
+            crate::version::VersionReq::parse(&d.version_req)?;
+        }
+        Ok(())
+    }
+
+    pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        let m: Manifest = serde_json::from_slice(bytes)?;
+        m.check_supported()?;
+        m.validate()?;
+        Ok(m)
+    }
+
+    pub fn artifact(&self, path: &str) -> Option<&Artifact> {
+        self.artifacts.iter().find(|a| a.path == path)
+    }
+
+    pub fn version_parsed(&self) -> Result<crate::version::Version> {
+        crate::version::Version::parse(&self.version)
     }
 
     pub fn artifacts_of_kind(&self, kind: ArtifactKind) -> impl Iterator<Item = &Artifact> {
