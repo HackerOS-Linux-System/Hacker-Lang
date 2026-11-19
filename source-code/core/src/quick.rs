@@ -27,6 +27,23 @@ pub fn exec_quick(name: &str, args: &[StringPart], env: &mut Env) -> Result<Exec
         "contains"   => { let (t, p) = split_last(arg_str); let r = t.contains(p);    env.set_var("_last_bool", Value::Bool(r)); println!("{}", r); Ok(if r { ExecResult::ok() } else { ExecResult::err(1) }) }
         "startswith" => { let (t, p) = split_last(arg_str); let r = t.starts_with(p); env.set_var("_last_bool", Value::Bool(r)); println!("{}", r); Ok(if r { ExecResult::ok() } else { ExecResult::err(1) }) }
         "endswith"   => { let (t, p) = split_last(arg_str); let r = t.ends_with(p);   env.set_var("_last_bool", Value::Bool(r)); println!("{}", r); Ok(if r { ExecResult::ok() } else { ExecResult::err(1) }) }
+        // ::shellsafe <tekst> — CICHA walidacja: true tylko gdy tekst nie zawiera metaznaków
+        // powłoki (`"` `'` `$` `;` `|` `&` `` ` `` `\` `<` `>` `(` `)` `{` `}` `!` `*` `?`, znaków
+        // sterujących ani nowej linii). Nic nie drukuje; wynik w `_last_bool` i kodzie wyjścia.
+        // Używane przez main/hlib.hl, zanim wartość trafi do polecenia `>>`.
+        "shellsafe"  => {
+            let r = arg_str.chars().all(|c| !c.is_control() && !"\"'$;|&`\\<>(){}!*?\n".contains(c));
+            env.set_var("_last_bool", Value::Bool(r));
+            Ok(if r { ExecResult::ok() } else { ExecResult::err(1) })
+        }
+        // ::quotesafe <tekst> — jak ::shellsafe, ale dla wartości wstawianych WYŁĄCZNIE w
+        // podwójne cudzysłowy ("...") — dopuszcza `* < > ( ) { } ! ? ; | &`, zakazuje
+        // tylko `"` `$` `` ` `` `\` `'` oraz znaków sterujących/nowej linii.
+        "quotesafe"  => {
+            let r = arg_str.chars().all(|c| !c.is_control() && !"\"$`\\'".contains(c));
+            env.set_var("_last_bool", Value::Bool(r));
+            Ok(if r { ExecResult::ok() } else { ExecResult::err(1) })
+        }
         "split"      => { let (t, s) = split_last(arg_str); for p in t.split(s) { println!("{}", p); } Ok(ExecResult::ok()) }
         "lines"      => { for l in arg_str.lines() { println!("{}", l); } Ok(ExecResult::ok()) }
         "words"      => { for w in arg_str.split_whitespace() { println!("{}", w); } Ok(ExecResult::ok()) }
