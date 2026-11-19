@@ -10,7 +10,7 @@ const HL_KEYWORDS: &[&str] = &[
     "~>",
     // Quick functions
     "::", "::upper", "::lower", "::len", "::trim", "::rev", "::split",
-    "::lines", "::words", "::replace", "::contains", "::startswith", "::endswith",
+    "::lines", "::words", "::replace", "::contains", "::startswith", "::shellsafe", "::quotesafe", "::endswith",
     "::repeat", "::abs", "::ceil", "::floor", "::round", "::max", "::min", "::rand",
     "::env", "::date", "::time", "::pid", "::which", "::exists", "::isdir",
     "::isfile", "::basename", "::dirname", "::read", "::set", "::get", "::type",
